@@ -49,7 +49,7 @@ jobs:
             -I${{ env.ANDROID_NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include
         run: |
           cd KSUN/userspace/ksud
-          cargo ndk -t armeabi-v7a -p 26 build --release
+          cargo ndk -t armeabi-v7a -P 26 build --release
           test -x target/armv7-linux-androideabi/release/ksud
           file target/armv7-linux-androideabi/release/ksud | tee "$GITHUB_WORKSPACE/armv7-file.txt"
           sha256sum target/armv7-linux-androideabi/release/ksud | tee "$GITHUB_WORKSPACE/armv7-sha256.txt"
