@@ -11,6 +11,8 @@ KSUN_MANAGER_SHA256="773d99e256563d36f8543235c96274021c59cf65efed783170bbc7effdf
 SUSFS_REPO="https://github.com/ShirkNeko/susfs4ksu.git"
 SUSFS_BRANCH="gki-android13-5.15"
 SUSFS_SHA="65ea8683c794cc309c3b0c4e6b57c1d972ca9a76"
+WILD_PATCHES_REPO="https://github.com/WildKernels/kernel_patches.git"
+WILD_PATCHES_SHA="4285cd1755f62a20269aa80757ecb4631908ec77"
 EXPECTED_LOCALVERSION='CONFIG_LOCALVERSION="-Xinran_StarBai-Test"'
 
 ROOT="${GITHUB_WORKSPACE:-$PWD}/.ticwatch-preflight"
@@ -37,16 +39,17 @@ fetch_exact() {
   [ "$actual" = "$sha" ] || fail "SHA mismatch for $repo: $actual"
 }
 
-log "TicWatch Ultimate 5.15 / KernelSU Next v3.3.0 preflight"
+log "TicWatch Ultimate 5.15 / KernelSU Next v3.3.0 + SuSFS v2.2.0 preflight"
 log "BASE_SHA=$BASE_SHA"
 log "KSUN_TAG=$KSUN_TAG"
 log "KSUN_SHA=$KSUN_SHA"
 log "KSUN_MANAGER=$KSUN_MANAGER"
 log "KSUN_MANAGER_SHA256=$KSUN_MANAGER_SHA256"
 log "SUSFS_SHA=$SUSFS_SHA"
+log "WILD_PATCHES_SHA=$WILD_PATCHES_SHA"
 log ""
 
-log "[1/10] Fetch exact TicWatch source"
+log "[1/11] Fetch exact TicWatch source"
 fetch_exact "$BASE_REPO" "$BASE_SHA" "$ROOT/common" >>"$REPORT" 2>&1
 pass "exact TicWatch base source"
 
@@ -54,27 +57,108 @@ CFG="$ROOT/common/arch/arm64/configs/gki_defconfig"
 grep -Fxq "$EXPECTED_LOCALVERSION" "$CFG" || fail "expected TicWatch LOCALVERSION not found"
 pass "LOCALVERSION matches installed Xinran_StarBai-Test baseline"
 
-log "[2/10] Fetch exact KernelSU Next v3.3.0 source"
+log "[2/11] Fetch exact KernelSU Next v3.3.0 source"
 fetch_exact "$KSUN_REPO" "$KSUN_SHA" "$ROOT/common/KernelSU-Next" >>"$REPORT" 2>&1
-actual_tag_sha="$(git -C "$ROOT/common/KernelSU-Next" rev-parse HEAD)"
-[ "$actual_tag_sha" = "$KSUN_SHA" ] || fail "KernelSU Next v3.3.0 SHA mismatch"
 pass "KernelSU Next $KSUN_TAG pinned at $KSUN_SHA"
 
-log "[3/10] Fetch SuSFS revision matched to KSU Next 3.3.0 era"
+log "[3/11] Fetch exact SuSFS v2.2-era Android 13 / 5.15 source"
 fetch_exact "$SUSFS_REPO" "$SUSFS_SHA" "$ROOT/susfs4ksu" >>"$REPORT" 2>&1
-pass "SuSFS pinned ($SUSFS_BRANCH @ $SUSFS_SHA)"
+susver="$(grep '#define SUSFS_VERSION' "$ROOT/susfs4ksu/kernel_patches/include/linux/susfs.h" | awk -F'"' '{print $2}')"
+[ "$susver" = "v2.2.0" ] || fail "expected SuSFS v2.2.0, got $susver"
+pass "SuSFS $susver pinned ($SUSFS_BRANCH @ $SUSFS_SHA)"
 
-log "[4/10] Verify and apply SuSFS KernelSU-side patch to KSU Next v3.3.0"
+log "[4/11] Fetch exact KernelSU Next / SuSFS v2.2 compatibility patchset"
+fetch_exact "$WILD_PATCHES_REPO" "$WILD_PATCHES_SHA" "$ROOT/kernel_patches" >>"$REPORT" 2>&1
+FIXDIR="$ROOT/kernel_patches/next/susfs_fix_patches/v2.2.0"
+for p in fix_Kbuild.patch fix_init.c.patch fix_kernel_umount.c.patch fix_setuid_hook.c.patch fix_sucompat.c.patch fix_supercall.c.patch overwrite_hook_mode.patch ksu_toolkit.patch; do
+  [ -f "$FIXDIR/$p" ] || fail "missing pinned compatibility patch: $p"
+done
+pass "KSUN v3.3.0 compatibility layer pinned at $WILD_PATCHES_SHA"
+
+log "[5/11] Integrate SuSFS into KernelSU Next v3.3.0 with compatibility layer"
+KSUN="$ROOT/common/KernelSU-Next"
 KSU_PATCH="$ROOT/susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
-[ -f "$KSU_PATCH" ] || fail "SuSFS KernelSU-side patch missing"
-if ! git -C "$ROOT/common/KernelSU-Next" apply --check "$KSU_PATCH" >>"$REPORT" 2>&1; then
-  fail "SuSFS KernelSU-side patch is not cleanly compatible with KernelSU Next v3.3.0"
-fi
-git -C "$ROOT/common/KernelSU-Next" apply "$KSU_PATCH" >>"$REPORT" 2>&1
-grep -qF 'config KSU_SUSFS' "$ROOT/common/KernelSU-Next/kernel/Kconfig" || fail "KSU_SUSFS Kconfig missing after KernelSU-side patch"
-pass "SuSFS KernelSU-side patch applies cleanly to KSU Next v3.3.0"
+[ -f "$KSU_PATCH" ] || fail "upstream SuSFS KernelSU patch missing"
 
-log "[5/10] Link patched KernelSU Next into TicWatch kernel"
+cd "$KSUN"
+filtered_susfs_patch="$(mktemp)"
+awk '
+  /^diff --git a\/kernel\/(Kbuild|Kconfig|core\/init\.c|feature\/kernel_umount\.c|feature\/sucompat\.c|hook\/setuid_hook\.c|supercall\/supercall\.c) b\// { skip = 1; next }
+  /^diff --git / { skip = 0 }
+  !skip { print }
+' "$KSU_PATCH" > "$filtered_susfs_patch"
+patch --dry-run -p1 < "$filtered_susfs_patch" >>"$REPORT" 2>&1 || fail "filtered upstream SuSFS patch does not match KSU Next v3.3.0"
+patch -p1 --forward < "$filtered_susfs_patch" >>"$REPORT" 2>&1
+rm -f "$filtered_susfs_patch"
+
+# SuSFS v2.2.0 targets an older KSU Kconfig layout; insert only its SUSFS menu block.
+if ! grep -q '^config KSU_SUSFS' ./kernel/Kconfig; then
+  tail -n 1 ./kernel/Kconfig | grep -qx 'endmenu' || fail "KSU Next Kconfig has unexpected ending"
+  susfs_kconfig_block="$(awk '
+    /^\+menu "KernelSU - SUSFS"/ { active = 1 }
+    active {
+      print substr($0, 2)
+      if ($0 ~ /^\+menu /) depth++
+      else if ($0 ~ /^\+endmenu$/) {
+        depth--
+        if (depth == 0) exit
+      }
+    }
+  ' "$KSU_PATCH")"
+  [ -n "$susfs_kconfig_block" ] || fail "could not extract SuSFS Kconfig menu"
+  tmp_kconfig="$(mktemp)"
+  sed '$d' ./kernel/Kconfig > "$tmp_kconfig"
+  printf '%s\n' "$susfs_kconfig_block" >> "$tmp_kconfig"
+  printf '%s\n' 'endmenu' >> "$tmp_kconfig"
+  mv "$tmp_kconfig" ./kernel/Kconfig
+fi
+
+# Restore the exact preimage expected by the v2.2.0 KSUN compatibility patches.
+init_source=./kernel/core/init.c
+[ "$(grep -Fxc '#if defined(__x86_64__)' "$init_source")" -eq 2 ] || fail "unexpected KSUN v3.3.0 x86 guard layout"
+[ "$(grep -Fxc '    // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set ' "$init_source")" -eq 1 ] || fail "unexpected KSUN v3.3.0 init comment layout"
+sed -i \
+  -e 's|^#if defined(__x86_64__)$|#if defined(__x86_64__) \&\& !defined(CONFIG_KSU_X86_PATCH_SYSCALL_DISPATCHER)|' \
+  -e 's|^    // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set $|    // If the kernel has the hardening patch, X86_FEATURE_INDIRECT_SAFE must be set|' \
+  "$init_source"
+
+for compatibility_patch in fix_Kbuild.patch fix_init.c.patch fix_kernel_umount.c.patch fix_setuid_hook.c.patch fix_sucompat.c.patch fix_supercall.c.patch; do
+  patch --dry-run -p1 < "$FIXDIR/$compatibility_patch" >>"$REPORT" 2>&1 || fail "$compatibility_patch does not match KSUN v3.3.0 integration state"
+  patch -p1 --forward < "$FIXDIR/$compatibility_patch" >>"$REPORT" 2>&1
+done
+
+# Dependencies deliberately skipped with the obsolete upstream chunks.
+sucompat_source=./kernel/feature/sucompat.c
+setuid_hook_source=./kernel/hook/setuid_hook.c
+[ "$(grep -Fxc '#include <linux/ptrace.h>' "$sucompat_source")" -eq 1 ] || fail "unexpected sucompat include layout"
+[ "$(grep -Fxc '#include <linux/uidgid.h>' "$setuid_hook_source")" -eq 1 ] || fail "unexpected setuid include layout"
+[ "$(grep -Fxc 'static char __user *ksud_user_path(void)' "$sucompat_source")" -eq 1 ] || fail "unexpected ksud_user_path layout"
+sed -i '/^#include <linux\/ptrace.h>$/a #include <linux/fs_struct.h>\n#include <linux/susfs_def.h>\n#include "selinux/selinux.h"' "$sucompat_source"
+sed -i '/^#include <linux\/uidgid.h>$/a #include <linux/susfs_def.h>\n#include "selinux/selinux.h"' "$setuid_hook_source"
+tmp_sucompat="$(mktemp)"
+awk '
+  /^static char __user \*ksud_user_path\(void\)$/ {
+    print "static char __user *sh_user_path(void)"
+    print "{"
+    print "\tstatic const char sh_path[] = \"/system/bin/sh\";"
+    print ""
+    print "\treturn userspace_stack_buffer(sh_path, sizeof(sh_path));"
+    print "}"
+    print ""
+  }
+  { print }
+' "$sucompat_source" > "$tmp_sucompat"
+mv "$tmp_sucompat" "$sucompat_source"
+
+for compatibility_patch in overwrite_hook_mode.patch ksu_toolkit.patch; do
+  patch --dry-run -p1 < "$FIXDIR/$compatibility_patch" >>"$REPORT" 2>&1 || fail "$compatibility_patch does not match KSUN v3.3.0 integration state"
+  patch -p1 --forward < "$FIXDIR/$compatibility_patch" >>"$REPORT" 2>&1
+done
+
+grep -q '^config KSU_SUSFS' ./kernel/Kconfig || fail "KSU_SUSFS missing after KSUN compatibility integration"
+pass "KSU Next v3.3.0 + SuSFS v2.2.0 kernel-side framework integrated without forcing failed hunks"
+
+log "[6/11] Link patched KernelSU Next into TicWatch kernel"
 cd "$ROOT/common"
 ln -sfn "../KernelSU-Next/kernel" drivers/kernelsu
 if ! grep -qF 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile; then
@@ -83,107 +167,96 @@ fi
 if ! grep -qF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig; then
   sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 fi
-[ -f drivers/kernelsu/Kconfig ] || fail "KernelSU Next symlink is invalid"
+[ -f drivers/kernelsu/Kconfig ] || fail "KernelSU Next symlink invalid"
 pass "patched KernelSU Next linked into TicWatch source"
 
-log "[6/10] Normalize known TicWatch-local collisions before kernel-side SuSFS patch"
+log "[7/11] Normalize known TicWatch-local collisions before kernel-side SuSFS patch"
 python3 - <<'PY'
 from pathlib import Path
-
-# Preserve the Android vendor trace hook. It collides only with patch context.
 p = Path("fs/proc/task_mmu.c")
 s = p.read_text()
 old = "#include <linux/pkeys.h>\n#include <trace/hooks/mm.h>\n\n#include <asm/elf.h>"
 new = "#include <linux/pkeys.h>\n\n#include <asm/elf.h>"
 if s.count(old) != 1:
-    raise SystemExit("unexpected task_mmu trace-hook context")
+    raise SystemExit("unexpected task_mmu vendor-hook context")
 p.write_text(s.replace(old, new, 1))
 
-# The TicWatch base contains the previous ReSukiSU manual reboot hook.
-# Remove only that exact guarded code temporarily so SuSFS can patch the canonical location.
 p = Path("kernel/reboot.c")
 s = p.read_text()
 decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
 call = "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n"
 if s.count(decl) != 1 or s.count(call) != 1:
-    raise SystemExit("unexpected reboot manual-hook context")
-s = s.replace(decl, "", 1).replace(call, "", 1)
-p.write_text(s)
+    raise SystemExit("unexpected legacy manual reboot-hook context")
+p.write_text(s.replace(decl, "", 1).replace(call, "", 1))
 PY
-pass "known local collisions normalized"
+pass "two known TicWatch-local patch-context collisions normalized"
 
-log "[7/10] Verify and apply Android 13 / Linux 5.15 kernel-side SuSFS patch"
+log "[8/11] Apply canonical Android 13 / Linux 5.15 SuSFS kernel patch"
 PATCH="$ROOT/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-[ -f "$PATCH" ] || fail "SuSFS 5.15 kernel patch missing"
-if ! git apply --check "$PATCH" >>"$REPORT" 2>&1; then
-  fail "SuSFS kernel patch has unaccounted conflicts with the exact TicWatch source"
-fi
+[ -f "$PATCH" ] || fail "SuSFS Android13/5.15 kernel patch missing"
+git apply --check "$PATCH" >>"$REPORT" 2>&1 || fail "SuSFS kernel patch has unaccounted TicWatch conflicts"
 git apply "$PATCH" >>"$REPORT" 2>&1
 cp -a "$ROOT/susfs4ksu/kernel_patches/fs/." fs/
 cp -a "$ROOT/susfs4ksu/kernel_patches/include/linux/." include/linux/
-[ -f fs/susfs.c ] || fail "fs/susfs.c missing after integration"
-[ -f include/linux/susfs.h ] || fail "include/linux/susfs.h missing after integration"
+[ -f fs/susfs.c ] || fail "fs/susfs.c missing"
+[ -f include/linux/susfs.h ] || fail "include/linux/susfs.h missing"
 
 python3 - <<'PY'
 from pathlib import Path
-
-# Restore vendor Android trace hook alongside SuSFS includes.
 p = Path("fs/proc/task_mmu.c")
 s = p.read_text()
 if "#include <trace/hooks/mm.h>" in s:
-    raise SystemExit("task_mmu trace hook unexpectedly already present")
+    raise SystemExit("vendor mm trace hook unexpectedly already present")
 anchor = "\n#include <asm/elf.h>"
 if s.count(anchor) != 1:
-    raise SystemExit("cannot restore task_mmu trace hook safely")
-s = s.replace(anchor, "\n#include <trace/hooks/mm.h>\n\n#include <asm/elf.h>", 1)
-p.write_text(s)
+    raise SystemExit("cannot restore vendor mm trace hook")
+p.write_text(s.replace(anchor, "\n#include <trace/hooks/mm.h>\n\n#include <asm/elf.h>", 1))
 
-# Keep the old manual reboot hook only as inert source fallback.
-# CONFIG_KSU_MANUAL_HOOK is explicitly disabled for the KSU Next daily build.
+# Retain previous manual-hook source only as a disabled fallback path.
 p = Path("kernel/reboot.c")
 s = p.read_text()
 decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
 mutex_anchor = "DEFINE_MUTEX(system_transition_mutex);\n\n"
 if s.count(mutex_anchor) != 1:
-    raise SystemExit("cannot restore reboot manual declaration safely")
+    raise SystemExit("cannot restore legacy manual reboot declaration")
 s = s.replace(mutex_anchor, mutex_anchor + decl, 1)
 call = "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n"
 flow_anchor = "\n\t/* We only trust the superuser with rebooting the system. */"
 if s.count(flow_anchor) != 1:
-    raise SystemExit("cannot restore reboot manual call safely")
-s = s.replace(flow_anchor, "\n" + call + flow_anchor, 1)
-p.write_text(s)
+    raise SystemExit("cannot restore legacy manual reboot call")
+p.write_text(s.replace(flow_anchor, "\n" + call + flow_anchor, 1))
 PY
 
-grep -qF '#include <trace/hooks/mm.h>' fs/proc/task_mmu.c || fail "vendor trace hook not restored"
-pass "SuSFS kernel side installed while preserving TicWatch vendor hook"
+grep -qF '#include <trace/hooks/mm.h>' fs/proc/task_mmu.c || fail "TicWatch vendor trace hook not restored"
+pass "canonical SuSFS kernel patch applied; vendor trace hook preserved"
 
-log "[8/10] Select KSU Next + SuSFS daily configuration"
+log "[9/11] Select KSU Next v3.3.0 + SuSFS daily configuration"
 scripts/config --file "$CFG" -e KSU
 scripts/config --file "$CFG" -d KSU_DEBUG
 scripts/config --file "$CFG" -d KSU_DISABLE_MANAGER
 scripts/config --file "$CFG" -d KSU_DISABLE_POLICY
 scripts/config --file "$CFG" -e KSU_SUSFS
 scripts/config --file "$CFG" -d KSU_SUSFS_ENABLE_LOG
-# Remove stale ReSukiSU-only build selectors from the previous TicWatch defconfig.
+# Disable stale ReSukiSU-only selectors still present in the TicWatch base defconfig.
 scripts/config --file "$CFG" -d KSU_MANUAL_HOOK
 scripts/config --file "$CFG" -d KSU_TRACEPOINT_HOOK
-pass "KernelSU Next v3.3.0 + SuSFS configuration requested"
+pass "daily config requested"
 
-log "[9/10] Resolve Kconfig"
+log "[10/11] Resolve Kconfig"
 make LLVM=1 LLVM_IAS=1 ARCH=arm64 O=out gki_defconfig >>"$REPORT" 2>&1
 OUTCFG="$ROOT/common/out/.config"
 grep -Fxq 'CONFIG_KSU=y' "$OUTCFG" || fail "CONFIG_KSU did not resolve to y"
 grep -Fxq 'CONFIG_KSU_SUSFS=y' "$OUTCFG" || fail "CONFIG_KSU_SUSFS did not resolve to y"
 grep -Fxq '# CONFIG_KSU_DEBUG is not set' "$OUTCFG" || fail "KSU debug unexpectedly enabled"
 grep -Fxq '# CONFIG_KSU_DISABLE_MANAGER is not set' "$OUTCFG" || fail "manager integration unexpectedly disabled"
+grep -Fxq '# CONFIG_KSU_DISABLE_POLICY is not set' "$OUTCFG" || fail "policy support unexpectedly disabled"
 if grep -Fxq 'CONFIG_KSU_MANUAL_HOOK=y' "$OUTCFG"; then
   fail "stale ReSukiSU Manual Hook remained enabled"
 fi
-grep -Fxq "$EXPECTED_LOCALVERSION" "$OUTCFG" || fail "LOCALVERSION changed after Kconfig resolution"
-pass "KSU Next/SuSFS config resolved correctly"
+grep -Fxq "$EXPECTED_LOCALVERSION" "$OUTCFG" || fail "LOCALVERSION changed"
+pass "KSU Next/SuSFS config resolved correctly with original TicWatch LOCALVERSION"
 
-log "[10/10] Prepare kernel tree with LLVM"
+log "[11/11] Prepare kernel tree with LLVM"
 make LLVM=1 LLVM_IAS=1 ARCH=arm64 O=out prepare >>"$REPORT" 2>&1
 pass "kernel prepare completed"
 
