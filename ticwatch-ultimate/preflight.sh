@@ -52,7 +52,7 @@ log "[2/8] Integrate exact ReSukiSU revision"
 cd "$ROOT/common"
 fetch_exact "$RESUKI_REPO" "$RESUKI_SHA" "$ROOT/common/KernelSU" >>"$REPORT" 2>&1
 
-ln -sfn "../../KernelSU/kernel" drivers/kernelsu
+ln -sfn "../KernelSU/kernel" drivers/kernelsu
 if ! grep -qF 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile; then
   printf '\nobj-$(CONFIG_KSU) += kernelsu/\n' >> drivers/Makefile
 fi
