@@ -1,0 +1,200 @@
+name: TicWatch Ultimate 5.15 - Full Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-ultimate-ci
+    paths:
+      - 'ticwatch-ultimate/preflight.sh'
+      - '.github/workflows/ticwatch-ultimate-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ticwatch-ultimate-full-build
+  cancel-in-progress: true
+
+env:
+  LLVM_VERSION: '20.1.0'
+  LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
+  ANYKERNEL_REPO: 'https://github.com/Winkmoon/AnyKernel3.git'
+  ANYKERNEL_SHA: 'ad62484a9cd193ba24991e617bae66e25c0d0228'
+  EXPECTED_UTS_PREFIX: '5.15.202-Xinran_StarBai-Test'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-ultimate-ci
+
+      - name: Free build space
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          df -h /
+
+      - name: Install pinned build dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc python3 python-is-python3 \
+            libssl-dev libelf-dev dwarves make cmake zip curl wget \
+            gnupg gawk gcc-multilib g++-multilib ccache rsync \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf \
+            xz-utils file
+
+      - name: Install exact LLVM 20.1.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          wget -q --show-progress \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
+          tar -xJf "$LLVM_ARCHIVE"
+          mv "LLVM-${LLVM_VERSION}-Linux-X64" "$GITHUB_WORKSPACE/aosp-clang"
+          rm -f "$LLVM_ARCHIVE"
+          echo "AOSP_CLANG_PATH=$GITHUB_WORKSPACE/aosp-clang" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/aosp-clang/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/aosp-clang/bin/clang" --version | tee llvm-version.txt
+          "$GITHUB_WORKSPACE/aosp-clang/bin/clang" --version | head -n1 | grep -Fq '20.1.0'
+
+      - name: Reproduce pinned KSU Next 3.3.0 + SuSFS integration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash ticwatch-ultimate/preflight.sh
+          grep -Fqx 'RESULT=PASS' ticwatch-ultimate-results/preflight.txt
+
+      - name: Reset output and preserve installed kernel release semantics
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          rm -rf out
+          # Winkmoon's known-good build strips only the SCM -dirty marker.
+          # Preserve the same localversion and '+' behavior rather than inventing an Ultimate vermagic.
+          for f in scripts/setlocalversion; do
+            sed -i 's/ -dirty//g' "$f"
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
+          done
+
+      - name: Resolve final config with exact toolchain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          export ARCH=arm64
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH"
+          export LLVM=1
+          export LLVM_IAS=1
+          export KBUILD_BUILD_VERSION=0
+          export KBUILD_BUILD_USER='XinRan♡'
+          export KBUILD_BUILD_HOST='Bai'
+          make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang \
+            BUILD_CONFIG=build.config.gki.aarch64 O=out DEPMOD=depmod gki_defconfig
+          scripts/config --file out/.config \
+            -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
+          make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang O=out olddefconfig
+          grep -Fqx 'CONFIG_KSU=y' out/.config
+          grep -Fqx 'CONFIG_KSU_SUSFS=y' out/.config
+          grep -Fqx '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set' out/.config
+          grep -Fqx 'CONFIG_LOCALVERSION="-Xinran_StarBai-Test"' out/.config
+          cp out/.config "$GITHUB_WORKSPACE/final.config"
+
+      - name: Compile full kernel fail-closed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          export ARCH=arm64
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH"
+          export LLVM=1
+          export LLVM_IAS=1
+          export KCFLAGS='-Wno-error -Wno-deprecated-declarations'
+          export KBUILD_BUILD_VERSION=0
+          export KBUILD_BUILD_USER='XinRan♡'
+          export KBUILD_BUILD_HOST='Bai'
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct 3929c55fbc7559af6df290d2c0f66dc551af161a)"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 2>&1 | tee "$GITHUB_WORKSPACE/kernel-build.log"
+          test -s out/arch/arm64/boot/Image
+          cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"
+          make -s O=out ARCH=arm64 kernelrelease | tee "$GITHUB_WORKSPACE/kernelrelease.txt"
+          release="$(cat "$GITHUB_WORKSPACE/kernelrelease.txt")"
+          case "$release" in
+            ${EXPECTED_UTS_PREFIX}*) ;;
+            *) echo "Unexpected kernel release: $release" >&2; exit 1 ;;
+          esac
+
+      - name: Package exact Winkmoon AnyKernel3
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git init -q AnyKernel3
+          git -C AnyKernel3 remote add origin "$ANYKERNEL_REPO"
+          git -C AnyKernel3 fetch -q --depth=1 origin "$ANYKERNEL_SHA"
+          git -C AnyKernel3 checkout -q --detach FETCH_HEAD
+          test "$(git -C AnyKernel3 rev-parse HEAD)" = "$ANYKERNEL_SHA"
+          rm -rf AnyKernel3/.git
+          cp Image AnyKernel3/Image
+          (
+            cd AnyKernel3
+            zip -qr9 "$GITHUB_WORKSPACE/TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS.zip" .
+          )
+          test -s TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS.zip
+
+      - name: Generate provenance and hashes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo 'TicWatch Ultimate 5.15 build provenance'
+            echo 'BASE_SHA=3929c55fbc7559af6df290d2c0f66dc551af161a'
+            echo 'KSUN_VERSION=v3.3.0'
+            echo 'KSUN_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771'
+            echo 'MANAGER=KernelSU_Next_v3.3.0-spoofed_33214-release.apk'
+            echo 'MANAGER_SHA256=773d99e256563d36f8543235c96274021c59cf65efed783170bbc7effdf24ee3'
+            echo 'SUSFS_VERSION=v2.2.0'
+            echo 'SUSFS_SHA=65ea8683c794cc309c3b0c4e6b57c1d972ca9a76'
+            echo 'WILD_PATCHES_SHA=4285cd1755f62a20269aa80757ecb4631908ec77'
+            echo "ANYKERNEL_SHA=$ANYKERNEL_SHA"
+            echo "KERNEL_RELEASE=$(cat kernelrelease.txt)"
+            echo "LLVM=$(head -n1 llvm-version.txt)"
+          } > provenance.txt
+          sha256sum \
+            Image \
+            TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS.zip \
+            final.config \
+            provenance.txt > SHA256SUMS
+          cat provenance.txt
+          cat SHA256SUMS
+
+      - name: Upload verified kernel bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS
+          path: |
+            Image
+            TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS.zip
+            final.config
+            kernelrelease.txt
+            llvm-version.txt
+            provenance.txt
+            SHA256SUMS
+            kernel-build.log
+            ticwatch-ultimate-results/preflight.txt
+          if-no-files-found: error
+          retention-days: 90
