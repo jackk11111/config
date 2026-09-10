@@ -23,29 +23,34 @@ pass() { log "PASS: $*"; }
 
 trap 'rc=$?; if [ "$rc" -ne 0 ]; then printf "\nRESULT=FAIL rc=%s\n" "$rc" | tee -a "$REPORT"; fi' EXIT
 
+fetch_exact() {
+  local repo="$1" sha="$2" dst="$3"
+  git init -q "$dst"
+  git -C "$dst" remote add origin "$repo"
+  git -C "$dst" fetch -q --depth=1 origin "$sha"
+  git -C "$dst" checkout -q --detach FETCH_HEAD
+  local actual
+  actual="$(git -C "$dst" rev-parse HEAD)"
+  [ "$actual" = "$sha" ] || fail "SHA mismatch for $repo: $actual"
+}
+
 log "TicWatch Ultimate 5.15 integration preflight"
 log "BASE_SHA=$BASE_SHA"
 log "RESUKI_SHA=$RESUKI_SHA"
 log "SUSFS_SHA=$SUSFS_SHA"
 log ""
 
-log "[1/7] Fetch exact TicWatch source"
-git clone --filter=blob:none --no-checkout "$BASE_REPO" "$ROOT/common" >>"$REPORT" 2>&1
-git -C "$ROOT/common" checkout --detach "$BASE_SHA" >>"$REPORT" 2>&1
-actual="$(git -C "$ROOT/common" rev-parse HEAD)"
-[ "$actual" = "$BASE_SHA" ] || fail "base SHA mismatch: $actual"
+log "[1/8] Fetch exact TicWatch source"
+fetch_exact "$BASE_REPO" "$BASE_SHA" "$ROOT/common" >>"$REPORT" 2>&1
 pass "exact base source"
 
 CFG="$ROOT/common/arch/arm64/configs/gki_defconfig"
 grep -Fxq "$EXPECTED_LOCALVERSION" "$CFG" || fail "expected TicWatch LOCALVERSION not found"
 pass "LOCALVERSION matches installed Xinran_StarBai-Test baseline"
 
-log "[2/7] Integrate exact ReSukiSU revision"
+log "[2/8] Integrate exact ReSukiSU revision"
 cd "$ROOT/common"
-git clone --filter=blob:none "$RESUKI_REPO" KernelSU >>"$REPORT" 2>&1
-git -C KernelSU checkout --detach "$RESUKI_SHA" >>"$REPORT" 2>&1
-actual="$(git -C KernelSU rev-parse HEAD)"
-[ "$actual" = "$RESUKI_SHA" ] || fail "ReSukiSU SHA mismatch: $actual"
+fetch_exact "$RESUKI_REPO" "$RESUKI_SHA" "$ROOT/common/KernelSU" >>"$REPORT" 2>&1
 
 ln -sfn "../../KernelSU/kernel" drivers/kernelsu
 if ! grep -qF 'obj-$(CONFIG_KSU) += kernelsu/' drivers/Makefile; then
@@ -56,39 +61,101 @@ if ! grep -qF 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig; then
 fi
 pass "ReSukiSU pinned and linked"
 
-log "[3/7] Fetch exact SuSFS Android 13 / Linux 5.15 revision"
-git clone --filter=blob:none --branch "$SUSFS_BRANCH" --single-branch "$SUSFS_REPO" "$ROOT/susfs4ksu" >>"$REPORT" 2>&1
-git -C "$ROOT/susfs4ksu" checkout --detach "$SUSFS_SHA" >>"$REPORT" 2>&1
-actual="$(git -C "$ROOT/susfs4ksu" rev-parse HEAD)"
-[ "$actual" = "$SUSFS_SHA" ] || fail "SuSFS SHA mismatch: $actual"
-pass "SuSFS pinned"
+log "[3/8] Fetch exact SuSFS Android 13 / Linux 5.15 revision"
+fetch_exact "$SUSFS_REPO" "$SUSFS_SHA" "$ROOT/susfs4ksu" >>"$REPORT" 2>&1
+branch_contains="$(git -C "$ROOT/susfs4ksu" branch -r --contains "$SUSFS_SHA" 2>/dev/null || true)"
+# The SHA is authoritative; branch name is documented for provenance only.
+pass "SuSFS pinned ($SUSFS_BRANCH @ $SUSFS_SHA)"
 
-log "[4/7] Strict kernel-side SuSFS patch compatibility check"
+log "[4/8] Normalize two known TicWatch-local hook collisions"
+python3 - <<'PY'
+from pathlib import Path
+
+# TicWatch carries an Android trace hook between pkeys.h and asm/elf.h.
+# Remove it only temporarily so the canonical SuSFS hunk can be verified/applied;
+# it is restored immediately afterwards.
+p = Path("fs/proc/task_mmu.c")
+s = p.read_text()
+old = "#include <linux/pkeys.h>\n#include <trace/hooks/mm.h>\n\n#include <asm/elf.h>"
+new = "#include <linux/pkeys.h>\n\n#include <asm/elf.h>"
+if s.count(old) != 1:
+    raise SystemExit("unexpected task_mmu trace-hook context")
+p.write_text(s.replace(old, new, 1))
+
+# The working TicWatch tree already carries ReSukiSU's legacy manual reboot hook.
+# SuSFS 2.x patches the same location. Temporarily remove only those exact guarded
+# blocks, then restore them after patching so manual-hook remains an alternate build mode.
+p = Path("kernel/reboot.c")
+s = p.read_text()
+decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
+call = "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n"
+if s.count(decl) != 1 or s.count(call) != 1:
+    raise SystemExit("unexpected reboot manual-hook context")
+s = s.replace(decl, "", 1).replace(call, "", 1)
+p.write_text(s)
+PY
+pass "known local collisions normalized without deleting their functionality"
+
+log "[5/8] Strict kernel-side SuSFS patch compatibility check"
 PATCH="$ROOT/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
 [ -f "$PATCH" ] || fail "SuSFS 5.15 kernel patch missing"
 if ! git apply --check "$PATCH" >>"$REPORT" 2>&1; then
-  fail "SuSFS kernel patch does not apply cleanly to exact TicWatch source"
+  fail "SuSFS kernel patch still has unaccounted conflicts after exact local normalization"
 fi
-pass "SuSFS kernel patch applies cleanly"
+pass "canonical SuSFS kernel patch applies after two explicit TicWatch adaptations"
 
 git apply "$PATCH" >>"$REPORT" 2>&1
 cp -a "$ROOT/susfs4ksu/kernel_patches/fs/." fs/
 cp -a "$ROOT/susfs4ksu/kernel_patches/include/linux/." include/linux/
 [ -f fs/susfs.c ] || fail "fs/susfs.c missing after integration"
 [ -f include/linux/susfs.h ] || fail "include/linux/susfs.h missing after integration"
-pass "SuSFS kernel files installed"
 
-log "[5/7] Select ReSukiSU SuSFS inline hook, not Manual Hook"
+python3 - <<'PY'
+from pathlib import Path
+
+# Restore the TicWatch Android trace hook, now adjacent to (not replacing) SuSFS includes.
+p = Path("fs/proc/task_mmu.c")
+s = p.read_text()
+if "#include <trace/hooks/mm.h>" in s:
+    raise SystemExit("task_mmu trace hook unexpectedly already present")
+anchor = "\n#include <asm/elf.h>"
+if s.count(anchor) != 1:
+    raise SystemExit("cannot restore task_mmu trace hook safely")
+s = s.replace(anchor, "\n#include <trace/hooks/mm.h>\n\n#include <asm/elf.h>", 1)
+p.write_text(s)
+
+# Restore the legacy manual reboot hook behind CONFIG_KSU_MANUAL_HOOK.
+# It is compiled out in the SuSFS daily build, but retained for a controlled fallback build.
+p = Path("kernel/reboot.c")
+s = p.read_text()
+decl = "#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n"
+mutex_anchor = "DEFINE_MUTEX(system_transition_mutex);\n\n"
+if s.count(mutex_anchor) != 1:
+    raise SystemExit("cannot restore reboot manual declaration safely")
+s = s.replace(mutex_anchor, mutex_anchor + decl, 1)
+call = "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n"
+flow_anchor = "\n\t/* We only trust the superuser with rebooting the system. */"
+if s.count(flow_anchor) != 1:
+    raise SystemExit("cannot restore reboot manual call safely")
+s = s.replace(flow_anchor, "\n" + call + flow_anchor, 1)
+p.write_text(s)
+PY
+
+grep -qF '#include <trace/hooks/mm.h>' fs/proc/task_mmu.c || fail "vendor trace hook not restored"
+grep -qF '#ifdef CONFIG_KSU_MANUAL_HOOK' kernel/reboot.c || fail "manual reboot fallback not restored"
+pass "SuSFS installed; TicWatch vendor trace hook and manual fallback preserved"
+
+log "[6/8] Select ReSukiSU SuSFS inline hook, not Manual Hook"
 scripts/config --file "$CFG" -e KSU
 scripts/config --file "$CFG" -d KSU_TRACEPOINT_HOOK
 scripts/config --file "$CFG" -d KSU_MANUAL_HOOK
 scripts/config --file "$CFG" -e KSU_SUSFS
-# Keep capability but disable permanent SuSFS kernel logging for a daily-use watch.
+# Daily-use policy: no permanent SuSFS kernel log.
 scripts/config --file "$CFG" -d KSU_SUSFS_ENABLE_LOG
 pass "requested KSU/SuSFS config written"
 
-log "[6/7] Resolve Kconfig"
-make ARCH=arm64 O=out gki_defconfig >>"$REPORT" 2>&1
+log "[7/8] Resolve Kconfig"
+make LLVM=1 LLVM_IAS=1 ARCH=arm64 O=out gki_defconfig >>"$REPORT" 2>&1
 OUTCFG="$ROOT/common/out/.config"
 grep -Fxq 'CONFIG_KSU=y' "$OUTCFG" || fail "CONFIG_KSU did not resolve to y"
 grep -Fxq 'CONFIG_KSU_SUSFS=y' "$OUTCFG" || fail "CONFIG_KSU_SUSFS did not resolve to y"
@@ -101,8 +168,8 @@ fi
 grep -Fxq "$EXPECTED_LOCALVERSION" "$OUTCFG" || fail "LOCALVERSION changed after Kconfig resolution"
 pass "exclusive SuSFS hook configuration resolved correctly"
 
-log "[7/7] Prepare kernel tree"
-make ARCH=arm64 O=out prepare >>"$REPORT" 2>&1
+log "[8/8] Prepare kernel tree with LLVM"
+make LLVM=1 LLVM_IAS=1 ARCH=arm64 O=out prepare >>"$REPORT" 2>&1
 pass "kernel prepare completed"
 
 log ""
