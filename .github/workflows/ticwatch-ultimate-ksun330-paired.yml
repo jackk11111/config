@@ -1,0 +1,282 @@
+name: TicWatch Ultimate - KSUN 3.3.0 Spoofed Paired
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-ultimate-ci
+    paths:
+      - '.github/workflows/ticwatch-ultimate-ksun330-paired.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ticwatch-ultimate-ksun330-paired
+  cancel-in-progress: true
+
+env:
+  LLVM_VERSION: '20.1.0'
+  LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
+  MANAGER_RUN_ID: '34523176375'
+  MANAGER_ARTIFACT: 'KernelSU-Next-v3.3.0-Spoofed-TicWatch-armv7'
+  MANAGER_APK: 'KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk'
+  MANAGER_APK_SHA256: '1833ffc576fc5e950200baf5728eca0c586078315325f366ad3e1f4778137080'
+  KSU_NEXT_MANAGER_SIZE: '0x45c'
+  KSU_NEXT_MANAGER_HASH: 'e7f1f3cd5d8e9112bc7b3afd5b7eb0a2eb27a814c1c27704a372c227ff0dc428'
+  ANYKERNEL_REPO: 'https://github.com/Winkmoon/AnyKernel3.git'
+  ANYKERNEL_SHA: 'ad62484a9cd193ba24991e617bae66e25c0d0228'
+  EXPECTED_UTS_PREFIX: '5.15.202-Xinran_StarBai-Test'
+
+jobs:
+  build-paired:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-ultimate-ci
+
+      - name: Free space and install dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc python3 python-is-python3 \
+            libssl-dev libelf-dev dwarves make cmake zip unzip curl wget \
+            gnupg gawk gcc-multilib g++-multilib ccache rsync file \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
+
+      - name: Retrieve exact spoofed armv7 Manager
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p paired-manager
+          gh run download "$MANAGER_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$MANAGER_ARTIFACT" \
+            --dir paired-manager
+          test -s "paired-manager/$MANAGER_APK"
+          printf '%s  %s\n' "$MANAGER_APK_SHA256" "paired-manager/$MANAGER_APK" | sha256sum -c -
+          cp "paired-manager/$MANAGER_APK" "$GITHUB_WORKSPACE/$MANAGER_APK"
+
+      - name: Verify Manager v2 certificate exactly matches kernel identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, struct
+          from pathlib import Path
+          import os
+
+          apk = Path(os.environ['MANAGER_APK'])
+          data = apk.read_bytes()
+          eocd = data.rfind(b'PK\x05\x06')
+          if eocd < 0:
+              raise SystemExit('EOCD not found')
+          cd_off = struct.unpack_from('<I', data, eocd + 16)[0]
+          size = struct.unpack_from('<Q', data, cd_off - 24)[0]
+          if data[cd_off-16:cd_off] != b'APK Sig Block 42':
+              raise SystemExit('APK Signing Block missing')
+          start = cd_off - (size + 8)
+          if struct.unpack_from('<Q', data, start)[0] != size:
+              raise SystemExit('APK Signing Block size mismatch')
+          p = start + 8
+          end = cd_off - 24
+          v2 = []
+          while p < end:
+              ln = struct.unpack_from('<Q', data, p)[0]; p += 8
+              ident = struct.unpack_from('<I', data, p)[0]; p += 4
+              val = data[p:p+ln-4]; p += ln-4
+              if ident == 0x7109871a:
+                  v2.append(val)
+          if len(v2) != 1:
+              raise SystemExit(f'expected exactly one v2 signer block, got {len(v2)}')
+          def lp(buf, off=0):
+              n = struct.unpack_from('<I', buf, off)[0]
+              return buf[off+4:off+4+n], off+4+n
+          signers, _ = lp(v2[0])
+          signer, rem = lp(signers)
+          if rem != len(signers):
+              raise SystemExit('multiple v2 signers are not accepted')
+          signed, off = lp(signer)
+          _, off = lp(signer, off)
+          _, off = lp(signer, off)
+          _, off = lp(signed)
+          certs, off = lp(signed, off)
+          cert, rem = lp(certs)
+          if rem != len(certs):
+              raise SystemExit('multiple certificates are not accepted')
+          cert_size = len(cert)
+          cert_hash = hashlib.sha256(cert).hexdigest()
+          expected_size = int(os.environ['KSU_NEXT_MANAGER_SIZE'], 0)
+          expected_hash = os.environ['KSU_NEXT_MANAGER_HASH']
+          print(f'MANAGER_CERT_SIZE={cert_size} (0x{cert_size:x})')
+          print(f'MANAGER_CERT_SHA256={cert_hash}')
+          if cert_size != expected_size:
+              raise SystemExit('manager cert size mismatch')
+          if cert_hash != expected_hash:
+              raise SystemExit('manager cert hash mismatch')
+          Path('manager-cert.der').write_bytes(cert)
+          Path('manager-cert.txt').write_text(
+              f'MANAGER_APK_SHA256={os.environ["MANAGER_APK_SHA256"]}\n'
+              f'MANAGER_CERT_SIZE={cert_size}\n'
+              f'MANAGER_CERT_SIZE_HEX=0x{cert_size:x}\n'
+              f'MANAGER_CERT_SHA256={cert_hash}\n'
+          )
+          PY
+
+      - name: Install exact LLVM 20.1.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          wget -q --show-progress \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
+          tar -xJf "$LLVM_ARCHIVE"
+          mv "LLVM-${LLVM_VERSION}-Linux-X64" "$GITHUB_WORKSPACE/aosp-clang"
+          rm -f "$LLVM_ARCHIVE"
+          echo "AOSP_CLANG_PATH=$GITHUB_WORKSPACE/aosp-clang" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/aosp-clang/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/aosp-clang/bin/clang" --version | tee llvm-version.txt
+          "$GITHUB_WORKSPACE/aosp-clang/bin/clang" --version | head -n1 | grep -Fq '20.1.0'
+
+      - name: Integrate exact KSU Next 3.3.0 and SuSFS 2.2.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash ticwatch-ultimate/preflight.sh
+          grep -Fqx 'RESULT=PASS' ticwatch-ultimate-results/preflight.txt
+
+      - name: Resolve final TicWatch config
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          rm -rf out
+          sed -i 's/ -dirty//g' scripts/setlocalversion
+          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' scripts/setlocalversion
+          export ARCH=arm64
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH"
+          export LLVM=1 LLVM_IAS=1
+          export KBUILD_BUILD_VERSION=0
+          export KBUILD_BUILD_USER='XinRan♡'
+          export KBUILD_BUILD_HOST='Bai'
+          make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang \
+            BUILD_CONFIG=build.config.gki.aarch64 O=out DEPMOD=depmod gki_defconfig
+          scripts/config --file out/.config \
+            -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
+          make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang O=out olddefconfig
+          grep -Fqx 'CONFIG_KSU=y' out/.config
+          grep -Fqx 'CONFIG_KSU_SUSFS=y' out/.config
+          grep -Fqx '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set' out/.config
+          grep -Fqx 'CONFIG_LOCALVERSION="-Xinran_StarBai-Test"' out/.config
+          cp out/.config "$GITHUB_WORKSPACE/final.config"
+
+      - name: Compile kernel paired to this Manager certificate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          export ARCH=arm64
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH"
+          export LLVM=1 LLVM_IAS=1
+          export KCFLAGS='-Wno-error -Wno-deprecated-declarations'
+          export KBUILD_BUILD_VERSION=0
+          export KBUILD_BUILD_USER='XinRan♡'
+          export KBUILD_BUILD_HOST='Bai'
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct 3929c55fbc7559af6df290d2c0f66dc551af161a)"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            KSU_NEXT_MANAGER_SIZE="$KSU_NEXT_MANAGER_SIZE" \
+            KSU_NEXT_MANAGER_HASH="$KSU_NEXT_MANAGER_HASH" \
+            2>&1 | tee "$GITHUB_WORKSPACE/kernel-build.log"
+          test -s out/arch/arm64/boot/Image
+          cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"
+          make -s O=out ARCH=arm64 kernelrelease | tee "$GITHUB_WORKSPACE/kernelrelease.txt"
+          release="$(cat "$GITHUB_WORKSPACE/kernelrelease.txt")"
+          case "$release" in
+            ${EXPECTED_UTS_PREFIX}*) ;;
+            *) echo "Unexpected kernel release: $release" >&2; exit 1 ;;
+          esac
+          grep -Fq -- "KernelSU-Next Manager signature size: $KSU_NEXT_MANAGER_SIZE" "$GITHUB_WORKSPACE/kernel-build.log"
+          grep -Fq -- "KernelSU-Next Manager signature hash: $KSU_NEXT_MANAGER_HASH" "$GITHUB_WORKSPACE/kernel-build.log"
+
+      - name: Package exact AnyKernel3 and paired Manager
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git init -q AnyKernel3
+          git -C AnyKernel3 remote add origin "$ANYKERNEL_REPO"
+          git -C AnyKernel3 fetch -q --depth=1 origin "$ANYKERNEL_SHA"
+          git -C AnyKernel3 checkout -q --detach FETCH_HEAD
+          test "$(git -C AnyKernel3 rev-parse HEAD)" = "$ANYKERNEL_SHA"
+          rm -rf AnyKernel3/.git
+          cp Image AnyKernel3/Image
+          (
+            cd AnyKernel3
+            zip -qr9 "$GITHUB_WORKSPACE/TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS-PAIRED.zip" .
+          )
+          test -s TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS-PAIRED.zip
+
+      - name: Generate final provenance and hashes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          {
+            echo 'TicWatch Ultimate paired KSU Next 3.3.0 build'
+            echo 'BASE_SHA=3929c55fbc7559af6df290d2c0f66dc551af161a'
+            echo 'KSUN_VERSION=v3.3.0'
+            echo 'KSUN_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771'
+            echo 'SUSFS_VERSION=v2.2.0'
+            echo 'SUSFS_SHA=65ea8683c794cc309c3b0c4e6b57c1d972ca9a76'
+            echo 'WILD_PATCHES_SHA=4285cd1755f62a20269aa80757ecb4631908ec77'
+            echo "MANAGER_APK=$MANAGER_APK"
+            echo "MANAGER_APK_SHA256=$MANAGER_APK_SHA256"
+            echo "MANAGER_CERT_SIZE=$KSU_NEXT_MANAGER_SIZE"
+            echo "MANAGER_CERT_SHA256=$KSU_NEXT_MANAGER_HASH"
+            echo 'MANAGER_ABI=armeabi-v7a'
+            echo 'MANAGER_SPOOFED=1'
+            echo "ANYKERNEL_SHA=$ANYKERNEL_SHA"
+            echo "KERNEL_RELEASE=$(cat kernelrelease.txt)"
+            echo "LLVM=$(head -n1 llvm-version.txt)"
+            echo 'BOOTCTL_LIMITATION=KSU Next v3.3.0 post-OTA helper remains aarch64 dynamic; normal Manager/root/module operations do not call it.'
+          } > provenance.txt
+          sha256sum \
+            Image \
+            TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS-PAIRED.zip \
+            "$MANAGER_APK" \
+            final.config \
+            provenance.txt > SHA256SUMS
+          cat provenance.txt
+          cat SHA256SUMS
+
+      - name: Upload final paired bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-Ultimate-KSUNext-3.3.0-Spoofed-PAIRED
+          path: |
+            Image
+            TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS-PAIRED.zip
+            KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk
+            manager-cert.der
+            manager-cert.txt
+            final.config
+            kernelrelease.txt
+            llvm-version.txt
+            provenance.txt
+            SHA256SUMS
+            kernel-build.log
+            ticwatch-ultimate-results/preflight.txt
+          if-no-files-found: error
+          retention-days: 90
