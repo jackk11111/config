@@ -1,0 +1,19 @@
+KernelSU Next v3.3.0 armv7 userspace probe
+KSUN_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771
+NDK=27.3.13750724
+ANDROID_API=26
+RESULT=PASS
+
+ksud file output:
+target/armv7-linux-androideabi/release/ksud: ELF 32-bit LSB pie executable, ARM, EABI5 version 1 (SYSV), dynamically linked, interpreter /system/bin/linker, for Android 26, built by NDK r27d (13750724), stripped
+
+KSUD_SHA256=46f1da28a0e94a7d4c33581189ab2d89ed568bd4363fca5eaf94d0d89e9699a5
+
+Source asset policy in v3.3.0:
+- x86_64 Android embeds bin/x86_64.
+- every non-x86_64 target, including armv7 Android, embeds bin/aarch64.
+
+Conclusion:
+- Unmodified KernelSU Next v3.3.0 ksud source is compilable as a real 32-bit ARM Android executable.
+- The official v3.3.0 Manager packaging does not provide armeabi-v7a, so a 32-bit-compatible spoofed Manager must add this ksud build.
+- Before approving that custom Manager, the aarch64 busybox/bootctl payloads embedded by assets.rs must be checked for runtime suitability on the TicWatch 64-bit-kernel/32-bit-userspace environment.
