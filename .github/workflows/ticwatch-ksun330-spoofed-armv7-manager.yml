@@ -62,24 +62,15 @@ jobs:
           file target/armv7-linux-androideabi/release/ksud | grep -Fq 'ELF 32-bit'
           sha256sum target/armv7-linux-androideabi/release/ksud | tee "$GITHUB_WORKSPACE/ksud-armv7-sha256.txt"
 
-      - name: Apply official spoof transform and restrict Manager to armv7
+      - name: Apply official spoof transform and force Manager native ABI to armv7
         run: |
           set -Eeuo pipefail
           cd KSUN/manager
           chmod +x spoof
           ./spoof | tee "$GITHUB_WORKSPACE/spoof.log"
-          # This APK is intentionally watch-specific: only the ABI that the TicWatch userspace needs.
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('app/build.gradle.kts')
-          s = p.read_text()
-          anchor = 'android {\n'
-          block = '''android {\n    defaultConfig {\n        ndk {\n            abiFilters += listOf("armeabi-v7a")\n        }\n    }\n'''
-          if s.count(anchor) != 1:
-              raise SystemExit('unexpected android block layout')
-          p.write_text(s.replace(anchor, block, 1))
-          PY
-          grep -E 'namespace =|managerVersionNameSpoofed' app/build.gradle.kts | tee "$GITHUB_WORKSPACE/manager-identity.txt"
+          cd "$GITHUB_WORKSPACE"
+          bash ticwatch-ksun330-armv7/force-manager-armv7.sh KSUN/manager
+          grep -E 'namespace =|managerVersionNameSpoofed' KSUN/manager/app/build.gradle.kts | tee manager-identity.txt
 
       - name: Install armv7 ksud into Manager package
         run: |
@@ -89,7 +80,7 @@ jobs:
              KSUN/manager/app/src/main/jniLibs/armeabi-v7a/libksud.so
           file KSUN/manager/app/src/main/jniLibs/armeabi-v7a/libksud.so
 
-      - name: Create one-time signing key for this custom Manager artifact
+      - name: Create signing key for paired Manager artifact
         run: |
           set -Eeuo pipefail
           cd KSUN/manager
@@ -113,26 +104,38 @@ jobs:
           test -n "$APK" -a -s "$APK"
           cp "$APK" "$GITHUB_WORKSPACE/KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk"
 
-      - name: Verify APK architecture and version packaging
+      - name: Verify complete ARM32 native payload
         run: |
           set -Eeuo pipefail
           APK=KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk
           unzip -l "$APK" | tee apk-contents.txt
-          unzip -l "$APK" | grep -Fq 'lib/armeabi-v7a/libksud.so'
-          if unzip -l "$APK" | grep -Fq 'lib/arm64-v8a/libksud.so'; then
-            echo 'Unexpected arm64 ksud in watch-specific APK' >&2
+          for lib in libksud.so libkernelsu.so libadbroot.so; do
+            unzip -l "$APK" | grep -Fq "lib/armeabi-v7a/$lib"
+          done
+          if unzip -l "$APK" | grep -Eq 'lib/(arm64-v8a|x86_64|x86)/'; then
+            echo 'Unexpected non-armv7 native library in watch APK' >&2
             exit 1
           fi
+          rm -rf native-check
+          mkdir native-check
+          unzip -q "$APK" 'lib/armeabi-v7a/*' -d native-check
+          for f in native-check/lib/armeabi-v7a/libksud.so \
+                   native-check/lib/armeabi-v7a/libkernelsu.so \
+                   native-check/lib/armeabi-v7a/libadbroot.so; do
+            file "$f" | tee -a native-file-report.txt
+            file "$f" | grep -Fq 'ELF 32-bit'
+            file "$f" | grep -Fq 'ARM'
+          done
           sha256sum "$APK" | tee manager-apk-sha256.txt
           {
             echo 'KSUN_VERSION=v3.3.0'
             echo 'KSUN_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771'
             echo 'ABI=armeabi-v7a'
             echo 'SPOOFED=1'
-            echo 'NOTE=Custom-signed TicWatch-specific build; not byte-identical to official spoofed release APK.'
-            echo 'BOOTCTL_NOTE=The embedded v3.3.0 bootctl remains aarch64 and needs /system/bin/linker64 for post-OTA functions; runtime check required before final approval.'
+            echo 'JNI_ARMV7_VERIFIED=1'
+            echo 'NOTE=Kernel must be paired to this APK signing certificate.'
+            echo 'BOOTCTL_NOTE=Embedded bootctl is only used by post-OTA handling.'
           } > manager-provenance.txt
-          cat manager-provenance.txt
 
       - name: Upload Manager bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -143,6 +146,8 @@ jobs:
             manager-apk-sha256.txt
             manager-provenance.txt
             manager-identity.txt
+            native-file-report.txt
+            apk-contents.txt
             spoof.log
             ksud-armv7-file.txt
             ksud-armv7-sha256.txt
