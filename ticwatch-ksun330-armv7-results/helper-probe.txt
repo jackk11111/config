@@ -1,0 +1,19 @@
+KernelSU Next v3.3.0 embedded-helper ABI probe
+KSUN_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771
+RESULT=PASS
+
+busybox:
+ELF 64-bit LSB executable, ARM aarch64, statically linked, stripped
+DYNAMIC_INTERPRETER_PRESENT=0
+SHA256=4d60ab3f5a59ebb2ca863f2f514e6924401b581e9b64f602665c008177626651
+
+bootctl:
+ELF 64-bit LSB PIE executable, ARM aarch64, dynamically linked
+INTERPRETER=/system/bin/linker64
+NEEDED=libhidlbase.so,libutils.so,libcutils.so,liblog.so,libc++.so,libc.so,libm.so,libdl.so
+SHA256=36b977ecf13424091f3c8c6bb47e98bd318d7908e2070e417efe81a6460cdef6
+
+Implication for a 32-bit Android userspace:
+- The embedded busybox has no 64-bit userspace-library dependency and can be executed directly by an arm64 kernel.
+- The embedded bootctl requires the 64-bit Android dynamic linker and matching 64-bit shared libraries. It cannot be assumed compatible with a 32-bit-only userspace.
+- KernelSU Next v3.3.0 uses bootctl for post-OTA slot handling, so this runtime dependency must be checked or adapted before the custom armv7 Manager is considered feature-complete.
