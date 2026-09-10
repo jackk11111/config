@@ -1,0 +1,63 @@
+name: TicWatch Ultimate 5.15 - Preflight
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-ultimate-ci
+    paths:
+      - 'ticwatch-ultimate/**'
+      - '.github/workflows/ticwatch-ultimate-preflight.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ticwatch-ultimate-preflight
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@v4
+        with:
+          ref: ticwatch-ultimate-ci
+
+      - name: Install preflight dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc python3 \
+            libssl-dev libelf-dev dwarves clang lld llvm
+
+      - name: Run pinned integration preflight
+        id: integration
+        continue-on-error: true
+        shell: bash
+        run: bash ticwatch-ultimate/preflight.sh
+
+      - name: Publish concise preflight report
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f ticwatch-ultimate-results/preflight.txt || printf 'RESULT=FAIL\nreport was not generated\n' > ticwatch-ultimate-results/preflight.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ticwatch-ultimate-results/preflight.txt
+          if ! git diff --cached --quiet; then
+            git commit -m 'ticwatch: update preflight report [skip ci]'
+            git push origin HEAD:ticwatch-ultimate-ci
+          fi
+
+      - name: Fail closed if integration failed
+        if: steps.integration.outcome != 'success'
+        shell: bash
+        run: |
+          echo 'Integration preflight failed. No build artifact is authorized.'
+          exit 1
