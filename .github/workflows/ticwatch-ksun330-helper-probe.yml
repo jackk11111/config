@@ -1,0 +1,51 @@
+name: TicWatch KSU Next 3.3.0 - helper probe
+
+on:
+  push:
+    branches:
+      - ticwatch-ksun330-armv7-probe
+    paths:
+      - '.github/workflows/ticwatch-ksun330-helper-probe.yml'
+  workflow_dispatch:
+
+jobs:
+  helpers:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout probe
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Fetch exact KernelSU Next v3.3.0
+        run: |
+          set -Eeuo pipefail
+          git init -q KSUN
+          git -C KSUN remote add origin https://github.com/KernelSU-Next/KernelSU-Next.git
+          git -C KSUN fetch -q --depth=1 origin 3b18216f71df189ab3d1b1ce0bdb21be1268e771
+          git -C KSUN checkout -q --detach FETCH_HEAD
+          test "$(git -C KSUN rev-parse HEAD)" = "3b18216f71df189ab3d1b1ce0bdb21be1268e771"
+
+      - name: Inspect embedded aarch64 helpers
+        run: |
+          set -Eeuo pipefail
+          : > helper-probe.txt
+          for f in KSUN/userspace/ksud/bin/aarch64/busybox KSUN/userspace/ksud/bin/aarch64/bootctl; do
+            echo "=== $f ===" | tee -a helper-probe.txt
+            file "$f" | tee -a helper-probe.txt
+            echo '-- INTERP --' | tee -a helper-probe.txt
+            if readelf -l "$f" | grep -A1 -B1 'Requesting program interpreter' | tee -a helper-probe.txt; then
+              echo 'DYNAMIC_INTERPRETER_PRESENT=1' | tee -a helper-probe.txt
+            else
+              echo 'DYNAMIC_INTERPRETER_PRESENT=0' | tee -a helper-probe.txt
+            fi
+            echo '-- NEEDED --' | tee -a helper-probe.txt
+            readelf -d "$f" 2>/dev/null | grep 'NEEDED' | tee -a helper-probe.txt || true
+            sha256sum "$f" | tee -a helper-probe.txt
+            echo | tee -a helper-probe.txt
+          done
+
+      - name: Upload evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ksun330-helper-probe
+          path: helper-probe.txt
+          if-no-files-found: error
