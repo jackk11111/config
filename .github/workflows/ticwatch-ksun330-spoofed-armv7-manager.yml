@@ -1,0 +1,151 @@
+name: TicWatch KSU Next 3.3.0 - Spoofed armv7 Manager
+
+on:
+  push:
+    branches:
+      - ticwatch-ksun330-armv7-probe
+    paths:
+      - '.github/workflows/ticwatch-ksun330-spoofed-armv7-manager.yml'
+  workflow_dispatch:
+
+jobs:
+  manager:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install host dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends build-essential libclang-dev file unzip zip
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install pinned NDK
+        run: |
+          set -Eeuo pipefail
+          yes | sdkmanager 'ndk;27.3.13750724'
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
+
+      - name: Fetch exact KernelSU Next v3.3.0
+        run: |
+          set -Eeuo pipefail
+          git init -q KSUN
+          git -C KSUN remote add origin https://github.com/KernelSU-Next/KernelSU-Next.git
+          git -C KSUN fetch -q --depth=1 origin 3b18216f71df189ab3d1b1ce0bdb21be1268e771
+          git -C KSUN checkout -q --detach FETCH_HEAD
+          test "$(git -C KSUN rev-parse HEAD)" = "3b18216f71df189ab3d1b1ce0bdb21be1268e771"
+
+      - name: Build exact v3.3.0 ksud for armeabi-v7a
+        env:
+          BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi: >-
+            --sysroot=${{ env.ANDROID_NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+            -I${{ env.ANDROID_NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/arm-linux-androideabi
+            -I${{ env.ANDROID_NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include
+        run: |
+          set -Eeuo pipefail
+          rustup target add armv7-linux-androideabi
+          cargo install cargo-ndk --locked
+          cd KSUN/userspace/ksud
+          cargo ndk -t armeabi-v7a -P 26 build --release
+          file target/armv7-linux-androideabi/release/ksud | tee "$GITHUB_WORKSPACE/ksud-armv7-file.txt"
+          file target/armv7-linux-androideabi/release/ksud | grep -Fq 'ELF 32-bit'
+          sha256sum target/armv7-linux-androideabi/release/ksud | tee "$GITHUB_WORKSPACE/ksud-armv7-sha256.txt"
+
+      - name: Apply official spoof transform and restrict Manager to armv7
+        run: |
+          set -Eeuo pipefail
+          cd KSUN/manager
+          chmod +x spoof
+          ./spoof | tee "$GITHUB_WORKSPACE/spoof.log"
+          # This APK is intentionally watch-specific: only the ABI that the TicWatch userspace needs.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('app/build.gradle.kts')
+          s = p.read_text()
+          anchor = 'android {\n'
+          block = '''android {\n    defaultConfig {\n        ndk {\n            abiFilters += listOf("armeabi-v7a")\n        }\n    }\n'''
+          if s.count(anchor) != 1:
+              raise SystemExit('unexpected android block layout')
+          p.write_text(s.replace(anchor, block, 1))
+          PY
+          grep -E 'namespace =|managerVersionNameSpoofed' app/build.gradle.kts | tee "$GITHUB_WORKSPACE/manager-identity.txt"
+
+      - name: Install armv7 ksud into Manager package
+        run: |
+          set -Eeuo pipefail
+          mkdir -p KSUN/manager/app/src/main/jniLibs/armeabi-v7a
+          cp KSUN/userspace/ksud/target/armv7-linux-androideabi/release/ksud \
+             KSUN/manager/app/src/main/jniLibs/armeabi-v7a/libksud.so
+          file KSUN/manager/app/src/main/jniLibs/armeabi-v7a/libksud.so
+
+      - name: Create one-time signing key for this custom Manager artifact
+        run: |
+          set -Eeuo pipefail
+          cd KSUN/manager
+          keytool -genkeypair -noprompt \
+            -keystore key.jks -storepass ticwatch330 -keypass ticwatch330 \
+            -alias ticwatch330 -keyalg RSA -keysize 3072 -validity 3650 \
+            -dname 'CN=TicWatch KSU Next 3.3.0, OU=Local Build, O=jackk11111, C=IT'
+          {
+            echo 'KEYSTORE_PASSWORD=ticwatch330'
+            echo 'KEY_ALIAS=ticwatch330'
+            echo 'KEY_PASSWORD=ticwatch330'
+            echo 'KEYSTORE_FILE=key.jks'
+          } >> gradle.properties
+
+      - name: Build signed spoofed armv7 release APK
+        run: |
+          set -Eeuo pipefail
+          cd KSUN/manager
+          ./gradlew --no-daemon clean assembleRelease 2>&1 | tee "$GITHUB_WORKSPACE/manager-build.log"
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -n1)"
+          test -n "$APK" -a -s "$APK"
+          cp "$APK" "$GITHUB_WORKSPACE/KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk"
+
+      - name: Verify APK architecture and version packaging
+        run: |
+          set -Eeuo pipefail
+          APK=KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk
+          unzip -l "$APK" | tee apk-contents.txt
+          unzip -l "$APK" | grep -Fq 'lib/armeabi-v7a/libksud.so'
+          if unzip -l "$APK" | grep -Fq 'lib/arm64-v8a/libksud.so'; then
+            echo 'Unexpected arm64 ksud in watch-specific APK' >&2
+            exit 1
+          fi
+          sha256sum "$APK" | tee manager-apk-sha256.txt
+          {
+            echo 'KSUN_VERSION=v3.3.0'
+            echo 'KSUN_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771'
+            echo 'ABI=armeabi-v7a'
+            echo 'SPOOFED=1'
+            echo 'NOTE=Custom-signed TicWatch-specific build; not byte-identical to official spoofed release APK.'
+            echo 'BOOTCTL_NOTE=The embedded v3.3.0 bootctl remains aarch64 and needs /system/bin/linker64 for post-OTA functions; runtime check required before final approval.'
+          } > manager-provenance.txt
+          cat manager-provenance.txt
+
+      - name: Upload Manager bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: KernelSU-Next-v3.3.0-Spoofed-TicWatch-armv7
+          path: |
+            KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk
+            manager-apk-sha256.txt
+            manager-provenance.txt
+            manager-identity.txt
+            spoof.log
+            ksud-armv7-file.txt
+            ksud-armv7-sha256.txt
+            manager-build.log
+          if-no-files-found: error
+          retention-days: 90
