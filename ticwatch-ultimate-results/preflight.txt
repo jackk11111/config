@@ -3,25 +3,40 @@ BASE_SHA=3929c55fbc7559af6df290d2c0f66dc551af161a
 RESUKI_SHA=246d3e52e667cb72ce8f70c93b70d3b42b100b76
 SUSFS_SHA=415e4143ee1dd557c54d2b3d94ef098e5d1236f4
 
-[1/7] Fetch exact TicWatch source
-Cloning into '/home/runner/work/config/config/.ticwatch-preflight/common'...
-HEAD is now at 3929c55fbc75 Rename integration step from SukiSU to ReSukiSU
+[1/8] Fetch exact TicWatch source
 PASS: exact base source
 PASS: LOCALVERSION matches installed Xinran_StarBai-Test baseline
-[2/7] Integrate exact ReSukiSU revision
-Cloning into 'KernelSU'...
-Updating files:  32% (185/577)Updating files:  33% (191/577)Updating files:  34% (197/577)Updating files:  35% (202/577)Updating files:  36% (208/577)Updating files:  37% (214/577)Updating files:  38% (220/577)Updating files:  39% (226/577)Updating files:  40% (231/577)Updating files:  41% (237/577)Updating files:  42% (243/577)Updating files:  43% (249/577)Updating files:  44% (254/577)Updating files:  45% (260/577)Updating files:  46% (266/577)Updating files:  47% (272/577)Updating files:  48% (277/577)Updating files:  49% (283/577)Updating files:  50% (289/577)Updating files:  51% (295/577)Updating files:  52% (301/577)Updating files:  53% (306/577)Updating files:  54% (312/577)Updating files:  55% (318/577)Updating files:  56% (324/577)Updating files:  57% (329/577)Updating files:  58% (335/577)Updating files:  59% (341/577)Updating files:  60% (347/577)Updating files:  61% (352/577)Updating files:  62% (358/577)Updating files:  63% (364/577)Updating files:  64% (370/577)Updating files:  65% (376/577)Updating files:  66% (381/577)Updating files:  67% (387/577)Updating files:  68% (393/577)Updating files:  69% (399/577)Updating files:  70% (404/577)Updating files:  71% (410/577)Updating files:  72% (416/577)Updating files:  73% (422/577)Updating files:  74% (427/577)Updating files:  75% (433/577)Updating files:  76% (439/577)Updating files:  77% (445/577)Updating files:  78% (451/577)Updating files:  79% (456/577)Updating files:  80% (462/577)Updating files:  81% (468/577)Updating files:  82% (474/577)Updating files:  83% (479/577)Updating files:  84% (485/577)Updating files:  85% (491/577)Updating files:  86% (497/577)Updating files:  87% (502/577)Updating files:  88% (508/577)Updating files:  89% (514/577)Updating files:  90% (520/577)Updating files:  91% (526/577)Updating files:  92% (531/577)Updating files:  93% (537/577)Updating files:  94% (543/577)Updating files:  95% (549/577)Updating files:  96% (554/577)Updating files:  97% (560/577)Updating files:  98% (566/577)Updating files:  99% (572/577)Updating files: 100% (577/577)Updating files: 100% (577/577), done.
-HEAD is now at 246d3e52 manager: replace SettingsJumpPageWidget with SettingsChooseWidget (#401)
+[2/8] Integrate exact ReSukiSU revision
 PASS: ReSukiSU pinned and linked
-[3/7] Fetch exact SuSFS Android 13 / Linux 5.15 revision
-Cloning into '/home/runner/work/config/config/.ticwatch-preflight/susfs4ksu'...
-HEAD is now at 415e414 kernel & KernelSU: Fix [ksu_driver_su] being wrongly installed before su session
-PASS: SuSFS pinned
-[4/7] Strict kernel-side SuSFS patch compatibility check
-error: patch failed: fs/proc/task_mmu.c:21
-error: fs/proc/task_mmu.c: patch does not apply
-error: patch failed: kernel/reboot.c:320
-error: kernel/reboot.c: patch does not apply
-FAIL: SuSFS kernel patch does not apply cleanly to exact TicWatch source
+[3/8] Fetch exact SuSFS Android 13 / Linux 5.15 revision
+PASS: SuSFS pinned (gki-android13-5.15 @ 415e4143ee1dd557c54d2b3d94ef098e5d1236f4)
+[4/8] Normalize two known TicWatch-local hook collisions
+PASS: known local collisions normalized without deleting their functionality
+[5/8] Strict kernel-side SuSFS patch compatibility check
+PASS: canonical SuSFS kernel patch applies after two explicit TicWatch adaptations
+PASS: SuSFS installed; TicWatch vendor trace hook and manual fallback preserved
+[6/8] Select ReSukiSU SuSFS inline hook, not Manual Hook
+PASS: requested KSU/SuSFS config written
+[7/8] Resolve Kconfig
+make[1]: Entering directory '/home/runner/work/config/config/.ticwatch-preflight/common/out'
+  GEN     Makefile
+  HOSTCC  scripts/basic/fixdep
+  HOSTCC  scripts/kconfig/conf.o
+  HOSTCC  scripts/kconfig/confdata.o
+  HOSTCC  scripts/kconfig/expr.o
+  LEX     scripts/kconfig/lexer.lex.c
+  YACC    scripts/kconfig/parser.tab.[ch]
+  HOSTCC  scripts/kconfig/lexer.lex.o
+  HOSTCC  scripts/kconfig/menu.o
+  HOSTCC  scripts/kconfig/parser.tab.o
+  HOSTCC  scripts/kconfig/preprocess.o
+  HOSTCC  scripts/kconfig/symbol.o
+  HOSTCC  scripts/kconfig/util.o
+  HOSTLD  scripts/kconfig/conf
+drivers/Kconfig:239: can't open file "drivers/kernelsu/Kconfig"
+make[2]: *** [../scripts/kconfig/Makefile:94: gki_defconfig] Error 1
+make[1]: *** [/home/runner/work/config/config/.ticwatch-preflight/common/Makefile:647: gki_defconfig] Error 2
+make[1]: Leaving directory '/home/runner/work/config/config/.ticwatch-preflight/common/out'
+make: *** [Makefile:244: __sub-make] Error 2
 
-RESULT=FAIL rc=1
+RESULT=FAIL rc=2
