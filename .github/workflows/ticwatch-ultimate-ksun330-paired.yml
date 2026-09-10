@@ -7,6 +7,8 @@ on:
       - ticwatch-ultimate-ci
     paths:
       - '.github/workflows/ticwatch-ultimate-ksun330-paired.yml'
+      - 'ticwatch-ultimate/preflight.sh'
+      - 'ticwatch-ultimate/fix-ksun330-susfs-first-zygote.sh'
 
 permissions:
   contents: read
@@ -19,12 +21,12 @@ concurrency:
 env:
   LLVM_VERSION: '20.1.0'
   LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
-  MANAGER_RUN_ID: '34523176375'
+  MANAGER_RUN_ID: '34524543446'
   MANAGER_ARTIFACT: 'KernelSU-Next-v3.3.0-Spoofed-TicWatch-armv7'
   MANAGER_APK: 'KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk'
-  MANAGER_APK_SHA256: '1833ffc576fc5e950200baf5728eca0c586078315325f366ad3e1f4778137080'
+  MANAGER_APK_SHA256: 'b1d1c8a3f95449091dc7bd641c238ab1ad619ad0a11db7477e2a6db6111b6551'
   KSU_NEXT_MANAGER_SIZE: '0x45c'
-  KSU_NEXT_MANAGER_HASH: 'e7f1f3cd5d8e9112bc7b3afd5b7eb0a2eb27a814c1c27704a372c227ff0dc428'
+  KSU_NEXT_MANAGER_HASH: '700dc87b739c05d3325de011d4b062058f7e50744c61b3f213dfd39538de7763'
   ANYKERNEL_REPO: 'https://github.com/Winkmoon/AnyKernel3.git'
   ANYKERNEL_SHA: 'ad62484a9cd193ba24991e617bae66e25c0d0228'
   EXPECTED_UTS_PREFIX: '5.15.202-Xinran_StarBai-Test'
@@ -150,8 +152,22 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          sed -i \
+            -e "s|^KSUN_MANAGER=.*|KSUN_MANAGER=\"$MANAGER_APK\"|" \
+            -e "s|^KSUN_MANAGER_SHA256=.*|KSUN_MANAGER_SHA256=\"$MANAGER_APK_SHA256\"|" \
+            ticwatch-ultimate/preflight.sh
           bash ticwatch-ultimate/preflight.sh
           grep -Fqx 'RESULT=PASS' ticwatch-ultimate-results/preflight.txt
+
+      - name: Repair KSUN 3.3.0 SuSFS first-zygote static key
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash ticwatch-ultimate/fix-ksun330-susfs-first-zygote.sh
+          grep -Fq 'DEFINE_STATIC_KEY_TRUE(is_first_zygote);' \
+            .ticwatch-preflight/common/KernelSU-Next/kernel/runtime/ksud_integration.c
+          grep -Fq 'static_branch_disable(&is_first_zygote);' \
+            .ticwatch-preflight/common/KernelSU-Next/kernel/runtime/ksud_integration.c
 
       - name: Resolve final TicWatch config
         shell: bash
@@ -241,6 +257,8 @@ jobs:
             echo 'SUSFS_VERSION=v2.2.0'
             echo 'SUSFS_SHA=65ea8683c794cc309c3b0c4e6b57c1d972ca9a76'
             echo 'WILD_PATCHES_SHA=4285cd1755f62a20269aa80757ecb4631908ec77'
+            echo "MANAGER_RUN_ID=$MANAGER_RUN_ID"
+            echo "MANAGER_ARTIFACT=$MANAGER_ARTIFACT"
             echo "MANAGER_APK=$MANAGER_APK"
             echo "MANAGER_APK_SHA256=$MANAGER_APK_SHA256"
             echo "MANAGER_CERT_SIZE=$KSU_NEXT_MANAGER_SIZE"
