@@ -1,0 +1,84 @@
+name: TicWatch MAX-LTS - Android13 5.15 Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-max-lts-probe]
+    paths: ['.github/workflows/ticwatch-max-lts-probe.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-probe
+
+      - name: Probe Android common 2026-09 against TicWatch base
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE_SHA=3929c55fbc7559af6df290d2c0f66dc551af161a
+          AOSP_202_SHA=811843d875276b180a090b84f95ec26b20b558d0
+          VENDOR=https://github.com/Winkmoon/android_kernel_TicWatch-Pro5.git
+          AOSP=https://android.googlesource.com/kernel/common
+          BRANCH=android13-5.15-2026-09
+
+          rm -rf vendor aosp-probe lts-report
+          mkdir -p vendor aosp-probe lts-report
+
+          git -C vendor init -q
+          git -C vendor remote add origin "$VENDOR"
+          git -C vendor fetch -q --filter=blob:none --depth=1 origin "$BASE_SHA"
+          git -C vendor checkout -q --detach FETCH_HEAD
+          git -C vendor fetch -q --filter=blob:none --depth=1 origin "$AOSP_202_SHA"
+
+          git -C aosp-probe init -q
+          git -C aosp-probe remote add aosp "$AOSP"
+          git -C aosp-probe fetch -q --filter=blob:none --depth=1 aosp "$BRANCH"
+          TIP="$(git -C aosp-probe rev-parse FETCH_HEAD)"
+          git -C aosp-probe fetch -q --filter=blob:none --depth=1 aosp "$AOSP_202_SHA"
+
+          VERSION="$(git -C aosp-probe show "$TIP":Makefile | awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}')"
+          echo "AOSP_BRANCH=$BRANCH" | tee lts-report/report.txt
+          echo "AOSP_TIP=$TIP" | tee -a lts-report/report.txt
+          echo "AOSP_VERSION=$VERSION" | tee -a lts-report/report.txt
+          echo "TICWATCH_BASE=$BASE_SHA" | tee -a lts-report/report.txt
+          echo "COMMON_5_15_202=$AOSP_202_SHA" | tee -a lts-report/report.txt
+
+          # Generate only the Android-common delta from the exact common commit
+          # underlying the TicWatch base to the current 2026-09 branch tip.
+          git -C aosp-probe diff --binary "$AOSP_202_SHA" "$TIP" > "$GITHUB_WORKSPACE/lts-report/android13-5.15-lts.delta.patch"
+          test -s lts-report/android13-5.15-lts.delta.patch
+          echo "PATCH_SHA256=$(sha256sum lts-report/android13-5.15-lts.delta.patch | awk '{print $1}')" | tee -a lts-report/report.txt
+          echo "PATCH_BYTES=$(stat -c %s lts-report/android13-5.15-lts.delta.patch)" | tee -a lts-report/report.txt
+
+          cd vendor
+          set +e
+          git apply --3way --check "$GITHUB_WORKSPACE/lts-report/android13-5.15-lts.delta.patch" > "$GITHUB_WORKSPACE/lts-report/apply-check.log" 2>&1
+          RC=$?
+          set -e
+          echo "APPLY_CHECK_RC=$RC" | tee -a "$GITHUB_WORKSPACE/lts-report/report.txt"
+          if [ "$RC" -eq 0 ]; then
+            echo "APPLY_CHECK=CLEAN" | tee -a "$GITHUB_WORKSPACE/lts-report/report.txt"
+            git apply --3way "$GITHUB_WORKSPACE/lts-report/android13-5.15-lts.delta.patch"
+            grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL) =' Makefile | tee "$GITHUB_WORKSPACE/lts-report/resulting-version.txt"
+            git status --short > "$GITHUB_WORKSPACE/lts-report/resulting-status.txt"
+          else
+            echo "APPLY_CHECK=CONFLICT" | tee -a "$GITHUB_WORKSPACE/lts-report/report.txt"
+            cat "$GITHUB_WORKSPACE/lts-report/apply-check.log"
+          fi
+          cat "$GITHUB_WORKSPACE/lts-report/report.txt"
+
+      - name: Upload LTS probe
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-MAX-LTS-Probe
+          path: lts-report/
+          if-no-files-found: error
+          retention-days: 30
