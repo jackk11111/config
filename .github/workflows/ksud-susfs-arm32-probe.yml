@@ -1,0 +1,102 @@
+name: TicWatch KSUN 3.3.0 armv7 - SuSFS ABI probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-ultimate-ci
+    paths:
+      - '.github/workflows/ksud-susfs-arm32-probe.yml'
+
+jobs:
+  ksud:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Install host dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends build-essential libclang-dev file
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install pinned NDK
+        run: |
+          set -Eeuo pipefail
+          sdkmanager 'ndk;27.3.13750724'
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/27.3.13750724" >> "$GITHUB_ENV"
+
+      - name: Fetch exact KernelSU Next source
+        run: |
+          set -Eeuo pipefail
+          git init -q KSUN
+          git -C KSUN remote add origin https://github.com/KernelSU-Next/KernelSU-Next.git
+          git -C KSUN fetch -q --depth=1 origin 3b18216f71df189ab3d1b1ce0bdb21be1268e771
+          git -C KSUN checkout -q --detach FETCH_HEAD
+          test "$(git -C KSUN rev-parse HEAD)" = "3b18216f71df189ab3d1b1ce0bdb21be1268e771"
+
+      - name: Apply ARM32 c_long-only SuSFS ABI fix
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('KSUN/userspace/ksud/src/susfsd.rs')
+          s=p.read_text()
+          s=s.replace('use libc::{syscall, SYS_reboot, c_char};',
+                      'use libc::{syscall, SYS_reboot, c_char, c_long};')
+          for cmd in ['CMD_SUSFS_SHOW_VERSION','CMD_SUSFS_SHOW_VARIANT','CMD_SUSFS_SHOW_ENABLED_FEATURES']:
+              old=f'syscall(SYS_reboot, KSU_INSTALL_MAGIC1, SUSFS_MAGIC, {cmd}, &mut cmd as *mut _);'
+              new=(f'syscall(SYS_reboot as c_long, KSU_INSTALL_MAGIC1 as c_long, '
+                   f'SUSFS_MAGIC as c_long, {cmd} as c_long, &mut cmd as *mut _);')
+              if old not in s:
+                  raise SystemExit(f'expected call not found: {cmd}')
+              s=s.replace(old,new)
+          p.write_text(s)
+          PY
+          grep -n 'syscall(SYS_reboot as c_long' KSUN/userspace/ksud/src/susfsd.rs
+          test "$(grep -c 'syscall(SYS_reboot as c_long' KSUN/userspace/ksud/src/susfsd.rs)" -eq 3
+
+      - name: Build exact patched ksud for armeabi-v7a
+        env:
+          BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi: >-
+            --sysroot=${{ env.ANDROID_NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+            -I${{ env.ANDROID_NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/arm-linux-androideabi
+            -I${{ env.ANDROID_NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include
+        run: |
+          set -Eeuo pipefail
+          rustup target add armv7-linux-androideabi
+          cargo install cargo-ndk --locked
+          cd KSUN/userspace/ksud
+          cargo ndk -t armeabi-v7a -P 26 build --release
+          cp target/armv7-linux-androideabi/release/ksud "$GITHUB_WORKSPACE/ksud-KSUN330-armv7-susfs-clong"
+          file "$GITHUB_WORKSPACE/ksud-KSUN330-armv7-susfs-clong" | tee "$GITHUB_WORKSPACE/file.txt"
+          file "$GITHUB_WORKSPACE/ksud-KSUN330-armv7-susfs-clong" | grep -Fq 'ELF 32-bit'
+          file "$GITHUB_WORKSPACE/ksud-KSUN330-armv7-susfs-clong" | grep -Fq 'ARM'
+          sha256sum "$GITHUB_WORKSPACE/ksud-KSUN330-armv7-susfs-clong" | tee "$GITHUB_WORKSPACE/SHA256SUMS"
+
+      - name: Provenance
+        run: |
+          cat > provenance.txt <<'P'
+          KSUN_VERSION=v3.3.0
+          KSUN_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771
+          TARGET=armeabi-v7a
+          ANDROID_API=26
+          CHANGE=SUSFS libc::syscall numeric varargs cast to libc::c_long only
+          PURPOSE=diagnostic candidate for ARM32 SuSFS ABI mismatch
+          DO_NOT_REPLACE_KERNEL=1
+          P
+
+      - name: Upload probe artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ksud-KSUN330-armv7-susfs-clong-probe
+          path: |
+            ksud-KSUN330-armv7-susfs-clong
+            SHA256SUMS
+            file.txt
+            provenance.txt
+            KSUN/userspace/ksud/src/susfsd.rs
+          if-no-files-found: error
+          retention-days: 30
