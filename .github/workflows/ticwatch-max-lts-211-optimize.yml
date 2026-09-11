@@ -1,0 +1,66 @@
+name: TicWatch MAX-LTS 5.15.211 - Enable MGLRU and BBR
+
+on:
+  push:
+    branches: [ticwatch-max-lts-211]
+    paths: ['.github/workflows/ticwatch-max-lts-211-optimize.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch-build-workflow:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-211
+          fetch-depth: 0
+
+      - name: Patch MAX-LTS config and hard assertions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F=.github/workflows/ticwatch-max-lts-211-build.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('.github/workflows/ticwatch-max-lts-211-build.yml')
+          s=p.read_text()
+
+          old="""          scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO\n          make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang O=out olddefconfig\n"""
+          new="""          scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO\n          # MAX-LTS memory/network profile: enable MGLRU by default and BBR+FQ, keep CUBIC available as fallback.\n          scripts/config --file out/.config -e LRU_GEN -e LRU_GEN_ENABLED -d LRU_GEN_STATS\n          scripts/config --file out/.config -e TCP_CONG_ADVANCED -e TCP_CONG_CUBIC -e TCP_CONG_BBR -e DEFAULT_BBR -d DEFAULT_CUBIC -e NET_SCH_FQ\n          make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang O=out olddefconfig\n"""
+          if s.count(old) != 1:
+              raise SystemExit('MAX-LTS config anchor changed; refusing blind patch')
+          s=s.replace(old,new,1)
+
+          old2="""          grep -Fqx 'CONFIG_SECCOMP_FILTER=y' out/.config\n          grep -Fqx 'CONFIG_HAVE_SYSCALL_TRACEPOINTS=y' out/.config\n          grep -Fqx '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set' out/.config\n"""
+          new2="""          grep -Fqx 'CONFIG_SECCOMP_FILTER=y' out/.config\n          grep -Fqx 'CONFIG_HAVE_SYSCALL_TRACEPOINTS=y' out/.config\n          grep -Fqx 'CONFIG_LRU_GEN=y' out/.config\n          grep -Fqx 'CONFIG_LRU_GEN_ENABLED=y' out/.config\n          grep -Fqx '# CONFIG_LRU_GEN_STATS is not set' out/.config\n          grep -Fqx 'CONFIG_TCP_CONG_ADVANCED=y' out/.config\n          grep -Fqx 'CONFIG_TCP_CONG_CUBIC=y' out/.config\n          grep -Fqx 'CONFIG_TCP_CONG_BBR=y' out/.config\n          grep -Fqx 'CONFIG_DEFAULT_BBR=y' out/.config\n          grep -Fqx 'CONFIG_DEFAULT_TCP_CONG=\"bbr\"' out/.config\n          grep -Fqx 'CONFIG_NET_SCH_FQ=y' out/.config\n          grep -Fqx '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set' out/.config\n"""
+          if s.count(old2) != 1:
+              raise SystemExit('MAX-LTS assertion anchor changed; refusing blind patch')
+          s=s.replace(old2,new2,1)
+
+          old3="""          ROLLBACK_BASE=MAX-SAFE-5.15.202\n          AUTO_REBOOT=0\n"""
+          new3="""          ROLLBACK_BASE=MAX-SAFE-5.15.202\n          MGLRU_DEFAULT=ENABLED\n          MGLRU_STATS=DISABLED\n          TCP_CONGESTION_AVAILABLE=CUBIC_BBR\n          TCP_CONGESTION_DEFAULT=BBR\n          TCP_QDISC_FQ=BUILT_IN\n          AUTO_REBOOT=0\n"""
+          if s.count(old3) != 1:
+              raise SystemExit('MAX-LTS provenance anchor changed; refusing blind patch')
+          p.write_text(s.replace(old3,new3,1))
+          PY
+
+          grep -Fq "CONFIG_LRU_GEN_ENABLED=y" "$F"
+          grep -Fq "CONFIG_TCP_CONG_BBR=y" "$F"
+          grep -Fq "CONFIG_DEFAULT_TCP_CONG=\\\"bbr\\\"" "$F"
+          grep -Fq "TCP_CONGESTION_DEFAULT=BBR" "$F"
+
+      - name: Commit optimized build workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'TicWatch MAX-LTS CI'
+          git config user.email 'ci@local'
+          git add .github/workflows/ticwatch-max-lts-211-build.yml
+          git diff --cached --check
+          git diff --cached --quiet && { echo 'No changes required'; exit 0; }
+          git commit -m 'Enable MGLRU and BBR in MAX-LTS build'
+          git push origin HEAD:ticwatch-max-lts-211
