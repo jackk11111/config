@@ -1,0 +1,165 @@
+name: TicWatch Ultimate - Complete Termux ADB Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-ultimate-ci
+    paths:
+      - '.github/workflows/ticwatch-ultimate-complete-bundle.yml'
+      - 'ticwatch-ultimate/TERMUX-ADB.sh'
+      - 'ticwatch-ultimate/README-TERMUX.txt'
+      - 'ticwatch-ultimate/wireless-flasher/flash-template.sh'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ticwatch-ultimate-complete-bundle
+  cancel-in-progress: true
+
+env:
+  SOURCE_RUN_ID: '34563994675'
+  SOURCE_ARTIFACT: 'TicWatch-Ultimate-KSUNext-3.3.0-Spoofed-PAIRED'
+  MANAGER_APK: 'KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk'
+  FLASHABLE_ZIP: 'TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS-PAIRED.zip'
+  EXPECTED_IMAGE_SHA256: '3635290d22fc2da835c7f4e950475238ee6e2171f0117bd2e70c6b43aa505cec'
+  EXPECTED_MANAGER_SHA256: '8310faebd2b592ccddd6a15a6d996c70d89cd679eb51835e84d18f531471357b'
+  EXPECTED_FLASHABLE_SHA256: '18b221b7e40f5c4a64a7dc694a49e095ef3cebc962b3d48a8669d778ed1e2822'
+  EXPECTED_BUSYBOX_SHA256: 'c629fce4b0dd3ba9775f851d0941e74582115f423258d3a79800f2bd11d30f5c'
+  EXPECTED_MAGISKBOOT_SHA256: '3936f1fd3a270f0f186b8327ef62145de91106c354eee7083518057ba6992d4b'
+
+jobs:
+  package-complete:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout packaging sources
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-ultimate-ci
+
+      - name: Download exact successful paired build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p paired
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name "$SOURCE_ARTIFACT" \
+            --dir paired
+          test -s paired/Image
+          test -s "paired/$MANAGER_APK"
+          test -s "paired/$FLASHABLE_ZIP"
+          test -s paired/SHA256SUMS
+          printf '%s  %s\n' "$EXPECTED_IMAGE_SHA256" paired/Image | sha256sum -c -
+          printf '%s  %s\n' "$EXPECTED_MANAGER_SHA256" "paired/$MANAGER_APK" | sha256sum -c -
+          printf '%s  %s\n' "$EXPECTED_FLASHABLE_SHA256" "paired/$FLASHABLE_ZIP" | sha256sum -c -
+          grep -Fqx "$EXPECTED_IMAGE_SHA256  Image" paired/SHA256SUMS
+          grep -Fqx "$EXPECTED_MANAGER_SHA256  $MANAGER_APK" paired/SHA256SUMS
+          grep -Fqx "$EXPECTED_FLASHABLE_SHA256  $FLASHABLE_ZIP" paired/SHA256SUMS
+
+      - name: Build verified wireless root flasher
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p bundle/wireless-flasher bundle/audit
+          cp paired/Image bundle/wireless-flasher/Image
+          unzip -p "paired/$FLASHABLE_ZIP" tools/busybox > bundle/wireless-flasher/busybox
+          unzip -p "paired/$FLASHABLE_ZIP" tools/magiskboot > bundle/wireless-flasher/magiskboot
+          chmod 0755 bundle/wireless-flasher/busybox bundle/wireless-flasher/magiskboot
+          printf '%s  %s\n' "$EXPECTED_BUSYBOX_SHA256" bundle/wireless-flasher/busybox | sha256sum -c -
+          printf '%s  %s\n' "$EXPECTED_MAGISKBOOT_SHA256" bundle/wireless-flasher/magiskboot | sha256sum -c -
+          sed "s/__IMAGE_SHA256__/$EXPECTED_IMAGE_SHA256/g" \
+            ticwatch-ultimate/wireless-flasher/flash-template.sh \
+            > bundle/wireless-flasher/flash.sh
+          chmod 0755 bundle/wireless-flasher/flash.sh
+          sh -n bundle/wireless-flasher/flash.sh
+          grep -Fq "EXPECTED_IMAGE_SHA=\"$EXPECTED_IMAGE_SHA256\"" bundle/wireless-flasher/flash.sh
+          cat > bundle/wireless-flasher/README.txt <<'EOF'
+          Standalone watch-side flasher. Normally use ../TERMUX-ADB.sh from the phone.
+          Default mode is dry-run: flash.sh --check
+          Actual write requires: flash.sh --flash
+          Restore preserved original boot: flash.sh --restore
+          No mode performs an automatic reboot.
+          EOF
+          (
+            cd bundle/wireless-flasher
+            sha256sum Image busybox magiskboot flash.sh > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+          (
+            cd bundle
+            tar -cf TicWatch-KSUN330-Wireless-Root-Flasher.tar wireless-flasher
+          )
+          tar -tf bundle/TicWatch-KSUN330-Wireless-Root-Flasher.tar | grep -Fqx 'wireless-flasher/flash.sh'
+
+      - name: Assemble one complete phone bundle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp paired/Image bundle/Image
+          cp "paired/$MANAGER_APK" bundle/
+          cp "paired/$FLASHABLE_ZIP" bundle/
+          cp ticwatch-ultimate/TERMUX-ADB.sh bundle/TERMUX-ADB.sh
+          cp ticwatch-ultimate/README-TERMUX.txt bundle/README-TERMUX.txt
+          chmod 0755 bundle/TERMUX-ADB.sh
+          bash -n bundle/TERMUX-ADB.sh
+
+          for f in final.config System.map Module.symvers kernelrelease.txt llvm-version.txt provenance.txt SHA256SUMS kernel-build.log kernel-source-final.patch kernelsu-source-final.patch manager-cert.der manager-cert.txt; do
+            test -s "paired/$f"
+            cp "paired/$f" bundle/audit/
+          done
+          mkdir -p bundle/audit/ticwatch-ultimate-results
+          test -s paired/ticwatch-ultimate-results/preflight.txt
+          cp paired/ticwatch-ultimate-results/preflight.txt bundle/audit/ticwatch-ultimate-results/preflight.txt
+
+          cat > bundle/COMPLETE-PROVENANCE.txt <<EOF
+          SOURCE_RUN_ID=$SOURCE_RUN_ID
+          SOURCE_ARTIFACT=$SOURCE_ARTIFACT
+          IMAGE_SHA256=$EXPECTED_IMAGE_SHA256
+          MANAGER_APK=$MANAGER_APK
+          MANAGER_APK_SHA256=$EXPECTED_MANAGER_SHA256
+          FLASHABLE_ZIP=$FLASHABLE_ZIP
+          FLASHABLE_ZIP_SHA256=$EXPECTED_FLASHABLE_SHA256
+          WIRELESS_FLASHER=verified-root-active-slot-boot-only
+          TERMUX_HELPER=wireless-adb-dry-run-backup-manager-flash-restore
+          AUTO_REBOOT=0
+          EOF
+
+          (
+            cd bundle
+            sha256sum \
+              Image \
+              "$MANAGER_APK" \
+              "$FLASHABLE_ZIP" \
+              TicWatch-KSUN330-Wireless-Root-Flasher.tar \
+              TERMUX-ADB.sh \
+              README-TERMUX.txt \
+              COMPLETE-PROVENANCE.txt > COMPLETE-SHA256SUMS
+            sha256sum -c COMPLETE-SHA256SUMS
+          )
+
+      - name: Validate final package layout
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -s bundle/TERMUX-ADB.sh
+          test -s "bundle/$MANAGER_APK"
+          test -s bundle/Image
+          test -s bundle/wireless-flasher/flash.sh
+          test -s bundle/TicWatch-KSUN330-Wireless-Root-Flasher.tar
+          test -s bundle/COMPLETE-SHA256SUMS
+          printf 'Final bundle files:\n'
+          find bundle -maxdepth 2 -type f -printf '%P\n' | sort
+
+      - name: Upload complete Termux ADB bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-Ultimate-KSUNext-3.3.0-Spoofed-COMPLETE
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 90
