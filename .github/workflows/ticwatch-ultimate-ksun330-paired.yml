@@ -21,12 +21,12 @@ concurrency:
 env:
   LLVM_VERSION: '20.1.0'
   LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
-  MANAGER_RUN_ID: '34524543446'
+  MANAGER_RUN_ID: '34563469731'
   MANAGER_ARTIFACT: 'KernelSU-Next-v3.3.0-Spoofed-TicWatch-armv7'
   MANAGER_APK: 'KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk'
-  MANAGER_APK_SHA256: 'b1d1c8a3f95449091dc7bd641c238ab1ad619ad0a11db7477e2a6db6111b6551'
-  KSU_NEXT_MANAGER_SIZE: '0x45c'
-  KSU_NEXT_MANAGER_HASH: '700dc87b739c05d3325de011d4b062058f7e50744c61b3f213dfd39538de7763'
+  MANAGER_APK_SHA256: '8310faebd2b592ccddd6a15a6d996c70d89cd679eb51835e84d18f531471357b'
+  KSU_NEXT_MANAGER_SIZE: '0x3c2'
+  KSU_NEXT_MANAGER_HASH: '3bc9938c38106bcf618bbe1d37ad4adde8a49c659e2860709bbfc341f7e749f2'
   ANYKERNEL_REPO: 'https://github.com/Winkmoon/AnyKernel3.git'
   ANYKERNEL_SHA: 'ad62484a9cd193ba24991e617bae66e25c0d0228'
   EXPECTED_UTS_PREFIX: '5.15.202-Xinran_StarBai-Test'
@@ -53,7 +53,7 @@ jobs:
             gnupg gawk gcc-multilib g++-multilib ccache rsync file \
             binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
 
-      - name: Retrieve exact spoofed armv7 Manager
+      - name: Retrieve exact validated spoofed armv7 Manager
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -65,44 +65,73 @@ jobs:
             --name "$MANAGER_ARTIFACT" \
             --dir paired-manager
           test -s "paired-manager/$MANAGER_APK"
+          test -s paired-manager/manager-cert.txt
+          test -s paired-manager/manager-provenance.txt
           printf '%s  %s\n' "$MANAGER_APK_SHA256" "paired-manager/$MANAGER_APK" | sha256sum -c -
+          grep -Fqx 'OFFICIAL_SPOOF_SCRIPT=1' paired-manager/manager-provenance.txt
+          grep -Fqx 'ABI=armeabi-v7a' paired-manager/manager-provenance.txt
+          grep -Fqx 'KERNELSU_CERT_MAX_LENGTH=1024' paired-manager/manager-provenance.txt
+          grep -Fqx "MANAGER_APK_SHA256=$MANAGER_APK_SHA256" paired-manager/manager-cert.txt
+          grep -Fqx "MANAGER_CERT_SIZE_HEX=$KSU_NEXT_MANAGER_SIZE" paired-manager/manager-cert.txt
+          grep -Fqx "MANAGER_CERT_SHA256=$KSU_NEXT_MANAGER_HASH" paired-manager/manager-cert.txt
+          grep -Fqx 'KERNELSU_CERT_MAX_LENGTH=1024' paired-manager/manager-cert.txt
           cp "paired-manager/$MANAGER_APK" "$GITHUB_WORKSPACE/$MANAGER_APK"
 
-      - name: Verify Manager v2 certificate exactly matches kernel identity
+      - name: Verify Manager exactly as KernelSU Next v3.3.0 accepts it
         shell: bash
         run: |
           set -Eeuo pipefail
           python3 - <<'PY'
-          import hashlib, struct
+          import hashlib, os, struct, zipfile
           from pathlib import Path
-          import os
 
           apk = Path(os.environ['MANAGER_APK'])
           data = apk.read_bytes()
+          if hashlib.sha256(data).hexdigest() != os.environ['MANAGER_APK_SHA256']:
+              raise SystemExit('Manager APK SHA256 mismatch')
+
+          with zipfile.ZipFile(apk) as z:
+              if 'META-INF/MANIFEST.MF' in z.namelist():
+                  raise SystemExit('KernelSU rejects v1-signed Manager APKs')
+
           eocd = data.rfind(b'PK\x05\x06')
           if eocd < 0:
               raise SystemExit('EOCD not found')
           cd_off = struct.unpack_from('<I', data, eocd + 16)[0]
           size = struct.unpack_from('<Q', data, cd_off - 24)[0]
-          if data[cd_off-16:cd_off] != b'APK Sig Block 42':
+          if data[cd_off - 16:cd_off] != b'APK Sig Block 42':
               raise SystemExit('APK Signing Block missing')
           start = cd_off - (size + 8)
           if struct.unpack_from('<Q', data, start)[0] != size:
               raise SystemExit('APK Signing Block size mismatch')
+
+          ids, v2 = [], []
           p = start + 8
           end = cd_off - 24
-          v2 = []
           while p < end:
-              ln = struct.unpack_from('<Q', data, p)[0]; p += 8
-              ident = struct.unpack_from('<I', data, p)[0]; p += 4
-              val = data[p:p+ln-4]; p += ln-4
+              ln = struct.unpack_from('<Q', data, p)[0]
+              p += 8
+              ident = struct.unpack_from('<I', data, p)[0]
+              p += 4
+              val = data[p:p + ln - 4]
+              p += ln - 4
+              ids.append(ident)
               if ident == 0x7109871a:
                   v2.append(val)
           if len(v2) != 1:
               raise SystemExit(f'expected exactly one v2 signer block, got {len(v2)}')
+          if 0xf05368c0 in ids or 0x1b93ad61 in ids:
+              raise SystemExit('KernelSU rejects APK v3/v3.1 Manager signatures')
+
           def lp(buf, off=0):
+              if off + 4 > len(buf):
+                  raise SystemExit('truncated length-prefixed field')
               n = struct.unpack_from('<I', buf, off)[0]
-              return buf[off+4:off+4+n], off+4+n
+              end = off + 4 + n
+              if end > len(buf):
+                  raise SystemExit('invalid length-prefixed field')
+              return buf[off + 4:end], end
+
           signers, _ = lp(v2[0])
           signer, rem = lp(signers)
           if rem != len(signers):
@@ -115,23 +144,28 @@ jobs:
           cert, rem = lp(certs)
           if rem != len(certs):
               raise SystemExit('multiple certificates are not accepted')
+
           cert_size = len(cert)
           cert_hash = hashlib.sha256(cert).hexdigest()
           expected_size = int(os.environ['KSU_NEXT_MANAGER_SIZE'], 0)
           expected_hash = os.environ['KSU_NEXT_MANAGER_HASH']
-          print(f'MANAGER_CERT_SIZE={cert_size} (0x{cert_size:x})')
-          print(f'MANAGER_CERT_SHA256={cert_hash}')
+          if cert_size > 1024:
+              raise SystemExit(f'certificate {cert_size} exceeds KernelSU CERT_MAX_LENGTH=1024')
           if cert_size != expected_size:
-              raise SystemExit('manager cert size mismatch')
+              raise SystemExit(f'manager cert size mismatch: {cert_size} != {expected_size}')
           if cert_hash != expected_hash:
               raise SystemExit('manager cert hash mismatch')
+
           Path('manager-cert.der').write_bytes(cert)
           Path('manager-cert.txt').write_text(
               f'MANAGER_APK_SHA256={os.environ["MANAGER_APK_SHA256"]}\n'
               f'MANAGER_CERT_SIZE={cert_size}\n'
               f'MANAGER_CERT_SIZE_HEX=0x{cert_size:x}\n'
               f'MANAGER_CERT_SHA256={cert_hash}\n'
+              f'APK_SIGNING_IDS={",".join(hex(x) for x in ids)}\n'
+              'KERNELSU_CERT_MAX_LENGTH=1024\n'
           )
+          print(Path('manager-cert.txt').read_text(), end='')
           PY
 
       - name: Install exact LLVM 20.1.0
@@ -158,6 +192,9 @@ jobs:
             ticwatch-ultimate/preflight.sh
           bash ticwatch-ultimate/preflight.sh
           grep -Fqx 'RESULT=PASS' ticwatch-ultimate-results/preflight.txt
+          grep -Fq '#define CERT_MAX_LENGTH 1024' \
+            .ticwatch-preflight/common/KernelSU-Next/kernel/manager/apk_sign.c
+          test "$((KSU_NEXT_MANAGER_SIZE))" -le 1024
 
       - name: Repair KSUN 3.3.0 SuSFS first-zygote static key
         shell: bash
@@ -168,6 +205,10 @@ jobs:
             .ticwatch-preflight/common/KernelSU-Next/kernel/runtime/ksud_integration.c
           grep -Fq 'static_branch_disable(&is_first_zygote);' \
             .ticwatch-preflight/common/KernelSU-Next/kernel/runtime/ksud_integration.c
+          git -C .ticwatch-preflight/common/KernelSU-Next diff --binary > kernelsu-source-final.patch
+          git -C .ticwatch-preflight/common diff --binary > kernel-source-final.patch
+          test -s kernelsu-source-final.patch
+          test -s kernel-source-final.patch
 
       - name: Resolve final TicWatch config
         shell: bash
@@ -197,7 +238,7 @@ jobs:
           grep -Fqx 'CONFIG_LOCALVERSION="-Xinran_StarBai-Test"' out/.config
           cp out/.config "$GITHUB_WORKSPACE/final.config"
 
-      - name: Compile kernel paired to this Manager certificate
+      - name: Compile kernel paired to validated Manager certificate
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -218,7 +259,11 @@ jobs:
             KSU_NEXT_MANAGER_HASH="$KSU_NEXT_MANAGER_HASH" \
             2>&1 | tee "$GITHUB_WORKSPACE/kernel-build.log"
           test -s out/arch/arm64/boot/Image
+          test -s out/System.map
+          test -s out/Module.symvers
           cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"
+          cp out/System.map "$GITHUB_WORKSPACE/System.map"
+          cp out/Module.symvers "$GITHUB_WORKSPACE/Module.symvers"
           make -s O=out ARCH=arm64 kernelrelease | tee "$GITHUB_WORKSPACE/kernelrelease.txt"
           release="$(cat "$GITHUB_WORKSPACE/kernelrelease.txt")"
           case "$release" in
@@ -244,6 +289,9 @@ jobs:
             zip -qr9 "$GITHUB_WORKSPACE/TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS-PAIRED.zip" .
           )
           test -s TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS-PAIRED.zip
+          unzip -p TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS-PAIRED.zip Image > packaged-Image
+          cmp -s Image packaged-Image
+          rm packaged-Image
 
       - name: Generate final provenance and hashes
         shell: bash
@@ -254,6 +302,7 @@ jobs:
             echo 'BASE_SHA=3929c55fbc7559af6df290d2c0f66dc551af161a'
             echo 'KSUN_VERSION=v3.3.0'
             echo 'KSUN_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771'
+            echo 'KSUN_OFFICIAL_SPOOF_SCRIPT=1'
             echo 'SUSFS_VERSION=v2.2.0'
             echo 'SUSFS_SHA=65ea8683c794cc309c3b0c4e6b57c1d972ca9a76'
             echo 'WILD_PATCHES_SHA=4285cd1755f62a20269aa80757ecb4631908ec77'
@@ -263,6 +312,7 @@ jobs:
             echo "MANAGER_APK_SHA256=$MANAGER_APK_SHA256"
             echo "MANAGER_CERT_SIZE=$KSU_NEXT_MANAGER_SIZE"
             echo "MANAGER_CERT_SHA256=$KSU_NEXT_MANAGER_HASH"
+            echo 'MANAGER_CERT_MAX_LENGTH=1024'
             echo 'MANAGER_ABI=armeabi-v7a'
             echo 'MANAGER_SPOOFED=1'
             echo "ANYKERNEL_SHA=$ANYKERNEL_SHA"
@@ -275,6 +325,10 @@ jobs:
             TicWatch-Ultimate-5.15-KSUNext-3.3.0-Spoofed-SuSFS-PAIRED.zip \
             "$MANAGER_APK" \
             final.config \
+            System.map \
+            Module.symvers \
+            kernelsu-source-final.patch \
+            kernel-source-final.patch \
             provenance.txt > SHA256SUMS
           cat provenance.txt
           cat SHA256SUMS
@@ -290,11 +344,15 @@ jobs:
             manager-cert.der
             manager-cert.txt
             final.config
+            System.map
+            Module.symvers
             kernelrelease.txt
             llvm-version.txt
             provenance.txt
             SHA256SUMS
             kernel-build.log
+            kernel-source-final.patch
+            kernelsu-source-final.patch
             ticwatch-ultimate-results/preflight.txt
           if-no-files-found: error
           retention-days: 90
