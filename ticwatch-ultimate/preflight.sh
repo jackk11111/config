@@ -188,8 +188,23 @@ call = "#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, c
 if s.count(decl) != 1 or s.count(call) != 1:
     raise SystemExit("unexpected legacy manual reboot-hook context")
 p.write_text(s.replace(decl, "", 1).replace(call, "", 1))
+
+# Android-common 5.15 LTS may carry the blk vendor trace include at the
+# exact insertion point used by the canonical SuSFS namespace patch.
+# Remove it only temporarily and remember whether it must be restored.
+p = Path("fs/namespace.c")
+s = p.read_text()
+hook = "#include <trace/hooks/blk.h>\n"
+marker = Path("../.restore_namespace_blk_trace_hook")
+if marker.exists():
+    marker.unlink()
+if s.count(hook) > 1:
+    raise SystemExit("unexpected namespace blk trace-hook count")
+if s.count(hook) == 1:
+    p.write_text(s.replace(hook, "", 1))
+    marker.write_text("1\n")
 PY
-pass "two known TicWatch-local patch-context collisions normalized"
+pass "known TicWatch/LTS patch-context collisions normalized"
 
 log "[8/11] Apply canonical Android 13 / Linux 5.15 SuSFS kernel patch"
 PATCH="$ROOT/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
@@ -211,6 +226,19 @@ anchor = "\n#include <asm/elf.h>"
 if s.count(anchor) != 1:
     raise SystemExit("cannot restore vendor mm trace hook")
 p.write_text(s.replace(anchor, "\n#include <trace/hooks/mm.h>\n\n#include <asm/elf.h>", 1))
+
+marker = Path("../.restore_namespace_blk_trace_hook")
+if marker.exists():
+    p = Path("fs/namespace.c")
+    s = p.read_text()
+    hook = "#include <trace/hooks/blk.h>"
+    if hook in s:
+        raise SystemExit("namespace blk trace hook unexpectedly already present")
+    ns_anchor = '#include "internal.h"\n'
+    if s.count(ns_anchor) != 1:
+        raise SystemExit("cannot restore namespace blk trace hook")
+    p.write_text(s.replace(ns_anchor, ns_anchor + "#include <trace/hooks/blk.h>\n", 1))
+    marker.unlink()
 
 # Retain previous manual-hook source only as a disabled fallback path.
 p = Path("kernel/reboot.c")
