@@ -160,7 +160,7 @@ jobs:
           p.write_text(s)
           PY
           F=.ticwatch-preflight/common/KernelSU-Next/userspace/ksud/src/susfsd.rs
-          test "$(grep -Fc 'as c_long' "$F")" -ge 12
+          test "$(grep -Fo 'as c_long' "$F" | wc -l)" -ge 12
 
       - name: Capture final source diffs and assert kernel capabilities
         shell: bash
