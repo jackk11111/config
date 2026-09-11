@@ -45,6 +45,8 @@ jobs:
           git -C KSUN fetch -q --depth=1 origin 3b18216f71df189ab3d1b1ce0bdb21be1268e771
           git -C KSUN checkout -q --detach FETCH_HEAD
           test "$(git -C KSUN rev-parse HEAD)" = "3b18216f71df189ab3d1b1ce0bdb21be1268e771"
+          test -x KSUN/manager/spoof
+          sha256sum KSUN/manager/spoof | tee official-spoof-script-sha256.txt
 
       - name: Build exact v3.3.0 ksud for armeabi-v7a
         env:
@@ -60,6 +62,7 @@ jobs:
           cargo ndk -t armeabi-v7a -P 26 build --release
           file target/armv7-linux-androideabi/release/ksud | tee "$GITHUB_WORKSPACE/ksud-armv7-file.txt"
           file target/armv7-linux-androideabi/release/ksud | grep -Fq 'ELF 32-bit'
+          file target/armv7-linux-androideabi/release/ksud | grep -Fq 'ARM'
           sha256sum target/armv7-linux-androideabi/release/ksud | tee "$GITHUB_WORKSPACE/ksud-armv7-sha256.txt"
 
       - name: Apply official spoof transform and force Manager native ABI to armv7
@@ -71,6 +74,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           bash ticwatch-ksun330-armv7/force-manager-armv7.sh KSUN/manager
           grep -E 'namespace =|managerVersionNameSpoofed' KSUN/manager/app/build.gradle.kts | tee manager-identity.txt
+          grep -Fq -- '-spoofed' manager-identity.txt
 
       - name: Install armv7 ksud into Manager package
         run: |
@@ -80,14 +84,21 @@ jobs:
              KSUN/manager/app/src/main/jniLibs/armeabi-v7a/libksud.so
           file KSUN/manager/app/src/main/jniLibs/armeabi-v7a/libksud.so
 
-      - name: Create signing key for paired Manager artifact
+      - name: Create kernel-compatible signing key for paired Manager artifact
         run: |
           set -Eeuo pipefail
           cd KSUN/manager
+          # KernelSU Next v3.3.0 manager/apk_sign.c has CERT_MAX_LENGTH=1024.
+          # Keep RSA-3072 but use a deliberately short subject so DER stays below that limit.
           keytool -genkeypair -noprompt \
             -keystore key.jks -storepass ticwatch330 -keypass ticwatch330 \
             -alias ticwatch330 -keyalg RSA -keysize 3072 -validity 3650 \
-            -dname 'CN=TicWatch KSU Next 3.3.0, OU=Local Build, O=jackk11111, C=IT'
+            -dname 'CN=TW'
+          keytool -exportcert -keystore key.jks -storepass ticwatch330 \
+            -alias ticwatch330 -file "$GITHUB_WORKSPACE/prebuild-manager-cert.der"
+          cert_len="$(wc -c < "$GITHUB_WORKSPACE/prebuild-manager-cert.der")"
+          echo "PREBUILD_CERT_SIZE=$cert_len"
+          test "$cert_len" -le 1024
           {
             echo 'KEYSTORE_PASSWORD=ticwatch330'
             echo 'KEY_ALIAS=ticwatch330'
@@ -103,6 +114,99 @@ jobs:
           APK="$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -n1)"
           test -n "$APK" -a -s "$APK"
           cp "$APK" "$GITHUB_WORKSPACE/KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk"
+
+      - name: Verify signing block exactly as KernelSU Next will accept it
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib, os, struct, zipfile
+          from pathlib import Path
+
+          apk = Path('KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk')
+          data = apk.read_bytes()
+          apk_hash = hashlib.sha256(data).hexdigest()
+
+          with zipfile.ZipFile(apk) as z:
+              if 'META-INF/MANIFEST.MF' in z.namelist():
+                  raise SystemExit('KernelSU rejects v1-signed Manager APKs')
+
+          eocd = data.rfind(b'PK\x05\x06')
+          if eocd < 0:
+              raise SystemExit('EOCD not found')
+          cd_off = struct.unpack_from('<I', data, eocd + 16)[0]
+          size = struct.unpack_from('<Q', data, cd_off - 24)[0]
+          if data[cd_off - 16:cd_off] != b'APK Sig Block 42':
+              raise SystemExit('APK Signing Block missing')
+          start = cd_off - (size + 8)
+          if struct.unpack_from('<Q', data, start)[0] != size:
+              raise SystemExit('APK Signing Block size mismatch')
+
+          ids = []
+          v2 = []
+          p = start + 8
+          end = cd_off - 24
+          while p < end:
+              ln = struct.unpack_from('<Q', data, p)[0]
+              p += 8
+              ident = struct.unpack_from('<I', data, p)[0]
+              p += 4
+              val = data[p:p + ln - 4]
+              p += ln - 4
+              ids.append(ident)
+              if ident == 0x7109871a:
+                  v2.append(val)
+          if len(v2) != 1:
+              raise SystemExit(f'expected exactly one APK v2 signer block, got {len(v2)}')
+          if 0xf05368c0 in ids or 0x1b93ad61 in ids:
+              raise SystemExit('KernelSU rejects APK v3/v3.1 Manager signatures')
+
+          def lp(buf, off=0):
+              if off + 4 > len(buf):
+                  raise SystemExit('truncated length-prefixed field')
+              n = struct.unpack_from('<I', buf, off)[0]
+              end = off + 4 + n
+              if end > len(buf):
+                  raise SystemExit('invalid length-prefixed field')
+              return buf[off + 4:end], end
+
+          signers, _ = lp(v2[0])
+          signer, rem = lp(signers)
+          if rem != len(signers):
+              raise SystemExit('multiple v2 signers are not accepted')
+          signed, off = lp(signer)
+          _, off = lp(signer, off)  # signatures
+          _, off = lp(signer, off)  # public key
+          _, off = lp(signed)       # digests
+          certs, off = lp(signed, off)
+          cert, rem = lp(certs)
+          if rem != len(certs):
+              raise SystemExit('multiple certificates are not accepted')
+
+          cert_size = len(cert)
+          cert_hash = hashlib.sha256(cert).hexdigest()
+          if cert_size > 1024:
+              raise SystemExit(f'certificate is {cert_size} bytes; KernelSU v3.3.0 limit is 1024')
+
+          pre = Path('prebuild-manager-cert.der').read_bytes()
+          if pre != cert:
+              raise SystemExit('certificate inside APK differs from generated signing certificate')
+
+          Path('manager-cert.der').write_bytes(cert)
+          Path('manager-cert.txt').write_text(
+              f'MANAGER_APK_SHA256={apk_hash}\n'
+              f'MANAGER_CERT_SIZE={cert_size}\n'
+              f'MANAGER_CERT_SIZE_HEX=0x{cert_size:x}\n'
+              f'MANAGER_CERT_SHA256={cert_hash}\n'
+              f'APK_SIGNING_IDS={",".join(hex(x) for x in ids)}\n'
+              'KERNELSU_CERT_MAX_LENGTH=1024\n'
+          )
+          print(Path('manager-cert.txt').read_text(), end='')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f'MANAGER_APK_SHA256={apk_hash}\n')
+              f.write(f'MANAGER_CERT_SIZE={cert_size}\n')
+              f.write(f'MANAGER_CERT_SIZE_HEX=0x{cert_size:x}\n')
+              f.write(f'MANAGER_CERT_SHA256={cert_hash}\n')
+          PY
 
       - name: Verify complete ARM32 native payload
         run: |
@@ -126,13 +230,20 @@ jobs:
             file "$f" | grep -Fq 'ELF 32-bit'
             file "$f" | grep -Fq 'ARM'
           done
+          printf '%s  %s\n' "$MANAGER_APK_SHA256" "$APK" | sha256sum -c -
           sha256sum "$APK" | tee manager-apk-sha256.txt
           {
             echo 'KSUN_VERSION=v3.3.0'
             echo 'KSUN_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771'
+            echo 'OFFICIAL_SPOOF_SCRIPT=1'
             echo 'ABI=armeabi-v7a'
             echo 'SPOOFED=1'
             echo 'JNI_ARMV7_VERIFIED=1'
+            echo "MANAGER_APK_SHA256=$MANAGER_APK_SHA256"
+            echo "MANAGER_CERT_SIZE=$MANAGER_CERT_SIZE"
+            echo "MANAGER_CERT_SIZE_HEX=$MANAGER_CERT_SIZE_HEX"
+            echo "MANAGER_CERT_SHA256=$MANAGER_CERT_SHA256"
+            echo 'KERNELSU_CERT_MAX_LENGTH=1024'
             echo 'NOTE=Kernel must be paired to this APK signing certificate.'
             echo 'BOOTCTL_NOTE=Embedded bootctl is only used by post-OTA handling.'
           } > manager-provenance.txt
@@ -146,8 +257,11 @@ jobs:
             manager-apk-sha256.txt
             manager-provenance.txt
             manager-identity.txt
+            manager-cert.der
+            manager-cert.txt
             native-file-report.txt
             apk-contents.txt
+            official-spoof-script-sha256.txt
             spoof.log
             ksud-armv7-file.txt
             ksud-armv7-sha256.txt
