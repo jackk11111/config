@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          python3 - <<'PY'
+          python3 - <<'PATCHPY'
           from pathlib import Path
           p = Path('ticwatch-ultimate/preflight.sh')
           s = p.read_text()
@@ -82,7 +82,7 @@ jobs:
               raise SystemExit('step8 namespace restore anchor changed')
           s = s.replace(old2, new2, 1)
           p.write_text(s)
-          PY
+          PATCHPY
 
           bash -n ticwatch-ultimate/preflight.sh
           grep -Fq '.restore_namespace_blk_trace_hook' ticwatch-ultimate/preflight.sh
