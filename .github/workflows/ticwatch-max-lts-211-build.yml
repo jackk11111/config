@@ -222,12 +222,23 @@ jobs:
           export KBUILD_BUILD_VERSION=0 KBUILD_BUILD_USER='XinRan♡' KBUILD_BUILD_HOST='Bai'
           make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang BUILD_CONFIG=build.config.gki.aarch64 O=out DEPMOD=depmod gki_defconfig
           scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
+          scripts/config --file out/.config -e LRU_GEN -e LRU_GEN_ENABLED -d LRU_GEN_STATS
+          scripts/config --file out/.config -e TCP_CONG_ADVANCED -e TCP_CONG_CUBIC -e TCP_CONG_BBR -e DEFAULT_BBR -d DEFAULT_CUBIC -e NET_SCH_FQ
           make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang O=out olddefconfig
           grep -Fqx 'CONFIG_KSU=y' out/.config
           grep -Fqx 'CONFIG_KSU_SUSFS=y' out/.config
           grep -Fqx 'CONFIG_SECCOMP=y' out/.config
           grep -Fqx 'CONFIG_SECCOMP_FILTER=y' out/.config
           grep -Fqx 'CONFIG_HAVE_SYSCALL_TRACEPOINTS=y' out/.config
+          grep -Fqx 'CONFIG_LRU_GEN=y' out/.config
+          grep -Fqx 'CONFIG_LRU_GEN_ENABLED=y' out/.config
+          grep -Fqx '# CONFIG_LRU_GEN_STATS is not set' out/.config
+          grep -Fqx 'CONFIG_TCP_CONG_ADVANCED=y' out/.config
+          grep -Fqx 'CONFIG_TCP_CONG_CUBIC=y' out/.config
+          grep -Fqx 'CONFIG_TCP_CONG_BBR=y' out/.config
+          grep -Fqx 'CONFIG_DEFAULT_BBR=y' out/.config
+          grep -Fqx 'CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config
+          grep -Fqx 'CONFIG_NET_SCH_FQ=y' out/.config
           grep -Fqx '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set' out/.config
           grep -Fqx 'CONFIG_LOCALVERSION="-Xinran_StarBai-Test"' out/.config
           cp out/.config "$GITHUB_WORKSPACE/final.config"
@@ -347,6 +358,11 @@ jobs:
           BOOT_LAYOUT=SINGLE_OR_AB_AUTODETECT
           INSTALL_BASELINE=5.15.202-Xinran_StarBai-Test
           ROLLBACK_BASE=MAX-SAFE-5.15.202
+          MGLRU_DEFAULT=ENABLED
+          MGLRU_STATS=DISABLED
+          TCP_CONGESTION_AVAILABLE=CUBIC_BBR
+          TCP_CONGESTION_DEFAULT=BBR
+          TCP_QDISC_FQ=BUILT_IN
           AUTO_REBOOT=0
           EOF
           (
