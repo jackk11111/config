@@ -102,26 +102,28 @@ jobs:
           anchor='pass "LOCALVERSION matches installed Xinran_StarBai-Test baseline"\n'
           block=r'''pass "LOCALVERSION matches installed Xinran_StarBai-Test baseline"
 
-log "[1A/11] Merge exact Android-common 5.15.211 LTS tip into TicWatch base"
-cd "$ROOT/common"
-if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-  git fetch -q --unshallow origin >>"$REPORT" 2>&1 || fail "could not unshallow TicWatch history"
-fi
-git remote remove aosp >/dev/null 2>&1 || true
-git remote add aosp https://android.googlesource.com/kernel/common
-git fetch -q aosp 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 >>"$REPORT" 2>&1 || fail "could not fetch pinned Android-common LTS tip"
-merge_base="$(git merge-base HEAD 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508)"
-[ "$merge_base" = "fc88a7504f0f262cc5b2e8a7f58b2a1108034856" ] || fail "unexpected Android-common merge base: $merge_base"
-git -c user.name='TicWatch LTS CI' -c user.email='ci@local' merge --no-ff --no-edit 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 >>"$REPORT" 2>&1 || fail "Android-common 5.15.211 merge conflicted"
-test -z "$(git diff --name-only --diff-filter=U)" || fail "unmerged LTS paths remain"
-git merge-base --is-ancestor 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 HEAD || fail "LTS tip not ancestor after merge"
-version="$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' Makefile)"
-[ "$version" = "5.15.211" ] || fail "expected kernel 5.15.211 after LTS merge, got $version"
-git diff --check HEAD^ HEAD >>"$REPORT" 2>&1 || fail "whitespace errors in LTS merge"
-printf 'LTS_AOSP_TIP=%s\nLTS_MERGE_BASE=%s\nLTS_VERSION=%s\nLTS_MERGE_COMMIT=%s\n' \
-  7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 "$merge_base" "$version" "$(git rev-parse HEAD)" | tee -a "$REPORT"
-pass "Android-common 5.15.211 merged cleanly while retaining TicWatch vendor history"
-'''
+          log "[1A/11] Merge exact Android-common 5.15.211 LTS tip into TicWatch base"
+          cd "$ROOT/common"
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch -q --unshallow origin >>"$REPORT" 2>&1 || fail "could not unshallow TicWatch history"
+          fi
+          git remote remove aosp >/dev/null 2>&1 || true
+          git remote add aosp https://android.googlesource.com/kernel/common
+          git fetch -q aosp 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 >>"$REPORT" 2>&1 || fail "could not fetch pinned Android-common LTS tip"
+          merge_base="$(git merge-base HEAD 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508)"
+          [ "$merge_base" = "fc88a7504f0f262cc5b2e8a7f58b2a1108034856" ] || fail "unexpected Android-common merge base: $merge_base"
+          git -c user.name='TicWatch LTS CI' -c user.email='ci@local' merge --no-ff --no-edit 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 >>"$REPORT" 2>&1 || fail "Android-common 5.15.211 merge conflicted"
+          test -z "$(git diff --name-only --diff-filter=U)" || fail "unmerged LTS paths remain"
+          git merge-base --is-ancestor 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 HEAD || fail "LTS tip not ancestor after merge"
+          version="$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' Makefile)"
+          [ "$version" = "5.15.211" ] || fail "expected kernel 5.15.211 after LTS merge, got $version"
+          git diff --check HEAD^ HEAD >>"$REPORT" 2>&1 || fail "whitespace errors in LTS merge"
+          printf 'LTS_AOSP_TIP=%s\nLTS_MERGE_BASE=%s\nLTS_VERSION=%s\nLTS_MERGE_COMMIT=%s\n' \
+            7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 "$merge_base" "$version" "$(git rev-parse HEAD)" | tee -a "$REPORT"
+          pass "Android-common 5.15.211 merged cleanly while retaining TicWatch vendor history"
+          '''
+          import textwrap
+          block=textwrap.dedent(block).lstrip()
           if s.count(anchor) != 1:
               raise SystemExit('preflight LTS insertion anchor changed')
           p.write_text(s.replace(anchor, block, 1))
@@ -195,7 +197,7 @@ pass "Android-common 5.15.211 merged cleanly while retaining TicWatch vendor his
           F=.ticwatch-preflight/common/KernelSU-Next/userspace/ksud/src/susfsd.rs
           test "$(grep -Fo 'as c_long' "$F" | wc -l)" -ge 12
 
-      - name: Capture KSU source audit and assert capabilities
+      - name: Capture source audit and assert capabilities
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -268,6 +270,8 @@ pass "Android-common 5.15.211 merged cleanly while retaining TicWatch vendor his
           cp Image AnyKernel3/Image
           sed -i 's/^do.devicecheck=.*/do.devicecheck=1/' AnyKernel3/anykernel.sh
           sed -i 's/^device.name1=.*/device.name1=dace/' AnyKernel3/anykernel.sh
+          grep -Fqx 'do.devicecheck=1' AnyKernel3/anykernel.sh
+          grep -Fqx 'device.name1=dace' AnyKernel3/anykernel.sh
           (
             cd AnyKernel3
             zip -qr9 "$GITHUB_WORKSPACE/TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter.zip" .
