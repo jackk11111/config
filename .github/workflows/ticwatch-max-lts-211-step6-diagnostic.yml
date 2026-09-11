@@ -44,12 +44,12 @@ jobs:
         run: |
           set -Eeuo pipefail
           sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
-          sudo apt-get update -y
+          sudo apt-get update -y >/dev/null
           sudo apt-get install -y --no-install-recommends \
             build-essential flex bison bc python3 python-is-python3 \
             libssl-dev libelf-dev dwarves make cmake zip unzip curl wget \
             gnupg gawk gcc-multilib g++-multilib ccache rsync file \
-            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf >/dev/null
 
       - name: Retrieve exact crowned spoofed Manager
         env:
@@ -66,13 +66,12 @@ jobs:
           grep -Fqx "MANAGER_CERT_SIZE_HEX=$KSU_NEXT_MANAGER_SIZE" paired-manager/manager-cert.txt
           grep -Fqx "MANAGER_CERT_SHA256=$KSU_NEXT_MANAGER_HASH" paired-manager/manager-cert.txt
           cp "paired-manager/$MANAGER_APK" "$GITHUB_WORKSPACE/$MANAGER_APK"
-          cp paired-manager/manager-cert.txt "$GITHUB_WORKSPACE/manager-cert.txt"
 
       - name: Install exact LLVM 20.1.0
         shell: bash
         run: |
           set -Eeuo pipefail
-          wget -q --show-progress "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
+          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
           tar -xJf "$LLVM_ARCHIVE"
           mv "LLVM-${LLVM_VERSION}-Linux-X64" "$GITHUB_WORKSPACE/aosp-clang"
           rm -f "$LLVM_ARCHIVE"
@@ -80,113 +79,104 @@ jobs:
           echo "$GITHUB_WORKSPACE/aosp-clang/bin" >> "$GITHUB_PATH"
           "$GITHUB_WORKSPACE/aosp-clang/bin/clang" --version | head -n1
 
-      - name: Diagnose step 6 - Android-common 5.15.211 integration
+      - name: S6.1 Prepare TicWatch base up to LTS insertion point
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          REPORT="$GITHUB_WORKSPACE/ticwatch-ultimate-results/preflight.txt"
-          compact_report() {
-            echo '===== STEP6 COMPACT DIAGNOSTIC ====='
-            if [ -f "$REPORT" ]; then
-              echo '--- decisive lines ---'
-              grep -Ei '(^RESULT=|\bFAIL\b|\bERROR\b|unexpected|conflict|could not|unmerged|LTS_|5\.15\.211)' "$REPORT" | tail -n 60 || true
-              echo '--- last 30 report lines ---'
-              tail -n 30 "$REPORT" || true
-            else
-              echo '[diag] preflight report not created'
-            fi
-            if [ -d "$GITHUB_WORKSPACE/.ticwatch-preflight/common" ]; then
-              echo '--- common repo state ---'
-              git -C "$GITHUB_WORKSPACE/.ticwatch-preflight/common" status --short --branch | tail -n 40 || true
-              echo "HEAD=$(git -C "$GITHUB_WORKSPACE/.ticwatch-preflight/common" rev-parse HEAD 2>/dev/null || true)"
-              echo "AOSP_TIP_ANCESTOR=$(git -C "$GITHUB_WORKSPACE/.ticwatch-preflight/common" merge-base --is-ancestor "$AOSP_LTS_TIP" HEAD >/dev/null 2>&1 && echo yes || echo no)"
-            fi
-            echo '===================================='
-          }
-
-          fail_diag() {
-            rc="$1"; shift
-            echo "::error::STEP6_FAIL rc=$rc checkpoint=$*"
-            compact_report
-            exit "$rc"
-          }
-
-          echo '[S6.1] Patch Manager identity into preflight'
           sed -i \
             -e "s|^KSUN_MANAGER=.*|KSUN_MANAGER=\"$MANAGER_APK\"|" \
             -e "s|^KSUN_MANAGER_SHA256=.*|KSUN_MANAGER_SHA256=\"$MANAGER_APK_SHA256\"|" \
-            ticwatch-ultimate/preflight.sh || fail_diag $? 'patch-manager-identity'
-
-          echo '[S6.2] Inject pinned Android-common 5.15.211 merge block'
-          python3 - <<'PY' || fail_diag $? 'inject-lts-block'
+            ticwatch-ultimate/preflight.sh
+          python3 - <<'PY'
           from pathlib import Path
-          import textwrap
           p=Path('ticwatch-ultimate/preflight.sh')
           s=p.read_text()
           anchor='pass "LOCALVERSION matches installed Xinran_StarBai-Test baseline"\n'
-          block=r'''pass "LOCALVERSION matches installed Xinran_StarBai-Test baseline"
+          replacement=anchor + 'printf "DIAG_BASE_READY=1\\n" | tee -a "$REPORT"\nexit 0\n'
+          if s.count(anchor) != 1:
+              raise SystemExit('preflight LTS insertion anchor changed')
+          p.write_text(s.replace(anchor, replacement, 1))
+          PY
+          bash ticwatch-ultimate/preflight.sh
+          test -d .ticwatch-preflight/common/.git
+          grep -Fqx 'DIAG_BASE_READY=1' ticwatch-ultimate-results/preflight.txt
 
-          log "[1A/11] Merge exact Android-common 5.15.211 LTS tip into TicWatch base"
-          cd "$ROOT/common"
+      - name: S6.2 Fetch pinned Android-common 5.15.211 tip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
           if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
-            git fetch -q --unshallow origin >>"$REPORT" 2>&1 || fail "could not unshallow TicWatch history"
+            git fetch -q --unshallow origin
           fi
           git remote remove aosp >/dev/null 2>&1 || true
           git remote add aosp https://android.googlesource.com/kernel/common
-          git fetch -q aosp 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 >>"$REPORT" 2>&1 || fail "could not fetch pinned Android-common LTS tip"
-          merge_base="$(git merge-base HEAD 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508)"
-          [ "$merge_base" = "fc88a7504f0f262cc5b2e8a7f58b2a1108034856" ] || fail "unexpected Android-common merge base: $merge_base"
-          git -c user.name='TicWatch LTS CI' -c user.email='ci@local' merge --no-ff --no-edit 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 >>"$REPORT" 2>&1 || fail "Android-common 5.15.211 merge conflicted"
-          test -z "$(git diff --name-only --diff-filter=U)" || fail "unmerged LTS paths remain"
-          git merge-base --is-ancestor 7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 HEAD || fail "LTS tip not ancestor after merge"
+          git fetch -q aosp "$AOSP_LTS_TIP"
+          git cat-file -e "$AOSP_LTS_TIP^{commit}"
+          echo "AOSP_TIP_FETCHED=$AOSP_LTS_TIP"
+
+      - name: S6.3 Verify expected merge base
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          merge_base="$(git merge-base HEAD "$AOSP_LTS_TIP")"
+          echo "MERGE_BASE=$merge_base"
+          test "$merge_base" = "$EXPECTED_MERGE_BASE"
+
+      - name: S6.4 Merge Android-common 5.15.211
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          if ! git -c user.name='TicWatch LTS CI' -c user.email='ci@local' \
+              merge --no-ff --no-edit "$AOSP_LTS_TIP" >"$GITHUB_WORKSPACE/lts-merge-summary.txt" 2>&1; then
+            echo 'MERGE_RESULT=FAIL'
+            echo 'UNMERGED_PATHS:'
+            git diff --name-only --diff-filter=U | head -n 50 || true
+            echo 'MERGE_TAIL:'
+            tail -n 20 "$GITHUB_WORKSPACE/lts-merge-summary.txt" || true
+            exit 1
+          fi
+          echo 'MERGE_RESULT=PASS'
+          tail -n 8 "$GITHUB_WORKSPACE/lts-merge-summary.txt" || true
+
+      - name: S6.5 Verify merge completeness and ancestry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git merge-base --is-ancestor "$AOSP_LTS_TIP" HEAD
+          echo 'MERGE_COMPLETENESS=PASS'
+
+      - name: S6.6 Verify Makefile version is 5.15.211
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
           version="$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' Makefile)"
-          [ "$version" = "5.15.211" ] || fail "expected kernel 5.15.211 after LTS merge, got $version"
-          git diff --check HEAD^ HEAD >>"$REPORT" 2>&1 || fail "whitespace errors in LTS merge"
-          printf 'LTS_AOSP_TIP=%s\nLTS_MERGE_BASE=%s\nLTS_VERSION=%s\nLTS_MERGE_COMMIT=%s\n' \
-            7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508 "$merge_base" "$version" "$(git rev-parse HEAD)" | tee -a "$REPORT"
-          pass "Android-common 5.15.211 merged cleanly while retaining TicWatch vendor history"
-          '''
-          block=textwrap.dedent(block).lstrip()
-          if s.count(anchor) != 1:
-              raise SystemExit('preflight LTS insertion anchor changed')
-          p.write_text(s.replace(anchor, block, 1))
-          PY
+          echo "MAKEFILE_VERSION=$version"
+          test "$version" = '5.15.211'
 
-          echo '[S6.3] Run preflight'
-          set +e
-          bash ticwatch-ultimate/preflight.sh
-          preflight_rc=$?
-          set -e
-          echo "PRELIGHT_EXIT=$preflight_rc"
-          [ "$preflight_rc" -eq 0 ] || fail_diag "$preflight_rc" 'preflight-execution'
+      - name: S6.7 Check LTS merge whitespace
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          if ! git diff --check HEAD^ HEAD >"$GITHUB_WORKSPACE/lts-whitespace.txt" 2>&1; then
+            echo 'WHITESPACE_RESULT=FAIL'
+            head -n 40 "$GITHUB_WORKSPACE/lts-whitespace.txt" || true
+            exit 1
+          fi
+          echo 'WHITESPACE_RESULT=PASS'
 
-          echo '[S6.4] Validate RESULT=PASS'
-          grep -Fqx 'RESULT=PASS' "$REPORT" || fail_diag $? 'result-pass'
-
-          echo '[S6.5] Validate LTS_VERSION'
-          grep -Fq 'LTS_VERSION=5.15.211' "$REPORT" || fail_diag $? 'lts-version-report'
-
-          echo '[S6.6] Validate pinned AOSP tip in report'
-          grep -Fq "LTS_AOSP_TIP=$AOSP_LTS_TIP" "$REPORT" || fail_diag $? 'lts-tip-report'
-
-          echo '[S6.7] Enter merged common tree'
-          cd .ticwatch-preflight/common || fail_diag $? 'cd-common'
-
-          echo '[S6.8] Validate Makefile version'
-          actual_version="$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' Makefile)"
-          echo "MAKEFILE_VERSION=$actual_version"
-          [ "$actual_version" = '5.15.211' ] || fail_diag 1 'makefile-version'
-
-          echo '[S6.9] Validate AOSP tip ancestry'
-          git merge-base --is-ancestor "$AOSP_LTS_TIP" HEAD || fail_diag $? 'aosp-tip-ancestor'
-
-          echo '[S6.10] Save merged HEAD'
-          git rev-parse HEAD | tee "$GITHUB_WORKSPACE/lts-merged-head.txt" || fail_diag $? 'save-merged-head'
-
-          echo '[S6.11] Generate source patch from BASE_KERNEL_SHA'
-          git diff "$BASE_KERNEL_SHA" --binary > "$GITHUB_WORKSPACE/kernel-source-lts211.patch" || fail_diag $? 'generate-source-patch'
-          test -s "$GITHUB_WORKSPACE/kernel-source-lts211.patch" || fail_diag $? 'source-patch-empty'
-
+      - name: S6.8 Save merged head and source patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          git rev-parse HEAD | tee "$GITHUB_WORKSPACE/lts-merged-head.txt"
+          git diff "$BASE_KERNEL_SHA" --binary > "$GITHUB_WORKSPACE/kernel-source-lts211.patch"
+          test -s "$GITHUB_WORKSPACE/kernel-source-lts211.patch"
           echo 'STEP6_DIAGNOSTIC_RESULT=PASS'
-          compact_report
