@@ -1,0 +1,76 @@
+name: Diagnose SuSFS LTS patch conflicts
+
+on:
+  push:
+    branches:
+      - ticwatch-max-lts-211
+    paths:
+      - '.github/workflows/_diag-susfs-lts-patch.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-211
+
+      - name: Reproduce verified LTS tree and check SuSFS patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE_REPO='https://github.com/Winkmoon/android_kernel_TicWatch-Pro5.git'
+          BASE_SHA='3929c55fbc7559af6df290d2c0f66dc551af161a'
+          AOSP_TIP='7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508'
+          EXPECTED_MERGE_BASE='fc88a7504f0f262cc5b2e8a7f58b2a1108034856'
+          SUSFS_REPO='https://github.com/ShirkNeko/susfs4ksu.git'
+          SUSFS_SHA='65ea8683c794cc309c3b0c4e6b57c1d972ca9a76'
+
+          git init -q common
+          git -C common remote add origin "$BASE_REPO"
+          git -C common fetch -q --depth=1 origin "$BASE_SHA"
+          git -C common checkout -q --detach FETCH_HEAD
+          git -C common fetch -q --unshallow origin
+          git -C common remote add aosp https://android.googlesource.com/kernel/common
+          git -C common fetch -q aosp "$AOSP_TIP"
+          test "$(git -C common merge-base HEAD "$AOSP_TIP")" = "$EXPECTED_MERGE_BASE"
+          git -C common -c user.name='TicWatch LTS CI' -c user.email='ci@local' merge --no-ff --no-edit "$AOSP_TIP" >/dev/null
+
+          git init -q susfs4ksu
+          git -C susfs4ksu remote add origin "$SUSFS_REPO"
+          git -C susfs4ksu fetch -q --depth=1 origin "$SUSFS_SHA"
+          git -C susfs4ksu checkout -q --detach FETCH_HEAD
+
+          cd common
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('fs/proc/task_mmu.c')
+          s=p.read_text()
+          old='#include <linux/pkeys.h>\n#include <trace/hooks/mm.h>\n\n#include <asm/elf.h>'
+          new='#include <linux/pkeys.h>\n\n#include <asm/elf.h>'
+          if s.count(old) != 1:
+              raise SystemExit('unexpected task_mmu vendor-hook context')
+          p.write_text(s.replace(old,new,1))
+
+          p=Path('kernel/reboot.c')
+          s=p.read_text()
+          decl='#ifdef CONFIG_KSU_MANUAL_HOOK\nextern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);\n#endif\n\n'
+          call='#ifdef CONFIG_KSU_MANUAL_HOOK\n\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n#endif\n'
+          if s.count(decl) != 1 or s.count(call) != 1:
+              raise SystemExit('unexpected legacy manual reboot-hook context')
+          p.write_text(s.replace(decl,'',1).replace(call,'',1))
+          PY
+
+          PATCH="$GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
+          if git apply --check "$PATCH" 2>"$GITHUB_WORKSPACE/apply.err"; then
+            echo 'PATCH_CHECK=PASS'
+          else
+            echo 'PATCH_CHECK=FAIL'
+            sed -n '1,40p' "$GITHUB_WORKSPACE/apply.err"
+            exit 1
+          fi
