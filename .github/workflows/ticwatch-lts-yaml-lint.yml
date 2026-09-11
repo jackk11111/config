@@ -1,0 +1,22 @@
+name: TicWatch LTS Workflow YAML Lint
+on:
+  push:
+    branches: [ticwatch-max-lts-211]
+    paths: ['.github/workflows/ticwatch-lts-yaml-lint.yml']
+permissions:
+  contents: read
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-211
+      - name: Parse candidate workflow
+        run: |
+          ruby -e 'require "yaml"; YAML.load_file(ARGV[0], aliases: true); puts "YAML_OK"' .github/workflows/ticwatch-max-lts-211-build.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('.github/workflows/ticwatch-max-lts-211-build.yml')
+          print('LINES', len(p.read_text().splitlines()))
+          PY
