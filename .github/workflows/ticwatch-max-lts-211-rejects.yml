@@ -1,0 +1,91 @@
+name: TicWatch MAX-LTS 5.15.211 - Fast Reject Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-max-lts-211]
+    paths: ['.github/workflows/ticwatch-max-lts-211-rejects.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  rejects:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-211
+
+      - name: Generate exact delta and capture rejected hunks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE_SHA=3929c55fbc7559af6df290d2c0f66dc551af161a
+          COMMON_202_SHA=811843d875276b180a090b84f95ec26b20b558d0
+          AOSP_TIP=7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508
+          VENDOR=https://github.com/Winkmoon/android_kernel_TicWatch-Pro5.git
+          AOSP=https://android.googlesource.com/kernel/common
+
+          rm -rf vendor aosp-probe reject-report
+          mkdir -p vendor aosp-probe reject-report/files
+
+          git -C vendor init -q
+          git -C vendor remote add origin "$VENDOR"
+          git -C vendor fetch -q --filter=blob:none --depth=1 origin "$BASE_SHA"
+          git -C vendor checkout -q --detach FETCH_HEAD
+
+          git -C aosp-probe init -q
+          git -C aosp-probe remote add aosp "$AOSP"
+          git -C aosp-probe fetch -q --filter=blob:none --depth=1 aosp "$AOSP_TIP"
+          git -C aosp-probe fetch -q --filter=blob:none --depth=1 aosp "$COMMON_202_SHA"
+
+          git -C aosp-probe diff --binary "$COMMON_202_SHA" "$AOSP_TIP" > reject-report/android13-5.15.202-to-211.patch
+
+          {
+            echo "VENDOR_BASE=$BASE_SHA"
+            echo "COMMON_202=$COMMON_202_SHA"
+            echo "AOSP_TIP=$AOSP_TIP"
+            echo "AOSP_VERSION=$(git -C aosp-probe show "$AOSP_TIP":Makefile | awk '$1==\"VERSION\"{v=$3} $1==\"PATCHLEVEL\"{p=$3} $1==\"SUBLEVEL\"{s=$3} END{print v\".\"p\".\"s}')"
+            echo "PATCH_SHA256=$(sha256sum reject-report/android13-5.15.202-to-211.patch | awk '{print $1}')"
+          } > reject-report/summary.txt
+
+          cd vendor
+          set +e
+          git apply --reject --whitespace=nowarn ../reject-report/android13-5.15.202-to-211.patch > ../reject-report/apply.log 2>&1
+          RC=$?
+          set -e
+          echo "APPLY_RC=$RC" >> ../reject-report/summary.txt
+
+          find . -type f -name '*.rej' -print | sed 's#^./##;s#\.rej$##' | sort -u > ../reject-report/rejected-files.txt
+          COUNT=$(wc -l < ../reject-report/rejected-files.txt)
+          echo "REJECTED_FILE_COUNT=$COUNT" >> ../reject-report/summary.txt
+
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            safe=$(printf '%s' "$f" | tr '/' '__')
+            mkdir -p "../reject-report/files/$safe"
+            git show "HEAD:$f" > "../reject-report/files/$safe/ORIGINAL_TICWATCH" 2>/dev/null || true
+            cp "$f" "../reject-report/files/$safe/PARTIAL_APPLIED" 2>/dev/null || true
+            cp "$f.rej" "../reject-report/files/$safe/REJECT" 2>/dev/null || true
+            git -C ../aosp-probe show "$AOSP_TIP:$f" > "../reject-report/files/$safe/AOSP_5.15.211" 2>/dev/null || true
+            git diff --no-index -- "../reject-report/files/$safe/ORIGINAL_TICWATCH" "../reject-report/files/$safe/AOSP_5.15.211" > "../reject-report/files/$safe/ORIGINAL_vs_AOSP.diff" 2>/dev/null || true
+          done < ../reject-report/rejected-files.txt
+
+          git diff --stat > ../reject-report/applied-stat.txt || true
+          git diff > ../reject-report/applied-working-tree.diff || true
+          cd ..
+
+          cat reject-report/summary.txt
+          echo '--- rejected files ---'
+          cat reject-report/rejected-files.txt
+
+      - name: Upload reject bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-MAX-LTS-5.15.211-Rejects
+          path: reject-report/
+          if-no-files-found: error
+          retention-days: 30
