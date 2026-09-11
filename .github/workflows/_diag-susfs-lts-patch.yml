@@ -20,7 +20,7 @@ jobs:
         with:
           ref: ticwatch-max-lts-211
 
-      - name: Reproduce LTS merge tree and check SuSFS patch
+      - name: Verify LTS namespace adaptation and full SuSFS patch
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -38,9 +38,7 @@ jobs:
           git -C common fetch -q --depth=1 base "$BASE_SHA"
           git -C common fetch -q --depth=1 aosp "$AOSP_TIP"
           git -C common fetch -q --depth=1 aosp "$EXPECTED_MERGE_BASE"
-
           tree="$(git -C common merge-tree --write-tree --no-messages --merge-base="$EXPECTED_MERGE_BASE" "$BASE_SHA" "$AOSP_TIP")"
-          test "$(printf '%s' "$tree" | wc -l)" -eq 0
           test "${#tree}" -eq 40
           synthetic="$(printf '%s\n' 'diagnostic synthetic LTS merge' | \
             GIT_AUTHOR_NAME=diag GIT_AUTHOR_EMAIL=diag@local \
@@ -71,13 +69,34 @@ jobs:
           if s.count(decl) != 1 or s.count(call) != 1:
               raise SystemExit('unexpected legacy manual reboot-hook context')
           p.write_text(s.replace(decl,'',1).replace(call,'',1))
+
+          p=Path('fs/namespace.c')
+          s=p.read_text()
+          hook='#include <trace/hooks/blk.h>\n'
+          if s.count(hook) != 1:
+              raise SystemExit('unexpected namespace blk trace-hook context')
+          p.write_text(s.replace(hook,'',1))
           PY
 
           PATCH="$GITHUB_WORKSPACE/susfs4ksu/kernel_patches/50_add_susfs_in_gki-android13-5.15.patch"
-          if git apply --check "$PATCH" 2>"$GITHUB_WORKSPACE/apply.err"; then
-            echo 'PATCH_CHECK=PASS'
-          else
-            echo 'PATCH_CHECK=FAIL'
-            sed -n '1,40p' "$GITHUB_WORKSPACE/apply.err"
-            exit 1
-          fi
+          git apply --check "$PATCH"
+          git apply "$PATCH"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('fs/namespace.c')
+          s=p.read_text()
+          hook='#include <trace/hooks/blk.h>'
+          if hook in s:
+              raise SystemExit('namespace blk trace hook unexpectedly present before restore')
+          anchor='#include "internal.h"\n'
+          if s.count(anchor) != 1:
+              raise SystemExit('cannot restore namespace blk trace hook')
+          p.write_text(s.replace(anchor, anchor + '#include <trace/hooks/blk.h>\n', 1))
+          PY
+
+          grep -Fq '#include <trace/hooks/blk.h>' fs/namespace.c
+          grep -Fq '#include <linux/susfs_def.h>' fs/namespace.c
+          git diff --check
+          echo 'PATCH_CHECK=PASS'
+          echo 'NAMESPACE_TRACE_HOOK_RESTORED=PASS'
