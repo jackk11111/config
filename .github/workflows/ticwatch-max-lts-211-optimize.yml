@@ -48,10 +48,10 @@ jobs:
           p.write_text(s.replace(old3,new3,1))
           PY
 
-          grep -Fq "CONFIG_LRU_GEN_ENABLED=y" "$F"
-          grep -Fq "CONFIG_TCP_CONG_BBR=y" "$F"
-          grep -Fq "CONFIG_DEFAULT_TCP_CONG=\\\"bbr\\\"" "$F"
-          grep -Fq "TCP_CONGESTION_DEFAULT=BBR" "$F"
+          grep -Fq 'CONFIG_LRU_GEN_ENABLED=y' "$F"
+          grep -Fq 'CONFIG_TCP_CONG_BBR=y' "$F"
+          grep -Fq 'CONFIG_DEFAULT_TCP_CONG="bbr"' "$F"
+          grep -Fq 'TCP_CONGESTION_DEFAULT=BBR' "$F"
 
       - name: Commit optimized build workflow
         shell: bash
