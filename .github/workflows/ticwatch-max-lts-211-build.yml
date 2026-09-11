@@ -134,7 +134,7 @@ jobs:
           grep -Fq 'LTS_VERSION=5.15.211' ticwatch-ultimate-results/preflight.txt
           grep -Fq "LTS_AOSP_TIP=$AOSP_LTS_TIP" ticwatch-ultimate-results/preflight.txt
           cd .ticwatch-preflight/common
-          test "$(awk '$1==\"VERSION\"{v=$3} $1==\"PATCHLEVEL\"{p=$3} $1==\"SUBLEVEL\"{s=$3} END{print v\".\"p\".\"s}' Makefile)" = '5.15.211'
+          test "$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' Makefile)" = '5.15.211'
           git merge-base --is-ancestor "$AOSP_LTS_TIP" HEAD
           git rev-parse HEAD | tee "$GITHUB_WORKSPACE/lts-merged-head.txt"
           git diff "$BASE_KERNEL_SHA" --binary > "$GITHUB_WORKSPACE/kernel-source-lts211.patch"
