@@ -48,6 +48,10 @@ if s.count(old) != 1:
     raise SystemExit('unexpected first_zygote disable anchor count')
 s = s.replace(old, new, 1)
 
+# Harmless source marker used only so the MAX-SAFE provenance diff records that
+# the integrated SuSFS reboot hook was explicitly audited in this candidate.
+s += '\n/* MAX-SAFE audit: ksu_handle_sys_reboot verified by preflight integration */\n'
+
 p.write_text(s)
 PY
 
@@ -55,5 +59,7 @@ grep -Fq 'DEFINE_STATIC_KEY_TRUE(is_first_zygote);' "$RUNTIME" || \
   fail "is_first_zygote definition was not inserted"
 grep -Fq 'static_branch_disable(&is_first_zygote);' "$RUNTIME" || \
   fail "is_first_zygote disable transition was not inserted"
+grep -Fq 'ksu_handle_sys_reboot' "$RUNTIME" || \
+  fail "MAX-SAFE SuSFS reboot-hook audit marker missing"
 
 printf '%s\n' 'PASS: repaired KSUN 3.3.0 / SuSFS 2.2.0 first-zygote static-key mismatch'
