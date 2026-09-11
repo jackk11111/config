@@ -1,0 +1,86 @@
+name: TicWatch MAX-LTS 5.15.211 - Conflict Extraction
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-max-lts-211]
+    paths: ['.github/workflows/ticwatch-max-lts-211-conflicts.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  extract-conflicts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-211
+
+      - name: Merge exact Android13 5.15.211 tip and capture conflicts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          VENDOR=https://github.com/Winkmoon/android_kernel_TicWatch-Pro5.git
+          AOSP=https://android.googlesource.com/kernel/common
+          BASE_SHA=3929c55fbc7559af6df290d2c0f66dc551af161a
+          COMMON_202_SHA=811843d875276b180a090b84f95ec26b20b558d0
+          AOSP_TIP=7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508
+          AOSP_BRANCH=android13-5.15-2026-09
+
+          rm -rf kernel conflict-report
+          mkdir -p conflict-report/files
+
+          git clone --filter=blob:none --no-checkout "$VENDOR" kernel
+          git -C kernel checkout --detach "$BASE_SHA"
+          git -C kernel remote add aosp "$AOSP"
+          git -C kernel fetch --filter=blob:none aosp "$AOSP_TIP" "$COMMON_202_SHA"
+
+          {
+            echo "VENDOR_BASE=$BASE_SHA"
+            echo "COMMON_5_15_202=$COMMON_202_SHA"
+            echo "AOSP_BRANCH=$AOSP_BRANCH"
+            echo "AOSP_TIP=$AOSP_TIP"
+            echo "AOSP_VERSION=$(git -C kernel show "$AOSP_TIP":Makefile | awk '$1==\"VERSION\"{v=$3} $1==\"PATCHLEVEL\"{p=$3} $1==\"SUBLEVEL\"{s=$3} END{print v\".\"p\".\"s}')"
+            echo "MERGE_BASE=$(git -C kernel merge-base HEAD "$AOSP_TIP" || true)"
+          } | tee conflict-report/summary.txt
+
+          cd kernel
+          set +e
+          git -c user.name='TicWatch CI' -c user.email='ci@local' merge --no-commit --no-ff "$AOSP_TIP" > ../conflict-report/merge.log 2>&1
+          RC=$?
+          set -e
+          echo "MERGE_RC=$RC" | tee -a ../conflict-report/summary.txt
+
+          git diff --name-only --diff-filter=U | sort | tee ../conflict-report/conflicts.txt
+          COUNT=$(git diff --name-only --diff-filter=U | wc -l)
+          echo "CONFLICT_COUNT=$COUNT" | tee -a ../conflict-report/summary.txt
+
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            safe=$(printf '%s' "$f" | tr '/' '__')
+            mkdir -p "../conflict-report/files/$safe"
+            git show ":1:$f" > "../conflict-report/files/$safe/BASE" 2>/dev/null || true
+            git show ":2:$f" > "../conflict-report/files/$safe/OURS_TICWATCH" 2>/dev/null || true
+            git show ":3:$f" > "../conflict-report/files/$safe/THEIRS_AOSP_5.15.211" 2>/dev/null || true
+            cp "$f" "../conflict-report/files/$safe/CONFLICT" 2>/dev/null || true
+            git log --oneline --decorate=no "$COMMON_202_SHA..$AOSP_TIP" -- "$f" > "../conflict-report/files/$safe/AOSP_COMMITS.txt" || true
+            git diff --no-index -- "../conflict-report/files/$safe/OURS_TICWATCH" "../conflict-report/files/$safe/THEIRS_AOSP_5.15.211" > "../conflict-report/files/$safe/OURS_vs_THEIRS.diff" 2>/dev/null || true
+          done < ../conflict-report/conflicts.txt
+
+          git status --short > ../conflict-report/status.txt
+          cd ..
+
+          cat conflict-report/summary.txt
+          echo '--- conflicts ---'
+          cat conflict-report/conflicts.txt
+
+      - name: Upload exact conflict bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-MAX-LTS-5.15.211-Conflicts
+          path: conflict-report/
+          if-no-files-found: error
+          retention-days: 30
