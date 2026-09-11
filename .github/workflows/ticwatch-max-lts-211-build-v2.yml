@@ -1,0 +1,474 @@
+name: TicWatch MAX-LTS 5.15.211 - Full Build V2
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-max-lts-211
+    paths:
+      - '.github/workflows/ticwatch-max-lts-211-build-v2.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ticwatch-max-lts-211-build-v2
+  cancel-in-progress: true
+
+env:
+  LLVM_VERSION: '20.1.0'
+  LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
+  MANAGER_RUN_ID: '34563469731'
+  MANAGER_ARTIFACT: 'KernelSU-Next-v3.3.0-Spoofed-TicWatch-armv7'
+  MANAGER_APK: 'KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk'
+  MANAGER_APK_SHA256: '8310faebd2b592ccddd6a15a6d996c70d89cd679eb51835e84d18f531471357b'
+  KSU_NEXT_MANAGER_SIZE: '0x3c2'
+  KSU_NEXT_MANAGER_HASH: '3bc9938c38106bcf618bbe1d37ad4adde8a49c659e2860709bbfc341f7e749f2'
+  ANYKERNEL_REPO: 'https://github.com/Winkmoon/AnyKernel3.git'
+  ANYKERNEL_SHA: 'ad62484a9cd193ba24991e617bae66e25c0d0228'
+  BASE_KERNEL_SHA: '3929c55fbc7559af6df290d2c0f66dc551af161a'
+  AOSP_LTS_TIP: '7dfb6fc41ea7e4dd2c49fffcba48e86979ad5508'
+  EXPECTED_MERGE_BASE: 'fc88a7504f0f262cc5b2e8a7f58b2a1108034856'
+  EXPECTED_UTS_PREFIX: '5.15.211-Xinran_StarBai-Test'
+  EXPECTED_BUSYBOX_SHA256: 'c629fce4b0dd3ba9775f851d0941e74582115f423258d3a79800f2bd11d30f5c'
+  EXPECTED_MAGISKBOOT_SHA256: '3936f1fd3a270f0f186b8327ef62145de91106c354eee7083518057ba6992d4b'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout MAX-LTS orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-211
+
+      - name: Free space and install dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            build-essential flex bison bc python3 python-is-python3 \
+            libssl-dev libelf-dev dwarves make cmake zip unzip curl wget \
+            gnupg gawk gcc-multilib g++-multilib ccache rsync file \
+            binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf
+
+      - name: Retrieve exact crowned spoofed Manager
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p paired-manager
+          gh run download "$MANAGER_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$MANAGER_ARTIFACT" --dir paired-manager
+          test -s "paired-manager/$MANAGER_APK"
+          test -s paired-manager/manager-cert.txt
+          test -s paired-manager/manager-provenance.txt
+          printf '%s  %s\n' "$MANAGER_APK_SHA256" "paired-manager/$MANAGER_APK" | sha256sum -c -
+          grep -Fqx "MANAGER_CERT_SIZE_HEX=$KSU_NEXT_MANAGER_SIZE" paired-manager/manager-cert.txt
+          grep -Fqx "MANAGER_CERT_SHA256=$KSU_NEXT_MANAGER_HASH" paired-manager/manager-cert.txt
+          cp "paired-manager/$MANAGER_APK" "$GITHUB_WORKSPACE/$MANAGER_APK"
+          cp paired-manager/manager-cert.txt "$GITHUB_WORKSPACE/manager-cert.txt"
+
+      - name: Install exact LLVM 20.1.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          wget -q --show-progress "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
+          tar -xJf "$LLVM_ARCHIVE"
+          mv "LLVM-${LLVM_VERSION}-Linux-X64" "$GITHUB_WORKSPACE/aosp-clang"
+          rm -f "$LLVM_ARCHIVE"
+          echo "AOSP_CLANG_PATH=$GITHUB_WORKSPACE/aosp-clang" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/aosp-clang/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/aosp-clang/bin/clang" --version | tee llvm-version.txt
+          "$GITHUB_WORKSPACE/aosp-clang/bin/clang" --version | head -n1 | grep -Fq '20.1.0'
+
+      - name: S6.1 Prepare TicWatch base up to LTS insertion point
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sed -i \
+            -e "s|^KSUN_MANAGER=.*|KSUN_MANAGER=\"$MANAGER_APK\"|" \
+            -e "s|^KSUN_MANAGER_SHA256=.*|KSUN_MANAGER_SHA256=\"$MANAGER_APK_SHA256\"|" \
+            ticwatch-ultimate/preflight.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('ticwatch-ultimate/preflight.sh')
+          s=p.read_text()
+          anchor='pass "LOCALVERSION matches installed Xinran_StarBai-Test baseline"\n'
+          replacement=anchor + 'printf "BUILDV2_BASE_READY=1\\n" | tee -a "$REPORT"\nexit 0\n'
+          if s.count(anchor) != 1:
+              raise SystemExit('preflight LTS insertion anchor changed')
+          p.write_text(s.replace(anchor, replacement, 1))
+          PY
+          bash ticwatch-ultimate/preflight.sh
+          test -d .ticwatch-preflight/common/.git
+          grep -Fqx 'BUILDV2_BASE_READY=1' ticwatch-ultimate-results/preflight.txt
+
+      - name: S6.2 Fetch pinned Android-common 5.15.211 tip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          if [ "$(git rev-parse --is-shallow-repository)" = "true" ]; then
+            git fetch -q --unshallow origin
+          fi
+          git remote remove aosp >/dev/null 2>&1 || true
+          git remote add aosp https://android.googlesource.com/kernel/common
+          git fetch -q aosp "$AOSP_LTS_TIP"
+          git cat-file -e "$AOSP_LTS_TIP^{commit}"
+          echo "AOSP_TIP_FETCHED=$AOSP_LTS_TIP"
+
+      - name: S6.3 Verify expected merge base
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          merge_base="$(git merge-base HEAD "$AOSP_LTS_TIP")"
+          echo "MERGE_BASE=$merge_base"
+          test "$merge_base" = "$EXPECTED_MERGE_BASE"
+
+      - name: S6.4 Merge Android-common 5.15.211
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          if ! git -c user.name='TicWatch LTS CI' -c user.email='ci@local' \
+              merge --no-ff --no-edit "$AOSP_LTS_TIP" >"$GITHUB_WORKSPACE/lts-merge-summary.txt" 2>&1; then
+            echo 'MERGE_RESULT=FAIL'
+            echo 'UNMERGED_PATHS:'
+            git diff --name-only --diff-filter=U | head -n 50 || true
+            echo 'MERGE_TAIL:'
+            tail -n 20 "$GITHUB_WORKSPACE/lts-merge-summary.txt" || true
+            exit 1
+          fi
+          echo 'MERGE_RESULT=PASS'
+          tail -n 8 "$GITHUB_WORKSPACE/lts-merge-summary.txt" || true
+
+      - name: S6.5 Verify merge completeness and ancestry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          test -z "$(git diff --name-only --diff-filter=U)"
+          git merge-base --is-ancestor "$AOSP_LTS_TIP" HEAD
+          echo 'MERGE_COMPLETENESS=PASS'
+
+      - name: S6.6 Verify Makefile version is 5.15.211
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          version="$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' Makefile)"
+          echo "MAKEFILE_VERSION=$version"
+          test "$version" = '5.15.211'
+
+      - name: S6.7 Check LTS merge whitespace
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          if ! git diff --check HEAD^ HEAD >"$GITHUB_WORKSPACE/lts-whitespace.txt" 2>&1; then
+            echo 'WHITESPACE_RESULT=FAIL'
+            head -n 40 "$GITHUB_WORKSPACE/lts-whitespace.txt" || true
+            exit 1
+          fi
+          echo 'WHITESPACE_RESULT=PASS'
+
+      - name: S6.8 Save clean LTS merged head
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          git rev-parse HEAD | tee "$GITHUB_WORKSPACE/lts-merged-head.txt"
+          git diff "$BASE_KERNEL_SHA" --binary > "$GITHUB_WORKSPACE/kernel-source-lts211-clean.patch"
+          test -s "$GITHUB_WORKSPACE/kernel-source-lts211-clean.patch"
+
+      - name: S6.9 Continue KSU Next and SuSFS preflight on verified LTS tree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git checkout -- ticwatch-ultimate/preflight.sh
+          sed -i \
+            -e "s|^KSUN_MANAGER=.*|KSUN_MANAGER=\"$MANAGER_APK\"|" \
+            -e "s|^KSUN_MANAGER_SHA256=.*|KSUN_MANAGER_SHA256=\"$MANAGER_APK_SHA256\"|" \
+            ticwatch-ultimate/preflight.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('ticwatch-ultimate/preflight.sh')
+          s=p.read_text()
+          old='''mkdir -p "$(dirname "$REPORT")"\nrm -rf "$ROOT"\nmkdir -p "$ROOT"\n: > "$REPORT"\n'''
+          new='''mkdir -p "$(dirname "$REPORT")"\n[ -d "$ROOT/common/.git" ] || { echo "FAIL: verified LTS common tree missing" >&2; exit 1; }\n: >> "$REPORT"\n'''
+          if s.count(old) != 1:
+              raise SystemExit('preflight root initialization anchor changed')
+          s=s.replace(old,new,1)
+          start=s.index('log "TicWatch Ultimate 5.15 / KernelSU Next v3.3.0 + SuSFS v2.2.0 preflight"')
+          end=s.index('log "[2/11] Fetch exact KernelSU Next v3.3.0 source"')
+          intro='''log "TicWatch MAX-LTS 5.15.211 / KernelSU Next v3.3.0 + SuSFS v2.2.0 resume preflight"\nlog "REUSE_VERIFIED_LTS_TREE=1"\nlog ""\n'''
+          p.write_text(s[:start] + intro + s[end:])
+          PY
+          REPORT="$GITHUB_WORKSPACE/ticwatch-ultimate-results/preflight.txt"
+          LTS_HEAD="$(cat lts-merged-head.txt)"
+          printf 'LTS_AOSP_TIP=%s\nLTS_MERGE_BASE=%s\nLTS_VERSION=5.15.211\nLTS_MERGE_COMMIT=%s\n' \
+            "$AOSP_LTS_TIP" "$EXPECTED_MERGE_BASE" "$LTS_HEAD" | tee -a "$REPORT"
+          set +e
+          bash ticwatch-ultimate/preflight.sh
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            last_fail="$(grep -E '^FAIL:' "$REPORT" | tail -n1 || true)"
+            [ -n "$last_fail" ] || last_fail="preflight exited rc=$rc without FAIL line"
+            echo "::error title=KSU-SuSFS preflight::$last_fail"
+            echo '--- compact preflight tail ---'
+            grep -E '^(\[[0-9]+/11\]|PASS:|FAIL:|RESULT=)' "$REPORT" | tail -n 25 || true
+            exit "$rc"
+          fi
+          grep -Fqx 'RESULT=PASS' "$REPORT"
+          cd .ticwatch-preflight/common
+          test "$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' Makefile)" = '5.15.211'
+          git merge-base --is-ancestor "$AOSP_LTS_TIP" HEAD
+          echo 'KSU_SUSFS_PREFLIGHT_RESULT=PASS'
+
+      - name: Preserve known-good first-zygote repair
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash ticwatch-ultimate/fix-ksun330-susfs-first-zygote.sh
+          grep -Fq 'DEFINE_STATIC_KEY_TRUE(is_first_zygote);' .ticwatch-preflight/common/KernelSU-Next/kernel/runtime/ksud_integration.c
+          grep -Fq 'static_branch_disable(&is_first_zygote);' .ticwatch-preflight/common/KernelSU-Next/kernel/runtime/ksud_integration.c
+
+      - name: Keep Seccomp FILTER for crowned Manager
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('.ticwatch-preflight/common/KernelSU-Next/kernel/hook/setuid_hook.c')
+          s=p.read_text()
+          old='''    if (likely(ksu_is_manager_appid_valid()) && unlikely(is_uid_manager(ruid))) {\n        disable_seccomp();\n        pr_info("install fd for manager: %d\\n", ruid);\n        ksu_install_fd();\n        return 0;\n    }\n'''
+          new='''    if (likely(ksu_is_manager_appid_valid()) && unlikely(is_uid_manager(ruid))) {\n        /* Keep Android's seccomp filter and allow only the KSU reboot supercall. */\n        if (current->seccomp.mode == SECCOMP_MODE_FILTER && current->seccomp.filter) {\n            spin_lock_irq(&current->sighand->siglock);\n            ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);\n            spin_unlock_irq(&current->sighand->siglock);\n        }\n        pr_info("install fd for manager: %d\\n", ruid);\n        ksu_install_fd();\n        return 0;\n    }\n'''
+          if s.count(old)!=1:
+              raise SystemExit('manager SuSFS seccomp anchor changed; refusing blind patch')
+          p.write_text(s.replace(old,new,1))
+          PY
+          F=.ticwatch-preflight/common/KernelSU-Next/kernel/hook/setuid_hook.c
+          grep -Fq 'ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot);' "$F"
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('.ticwatch-preflight/common/KernelSU-Next/kernel/hook/setuid_hook.c').read_text()
+          block=s[s.index('if (likely(ksu_is_manager_appid_valid())'):s.index('// we should not umount for webview zygote')]
+          if 'disable_seccomp();' in block:
+              raise SystemExit('manager block still disables seccomp')
+          PY
+
+      - name: Apply proven ARM32 SuSFS syscall ABI fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('.ticwatch-preflight/common/KernelSU-Next/userspace/ksud/src/susfsd.rs')
+          s=p.read_text()
+          if 'use libc::{syscall, SYS_reboot, c_char};' not in s:
+              raise SystemExit('unexpected susfsd import layout')
+          s=s.replace('use libc::{syscall, SYS_reboot, c_char};','use libc::{syscall, SYS_reboot, c_char, c_long};',1)
+          repl={
+            'syscall(SYS_reboot, KSU_INSTALL_MAGIC1, SUSFS_MAGIC, CMD_SUSFS_SHOW_VERSION, &mut cmd as *mut _);':'syscall(SYS_reboot as c_long, KSU_INSTALL_MAGIC1 as c_long, SUSFS_MAGIC as c_long, CMD_SUSFS_SHOW_VERSION as c_long, &mut cmd as *mut _);',
+            'syscall(SYS_reboot, KSU_INSTALL_MAGIC1, SUSFS_MAGIC, CMD_SUSFS_SHOW_VARIANT, &mut cmd as *mut _);':'syscall(SYS_reboot as c_long, KSU_INSTALL_MAGIC1 as c_long, SUSFS_MAGIC as c_long, CMD_SUSFS_SHOW_VARIANT as c_long, &mut cmd as *mut _);',
+            'syscall(SYS_reboot, KSU_INSTALL_MAGIC1, SUSFS_MAGIC, CMD_SUSFS_SHOW_ENABLED_FEATURES, &mut cmd as *mut _);':'syscall(SYS_reboot as c_long, KSU_INSTALL_MAGIC1 as c_long, SUSFS_MAGIC as c_long, CMD_SUSFS_SHOW_ENABLED_FEATURES as c_long, &mut cmd as *mut _);'
+          }
+          for old,new in repl.items():
+              if s.count(old)!=1:
+                  raise SystemExit('unexpected susfsd syscall layout: '+old)
+              s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          F=.ticwatch-preflight/common/KernelSU-Next/userspace/ksud/src/susfsd.rs
+          test "$(grep -Fo 'as c_long' "$F" | wc -l)" -ge 12
+
+      - name: Capture source audit and assert capabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C .ticwatch-preflight/common/KernelSU-Next diff --binary > kernelsu-source-lts211.patch
+          test -s kernelsu-source-lts211.patch
+          grep -Fq 'ksu_seccomp_allow_cache(current->seccomp.filter, __NR_reboot)' kernelsu-source-lts211.patch
+          grep -Fq 'c_long' kernelsu-source-lts211.patch
+          grep -Fq 'ksu_handle_sys_reboot' kernelsu-source-lts211.patch
+          git -C .ticwatch-preflight/common diff "$BASE_KERNEL_SHA" --binary > kernel-source-lts211.patch
+          test -s kernel-source-lts211.patch
+
+      - name: Resolve final MAX-LTS config
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          rm -rf out
+          sed -i 's/ -dirty//g' scripts/setlocalversion
+          sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' scripts/setlocalversion
+          export ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH" LLVM=1 LLVM_IAS=1
+          export KBUILD_BUILD_VERSION=0 KBUILD_BUILD_USER='XinRan♡' KBUILD_BUILD_HOST='Bai'
+          make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang BUILD_CONFIG=build.config.gki.aarch64 O=out DEPMOD=depmod gki_defconfig
+          scripts/config --file out/.config -e LTO_CLANG -d LTO_NONE -e LTO_CLANG_THIN -d LTO_CLANG_FULL -e THINLTO
+          scripts/config --file out/.config -e LRU_GEN -e LRU_GEN_ENABLED -d LRU_GEN_STATS
+          scripts/config --file out/.config -e TCP_CONG_ADVANCED -e TCP_CONG_CUBIC -e TCP_CONG_BBR -e DEFAULT_BBR -d DEFAULT_CUBIC -e NET_SCH_FQ
+          make LLVM=1 LLVM_IAS=1 ARCH=arm64 CC=clang O=out olddefconfig
+          grep -Fqx 'CONFIG_KSU=y' out/.config
+          grep -Fqx 'CONFIG_KSU_SUSFS=y' out/.config
+          grep -Fqx 'CONFIG_SECCOMP=y' out/.config
+          grep -Fqx 'CONFIG_SECCOMP_FILTER=y' out/.config
+          grep -Fqx 'CONFIG_HAVE_SYSCALL_TRACEPOINTS=y' out/.config
+          grep -Fqx 'CONFIG_LRU_GEN=y' out/.config
+          grep -Fqx 'CONFIG_LRU_GEN_ENABLED=y' out/.config
+          grep -Fqx '# CONFIG_LRU_GEN_STATS is not set' out/.config
+          grep -Fqx 'CONFIG_TCP_CONG_ADVANCED=y' out/.config
+          grep -Fqx 'CONFIG_TCP_CONG_CUBIC=y' out/.config
+          grep -Fqx 'CONFIG_TCP_CONG_BBR=y' out/.config
+          grep -Fqx 'CONFIG_DEFAULT_BBR=y' out/.config
+          grep -Fqx 'CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config
+          grep -Fqx 'CONFIG_NET_SCH_FQ=y' out/.config
+          grep -Fqx '# CONFIG_KSU_SUSFS_ENABLE_LOG is not set' out/.config
+          grep -Fqx 'CONFIG_LOCALVERSION="-Xinran_StarBai-Test"' out/.config
+          cp out/.config "$GITHUB_WORKSPACE/final.config"
+
+      - name: Compile MAX-LTS 5.15.211 kernel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          export ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH" LLVM=1 LLVM_IAS=1
+          export KCFLAGS='-Wno-error -Wno-deprecated-declarations'
+          export KBUILD_BUILD_VERSION=0 KBUILD_BUILD_USER='XinRan♡' KBUILD_BUILD_HOST='Bai'
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "$AOSP_LTS_TIP")"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
+            KSU_NEXT_MANAGER_SIZE="$KSU_NEXT_MANAGER_SIZE" KSU_NEXT_MANAGER_HASH="$KSU_NEXT_MANAGER_HASH" \
+            2>&1 | tee "$GITHUB_WORKSPACE/kernel-build.log"
+          test -s out/arch/arm64/boot/Image
+          test -s out/System.map
+          test -s out/Module.symvers
+          cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"
+          cp out/System.map "$GITHUB_WORKSPACE/System.map"
+          cp out/Module.symvers "$GITHUB_WORKSPACE/Module.symvers"
+          make -s O=out ARCH=arm64 kernelrelease | tee "$GITHUB_WORKSPACE/kernelrelease.txt"
+          release="$(cat "$GITHUB_WORKSPACE/kernelrelease.txt")"
+          case "$release" in ${EXPECTED_UTS_PREFIX}*) ;; *) echo "Unexpected kernel release: $release" >&2; exit 1;; esac
+          grep -Fq -- "KernelSU-Next Manager signature size: $KSU_NEXT_MANAGER_SIZE" "$GITHUB_WORKSPACE/kernel-build.log"
+          grep -Fq -- "KernelSU-Next Manager signature hash: $KSU_NEXT_MANAGER_HASH" "$GITHUB_WORKSPACE/kernel-build.log"
+
+      - name: Package single-boot aware AnyKernel and wireless flasher
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git init -q AnyKernel3
+          git -C AnyKernel3 remote add origin "$ANYKERNEL_REPO"
+          git -C AnyKernel3 fetch -q --depth=1 origin "$ANYKERNEL_SHA"
+          git -C AnyKernel3 checkout -q --detach FETCH_HEAD
+          test "$(git -C AnyKernel3 rev-parse HEAD)" = "$ANYKERNEL_SHA"
+          rm -rf AnyKernel3/.git
+          cp Image AnyKernel3/Image
+          sed -i 's/^do.devicecheck=.*/do.devicecheck=1/' AnyKernel3/anykernel.sh
+          sed -i 's/^device.name1=.*/device.name1=dace/' AnyKernel3/anykernel.sh
+          grep -Fqx 'do.devicecheck=1' AnyKernel3/anykernel.sh
+          grep -Fqx 'device.name1=dace' AnyKernel3/anykernel.sh
+          (
+            cd AnyKernel3
+            zip -qr9 "$GITHUB_WORKSPACE/TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter.zip" .
+          )
+          unzip -p TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter.zip Image > packaged-Image
+          cmp -s Image packaged-Image
+          rm packaged-Image
+
+          mkdir -p bundle/wireless-flasher bundle/audit
+          cp Image bundle/wireless-flasher/Image
+          cp AnyKernel3/tools/busybox bundle/wireless-flasher/busybox
+          cp AnyKernel3/tools/magiskboot bundle/wireless-flasher/magiskboot
+          chmod 0755 bundle/wireless-flasher/busybox bundle/wireless-flasher/magiskboot
+          printf '%s  %s\n' "$EXPECTED_BUSYBOX_SHA256" bundle/wireless-flasher/busybox | sha256sum -c -
+          printf '%s  %s\n' "$EXPECTED_MAGISKBOOT_SHA256" bundle/wireless-flasher/magiskboot | sha256sum -c -
+          IMAGE_SHA="$(sha256sum Image | awk '{print $1}')"
+          sed "s/__IMAGE_SHA256__/$IMAGE_SHA/g" ticwatch-ultimate/wireless-flasher/flash-template.sh > bundle/wireless-flasher/flash.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('bundle/wireless-flasher/flash.sh')
+          s=p.read_text()
+          anchor='info "Kernel corrente: ${RELEASE:-?}"\n'
+          guard='''info "Kernel corrente: ${RELEASE:-?}"\ncase "$DEVICE" in\n  dace) pass "Device TicWatch dace verificato." ;;\n  *) fail "Device non autorizzato: '$DEVICE' (atteso dace). Nessuna scrittura eseguita." ;;\nesac\n'''
+          if s.count(anchor)!=1:
+              raise SystemExit('flasher device-guard anchor changed')
+          s=s.replace(anchor,guard,1)
+          old='''SLOT="$(getprop ro.boot.slot_suffix 2>/dev/null || true)"\nif [ -z "$SLOT" ]; then\n  S="$(getprop ro.boot.slot 2>/dev/null || true)"\n  case "$S" in a|b) SLOT="_$S";; esac\nfi\ncase "$SLOT" in _a|_b) ;; *) fail "Slot attivo non determinabile in sicurezza: '$SLOT'";; esac\ninfo "Slot attivo: $SLOT"\n'''
+          new='''SLOT="$(getprop ro.boot.slot_suffix 2>/dev/null || true)"\nif [ -z "$SLOT" ]; then\n  S="$(getprop ro.boot.slot 2>/dev/null || true)"\n  case "$S" in a|b) SLOT="_$S";; esac\nfi\ncase "$SLOT" in\n  _a|_b) info "Slot attivo: $SLOT" ;;\n  "")\n    SINGLE_BOOT=0\n    for p in /dev/block/by-name/boot /dev/block/bootdevice/by-name/boot /dev/block/platform/*/by-name/boot; do\n      if [ -e "$p" ]; then SINGLE_BOOT=1; break; fi\n    done\n    [ "$SINGLE_BOOT" = "1" ] || fail "Nessuno slot A/B e partizione boot singola non trovata."\n    info "Layout boot singolo rilevato."\n    ;;\n  *) fail "Slot attivo non valido: $SLOT" ;;\nesac\n'''
+          if s.count(old)!=1:
+              raise SystemExit('flasher slot-layout anchor changed')
+          p.write_text(s.replace(old,new,1))
+          PY
+          chmod 0755 bundle/wireless-flasher/flash.sh
+          sh -n bundle/wireless-flasher/flash.sh
+          grep -Fq 'Layout boot singolo rilevato.' bundle/wireless-flasher/flash.sh
+          grep -Fq 'atteso dace' bundle/wireless-flasher/flash.sh
+          grep -Fq "EXPECTED_IMAGE_SHA=\"$IMAGE_SHA\"" bundle/wireless-flasher/flash.sh
+          (
+            cd bundle/wireless-flasher
+            sha256sum Image busybox magiskboot flash.sh > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Assemble MAX-LTS audit bundle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp Image bundle/Image
+          cp "$MANAGER_APK" bundle/
+          cp TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter.zip bundle/
+          cp final.config System.map Module.symvers kernelrelease.txt llvm-version.txt kernel-build.log \
+             kernelsu-source-lts211.patch kernel-source-lts211.patch kernel-source-lts211-clean.patch manager-cert.txt lts-merged-head.txt bundle/audit/
+          cp ticwatch-ultimate-results/preflight.txt bundle/audit/preflight.txt
+          IMAGE_SHA="$(sha256sum Image | awk '{print $1}')"
+          LTS_HEAD="$(cat lts-merged-head.txt)"
+          cat > bundle/MAX-LTS-PROVENANCE.txt <<EOF
+          BASE_KERNEL_SHA=$BASE_KERNEL_SHA
+          BASE_KERNEL_VERSION=5.15.202
+          AOSP_ANDROID_COMMON_TIP=$AOSP_LTS_TIP
+          AOSP_ANDROID_COMMON_VERSION=5.15.211
+          AOSP_MERGE_BASE=$EXPECTED_MERGE_BASE
+          LTS_MERGED_HEAD=$LTS_HEAD
+          KSU_NEXT_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771
+          SUSFS_VERSION=v2.2.0
+          MANAGER_APK_SHA256=$MANAGER_APK_SHA256
+          MANAGER_CERT_SHA256=$KSU_NEXT_MANAGER_HASH
+          IMAGE_SHA256=$IMAGE_SHA
+          MANAGER_SECCOMP=FILTER_PRESERVED
+          SUSFS_HOOK_MODE=INLINE
+          SUSFS_ARM32_C_LONG_FIX=SOURCE_APPLIED
+          SELINUX_TARGET=ENFORCING
+          DEVICE_GUARD=dace
+          BOOT_LAYOUT=SINGLE_OR_AB_AUTODETECT
+          INSTALL_BASELINE=5.15.202-Xinran_StarBai-Test
+          ROLLBACK_BASE=MAX-SAFE-5.15.202
+          MGLRU_DEFAULT=ENABLED
+          MGLRU_STATS=DISABLED
+          TCP_CONGESTION_AVAILABLE=CUBIC_BBR
+          TCP_CONGESTION_DEFAULT=BBR
+          TCP_QDISC_FQ=BUILT_IN
+          AUTO_REBOOT=0
+          EOF
+          (
+            cd bundle
+            sha256sum Image "$MANAGER_APK" TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter.zip \
+              wireless-flasher/Image wireless-flasher/busybox wireless-flasher/magiskboot wireless-flasher/flash.sh \
+              MAX-LTS-PROVENANCE.txt > SHA256SUMS
+            sha256sum -c SHA256SUMS
+          )
+
+      - name: Upload MAX-LTS 5.15.211 candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 90
