@@ -17,6 +17,7 @@ EXPECTED_LOCALVERSION='CONFIG_LOCALVERSION="-Xinran_StarBai-Test"'
 
 ROOT="${GITHUB_WORKSPACE:-$PWD}/.ticwatch-preflight"
 REPORT="${GITHUB_WORKSPACE:-$PWD}/ticwatch-ultimate-results/preflight.txt"
+CFG="$ROOT/common/arch/arm64/configs/gki_defconfig"
 mkdir -p "$(dirname "$REPORT")"
 rm -rf "$ROOT"
 mkdir -p "$ROOT"
@@ -53,7 +54,6 @@ log "[1/11] Fetch exact TicWatch source"
 fetch_exact "$BASE_REPO" "$BASE_SHA" "$ROOT/common" >>"$REPORT" 2>&1
 pass "exact TicWatch base source"
 
-CFG="$ROOT/common/arch/arm64/configs/gki_defconfig"
 grep -Fxq "$EXPECTED_LOCALVERSION" "$CFG" || fail "expected TicWatch LOCALVERSION not found"
 pass "LOCALVERSION matches installed Xinran_StarBai-Test baseline"
 
