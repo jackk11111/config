@@ -1,0 +1,107 @@
+name: Apply verified LTS namespace fix and dispatch
+
+on:
+  push:
+    branches:
+      - ticwatch-max-lts-211
+    paths:
+      - '.github/workflows/_apply-lts-namespace-fix-and-dispatch.yml'
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  apply-and-dispatch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout target branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-211
+          fetch-depth: 1
+
+      - name: Apply verified generic namespace trace-hook preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('ticwatch-ultimate/preflight.sh')
+          s = p.read_text()
+
+          old1 = '''p.write_text(s.replace(decl, "", 1).replace(call, "", 1))
+          PY
+          pass "two known TicWatch-local patch-context collisions normalized"
+          '''
+          new1 = '''p.write_text(s.replace(decl, "", 1).replace(call, "", 1))
+
+          # Android-common 5.15 LTS may carry the blk vendor trace include at the
+          # exact insertion point used by the canonical SuSFS namespace patch.
+          # Remove it only temporarily and remember whether it must be restored.
+          p = Path("fs/namespace.c")
+          s = p.read_text()
+          hook = "#include <trace/hooks/blk.h>\\n"
+          marker = Path("../.restore_namespace_blk_trace_hook")
+          if marker.exists():
+              marker.unlink()
+          if s.count(hook) > 1:
+              raise SystemExit("unexpected namespace blk trace-hook count")
+          if s.count(hook) == 1:
+              p.write_text(s.replace(hook, "", 1))
+              marker.write_text("1\\n")
+          PY
+          pass "known TicWatch/LTS patch-context collisions normalized"
+          '''
+          if s.count(old1) != 1:
+              raise SystemExit('step7 namespace insertion anchor changed')
+          s = s.replace(old1, new1, 1)
+
+          old2 = '''p.write_text(s.replace(anchor, "\\n#include <trace/hooks/mm.h>\\n\\n#include <asm/elf.h>", 1))
+
+          # Retain previous manual-hook source only as a disabled fallback path.
+          '''
+          new2 = '''p.write_text(s.replace(anchor, "\\n#include <trace/hooks/mm.h>\\n\\n#include <asm/elf.h>", 1))
+
+          marker = Path("../.restore_namespace_blk_trace_hook")
+          if marker.exists():
+              p = Path("fs/namespace.c")
+              s = p.read_text()
+              hook = "#include <trace/hooks/blk.h>"
+              if hook in s:
+                  raise SystemExit("namespace blk trace hook unexpectedly already present")
+              ns_anchor = '#include "internal.h"\\n'
+              if s.count(ns_anchor) != 1:
+                  raise SystemExit("cannot restore namespace blk trace hook")
+              p.write_text(s.replace(ns_anchor, ns_anchor + "#include <trace/hooks/blk.h>\\n", 1))
+              marker.unlink()
+
+          # Retain previous manual-hook source only as a disabled fallback path.
+          '''
+          if s.count(old2) != 1:
+              raise SystemExit('step8 namespace restore anchor changed')
+          s = s.replace(old2, new2, 1)
+          p.write_text(s)
+          PY
+
+          bash -n ticwatch-ultimate/preflight.sh
+          grep -Fq '.restore_namespace_blk_trace_hook' ticwatch-ultimate/preflight.sh
+          git diff --check -- ticwatch-ultimate/preflight.sh
+
+      - name: Commit verified preflight fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'TicWatch LTS CI'
+          git config user.email 'ci@local'
+          git add ticwatch-ultimate/preflight.sh
+          git commit -m 'Fix MAX-LTS SuSFS namespace trace-hook collision'
+          git push origin HEAD:ticwatch-max-lts-211
+
+      - name: Dispatch Full Build V2 on fixed branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh workflow run ticwatch-max-lts-211-build-v2.yml --repo "$GITHUB_REPOSITORY" --ref ticwatch-max-lts-211
