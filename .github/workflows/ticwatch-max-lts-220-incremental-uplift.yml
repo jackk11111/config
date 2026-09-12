@@ -293,9 +293,9 @@ jobs:
                 continue
               fi
 
-              # Stable df1a17abba8d has no separate Android merge-resolution.
-              # Preserve Android binder.c and apply only the UAF fix: read
-              # t->to_proc under the transaction lock.
+              # The September Android ASB already contains the df1a17 UAF fix
+              # in an expanded binder_free_transaction(): to_proc and to_thread
+              # are read under t->lock and target_thread is pinned before unlock.
               if [ "$tag" = 'v5.15.212' ] && \
                  [ "$c" = 'df1a17abba8d6fac5f965adcb8113ceace6e4949' ] && \
                  [ "$conflicts" = 'drivers/android/binder.c' ]; then
@@ -309,32 +309,32 @@ jobs:
           sig = 'static void binder_free_transaction(struct binder_transaction *t)'
           start = s.find(sig)
           if start < 0:
-              raise SystemExit('FAIL_BINDER_UAF: binder_free_transaction not found')
+              raise SystemExit('FAIL_BINDER_UAF_EQUIV: function not found')
           end = s.find('\n}\n', start)
           if end < 0:
-              raise SystemExit('FAIL_BINDER_UAF: function end not found')
+              raise SystemExit('FAIL_BINDER_UAF_EQUIV: function end not found')
           fn = s[start:end]
-          old = '\tstruct binder_proc *target_proc = t->to_proc;'
-          new = ('\tstruct binder_proc *target_proc;\n\n'
-                 '\tspin_lock(&t->lock);\n'
-                 '\ttarget_proc = t->to_proc;\n'
-                 '\tspin_unlock(&t->lock);')
-          if fn.count(old) != 1:
-              raise SystemExit(f'FAIL_BINDER_UAF: expected one target in function, got {fn.count(old)}')
-          fn = fn.replace(old, new, 1)
-          s = s[:start] + fn + s[end:]
-          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
-              raise SystemExit('FAIL_BINDER_UAF: conflict markers remain')
-          check = s[start:s.find('\n}\n', start)]
-          for needle in ('spin_lock(&t->lock);', 'target_proc = t->to_proc;', 'spin_unlock(&t->lock);'):
-              if check.count(needle) != 1:
-                  raise SystemExit(f'FAIL_BINDER_UAF_VERIFY: {needle}')
-          p.write_text(s)
+          needles = [
+              'struct binder_thread *target_thread;',
+              'struct binder_proc *target_proc;',
+              'spin_lock(&t->lock);',
+              'target_proc = t->to_proc;',
+              'target_thread = t->to_thread;',
+              'atomic_inc(&target_thread->tmp_ref);',
+              'spin_unlock(&t->lock);',
+          ]
+          for needle in needles:
+              if fn.count(needle) != 1:
+                  raise SystemExit(f'FAIL_BINDER_UAF_EQUIV: {needle} count={fn.count(needle)}')
+          if not (fn.index('spin_lock(&t->lock);')
+                  < fn.index('target_proc = t->to_proc;')
+                  < fn.index('target_thread = t->to_thread;')
+                  < fn.index('atomic_inc(&target_thread->tmp_ref);')
+                  < fn.index('spin_unlock(&t->lock);')):
+              raise SystemExit('FAIL_BINDER_UAF_EQUIV: lock/order mismatch')
           PY
-                git add -- "$f"
-                git diff --cached --check || exit 46
-                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 46
-                echo "BINDER_UAF_RESOLVED=$c $f"
+                git cherry-pick --abort
+                echo "BINDER_UAF_ALREADY_EQUIVALENT=$c $f"
                 continue
               fi
 
