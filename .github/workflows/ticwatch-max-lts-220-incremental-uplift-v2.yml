@@ -40,7 +40,7 @@ jobs:
           end = next(i for i in range(start + 1, len(lines))
                      if 'if resolve_known_android_515212 ' in lines[i])
 
-          replacement = r'''              # Android intentionally merged around c1c74584 plus its BPF
+          body = r'''    # Android intentionally merged around c1c74584 plus its BPF
               # prerequisite chain on the way to 5.15.192 because those changes
               # break the frozen Android ABI (official merge dc37dbdfb169...).
               # 87177497 is a follow-up to c1c74584, so it has no valid semantic
@@ -62,8 +62,8 @@ jobs:
                 echo "ANDROID_ABI_SKIP_DEPENDENT_BPF=$c PREREQ_SKIPPED=c1c74584b9b4 OFFICIAL=$android_bpf_skip"
                 continue
               fi
-
-          '''.splitlines()
+'''
+          replacement = [('          ' + line) if line else '' for line in body.splitlines()]
 
           lines[start:end] = replacement
           patched = '\n'.join(lines) + '\n'
