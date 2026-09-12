@@ -43,7 +43,7 @@ jobs:
           test "$ver" = 5.15.211
           echo "BASE_READY=$ver + SEP-ASB"
 
-      - name: Apply only missing stable commits 5.15.212 to 5.15.220
+      - name: Apply missing stable commits with Android resolutions
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -51,137 +51,6 @@ jobs:
           git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
           git fetch -q stable refs/tags/v5.15.211:refs/tags/v5.15.211
           prev='v5.15.211'
-
-          resolve_nfsd_515212_android_conflict() {
-            local c="$1"
-            local expected='5540899da89461cf3bf17227d37cc9c0b73fe256'
-            local f='fs/nfsd/nfs4recover.c'
-            local conflicts
-            conflicts="$(git diff --name-only --diff-filter=U)"
-
-            [ "$c" = "$expected" ] || return 1
-            [ "$conflicts" = "$f" ] || {
-              echo "REFUSE_AUTO_RESOLVE: unexpected conflicts for $c" >&2
-              printf '%s\n' "$conflicts" >&2
-              return 1
-            }
-
-            # Start from the Android/ASB side of the one conflicted file. All
-            # clean changes from this stable commit (notably nfs4state.c) stay staged.
-            git checkout --ours -- "$f"
-
-            python3 - "$f" <<'PY'
-          from pathlib import Path
-          import re, sys
-
-          p = Path(sys.argv[1])
-          s = p.read_text()
-
-          def sub_once(pattern, repl, label, flags=0):
-              global s
-              ns, n = re.subn(pattern, repl, s, count=1, flags=flags)
-              if n != 1:
-                  raise SystemExit(f"FAIL {label}: expected exactly one match, got {n}")
-              s = ns
-
-          # 5.15.212 changes nfs4_client_to_reclaim() to duplicate/own its data.
-          # Therefore these callers must stop allocating memory for the callee.
-          sub_once(
-              r'''static void\n__nfsd4_create_reclaim_record_grace\(struct nfs4_client \*clp,\n\s*const char \*dname, int len, struct nfsd_net \*nn\)\n\{\n\s*struct xdr_netobj name;\n\s*struct xdr_netobj princhash = \{ \.len = 0, \.data = NULL \};\n\s*struct nfs4_client_reclaim \*crp;\n\n\s*name\.data = kmemdup\(dname, len, GFP_KERNEL\);\n\s*if \(!name\.data\) \{\n\s*dprintk\("%s: failed to allocate memory for name\.data!\\\\n",\n\s*__func__\);\n\s*return;\n\s*\}\n\s*name\.len = len;\n\s*crp = nfs4_client_to_reclaim\(name, princhash, nn\);\n\s*if \(!crp\) \{\n\s*kfree\(name\.data\);\n\s*return;\n\s*\}\n\s*crp->cr_clp = clp;\n\}''',
-              '''static void
-          __nfsd4_create_reclaim_record_grace(struct nfs4_client *clp,
-                                              char *dname, struct nfsd_net *nn)
-          {
-                  struct xdr_netobj name = { .len = strlen(dname), .data = dname };
-                  struct xdr_netobj princhash = { .len = 0, .data = NULL };
-                  struct nfs4_client_reclaim *crp;
-
-                  crp = nfs4_client_to_reclaim(name, princhash, nn);
-                  if (!crp)
-                          return;
-                  crp->cr_clp = clp;
-          }''',
-              'create_reclaim_record')
-
-          sub_once(
-              r'''__nfsd4_create_reclaim_record_grace\(clp, dname,\n\s*HEXDIR_LEN, nn\);''',
-              '''__nfsd4_create_reclaim_record_grace(clp, dname, nn);''',
-              'create_reclaim_call')
-
-          sub_once(
-              r'''struct xdr_netobj name;\n(\s*struct xdr_netobj princhash = \{ \.len = 0, \.data = NULL \};\n\n\s*if \(strlen\(cname\) != HEXDIR_LEN - 1\) \{.*?return 0;\n\s*\}\n)\s*name\.data = kstrdup\(cname, GFP_KERNEL\);\n\s*if \(!name\.data\) \{\n\s*dprintk\("%s: failed to allocate memory for name\.data!\\\\n",\n\s*__func__\);\n\s*goto out;\n\s*\}\n\s*name\.len = HEXDIR_LEN;\n\s*if \(!nfs4_client_to_reclaim\(name, princhash, nn\)\)\n\s*kfree\(name\.data\);\nout:\n''',
-              r'''struct xdr_netobj name = { .len = HEXDIR_LEN, .data = cname };
-          \1        nfs4_client_to_reclaim(name, princhash, nn);
-          ''',
-              'load_recdir', re.S)
-
-          # Keep Android's stronger IS_ERR_OR_NULL checks while adopting the stable
-          # ownership model. Cleanup variables preserve the original allocation even
-          # when name.data is advanced past the legacy "hash:" prefix.
-          sub_once(
-              r'''(struct xdr_netobj name, princhash = \{ \.len = 0, \.data = NULL \};\n)''',
-              r'''\1        char *namecopy __free(kfree) = NULL;
-                  char *princhashcopy __free(kfree) = NULL;
-          ''',
-              'cleanup_declarations')
-
-          # First name allocation (v2 client info).
-          sub_once(
-              r'''name\.data = memdup_user\(&ci->cc_name\.cn_id, namelen\);\n\s*if \(IS_ERR_OR_NULL\(name\.data\)\)\n\s*return -EFAULT;''',
-              '''namecopy = memdup_user(&ci->cc_name.cn_id, namelen);
-                          if (IS_ERR_OR_NULL(namecopy))
-                                  return -EFAULT;
-                          name.data = namecopy;''',
-              'namecopy_v2')
-
-          sub_once(
-              r'''princhash\.data = memdup_user\(\n\s*&ci->cc_princhash\.cp_data,\n\s*princhashlen\);\n\s*if \(IS_ERR_OR_NULL\(princhash\.data\)\) \{\n\s*kfree\(name\.data\);\n\s*return -EFAULT;\n\s*\}\n\s*princhash\.len = princhashlen;''',
-              '''princhashcopy = memdup_user(
-                                          &ci->cc_princhash.cp_data,
-                                          princhashlen);
-                                  if (IS_ERR_OR_NULL(princhashcopy))
-                                          return -EFAULT;
-                                  princhash.data = princhashcopy;
-                                  princhash.len = princhashlen;''',
-              'princhashcopy')
-
-          # Legacy name allocation.
-          sub_once(
-              r'''name\.data = memdup_user\(&cnm->cn_id, namelen\);\n\s*if \(IS_ERR_OR_NULL\(name\.data\)\)\n\s*return -EFAULT;''',
-              '''namecopy = memdup_user(&cnm->cn_id, namelen);
-                          if (IS_ERR_OR_NULL(namecopy))
-                                  return -EFAULT;
-                          name.data = namecopy;''',
-              'namecopy_legacy')
-
-          sub_once(
-              r'''memmove\(name\.data, name\.data \+ 5, name\.len\);''',
-              '''name.data = name.data + 5;''',
-              'legacy_hash_pointer')
-
-          sub_once(
-              r'''if \(!nfs4_client_to_reclaim\(name, princhash, nn\)\) \{\n\s*kfree\(name\.data\);\n\s*kfree\(princhash\.data\);\n\s*return -EFAULT;\n\s*\}''',
-              '''if (!nfs4_client_to_reclaim(name, princhash, nn))
-                          return -EFAULT;''',
-              'callee_owns_copy')
-
-          if '<<<<<<<' in s or '=======' in s or '>>>>>>>' in s:
-              raise SystemExit('FAIL: conflict markers remain')
-          p.write_text(s)
-          PY
-
-            # Semantic guards: keep Android hardening and ensure stable ownership
-            # conversion was actually installed before continuing the cherry-pick.
-            grep -Fq 'IS_ERR_OR_NULL(namecopy)' "$f"
-            grep -Fq 'IS_ERR_OR_NULL(princhashcopy)' "$f"
-            grep -Fq 'name.data = name.data + 5;' "$f"
-            grep -Fq 'struct xdr_netobj name = { .len = strlen(dname), .data = dname };' "$f"
-            grep -Fq 'name.data = kmemdup(name.data, name.len, GFP_KERNEL);' fs/nfsd/nfs4state.c
-
-            git add -- "$f"
-            git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue
-            echo "RESOLVED_ANDROID_AWARE=$c $f"
-          }
 
           for n in 212 213 214 215 216 217 218 219 220; do
             tag="v5.15.$n"
@@ -203,29 +72,90 @@ jobs:
 
               subject="$(git show -s --format=%s "$c")"
               echo "APPLY_COMMIT=$c $subject"
-              if ! git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick -x "$c"; then
-                conflicts="$(git diff --name-only --diff-filter=U)"
 
-                if [ "$c" = '5540899da89461cf3bf17227d37cc9c0b73fe256' ]; then
-                  if resolve_nfsd_515212_android_conflict "$c"; then
-                    continue
-                  fi
-                fi
-
-                if [ -z "$conflicts" ] && git diff --cached --quiet; then
-                  echo "SKIP_EMPTY=$c"
-                  git cherry-pick --skip
-                  continue
-                fi
-
-                echo "FIRST_CONFLICT_TAG=$tag"
-                echo "FIRST_CONFLICT_COMMIT=$c"
-                echo "FIRST_CONFLICT_SUBJECT=$subject"
-                echo "CONFLICT_FILES_BEGIN"
-                printf '%s\n' "$conflicts"
-                echo "CONFLICT_FILES_END"
-                exit 42
+              if git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick -x "$c"; then
+                continue
               fi
+
+              conflicts="$(git diff --name-only --diff-filter=U)"
+
+              # Official Android android13-5.15-lts resolution:
+              # 9c43b169ac7e merges 5540899da894 and produces no tree delta
+              # from its Android first parent. Do not import the generic-Linux
+              # ownership conversion into this Android tree.
+              if [ "$tag" = 'v5.15.212' ] && \
+                 [ "$c" = '5540899da89461cf3bf17227d37cc9c0b73fe256' ] && \
+                 [ "$conflicts" = 'fs/nfsd/nfs4recover.c' ]; then
+                echo "ANDROID_OFFICIAL_SKIP=$c fs/nfsd/nfs4recover.c"
+                git cherry-pick --abort
+                continue
+              fi
+
+              # Official Android android13-5.15-lts resolution:
+              # 21756fda13d1 merges f51db99287b5. In our Sep-ASB tree data.c
+              # and f2fs.h apply cleanly; only segment.c conflicts. Reproduce
+              # Google's resolved segment.c hunk exactly and keep the clean hunks.
+              if [ "$tag" = 'v5.15.212' ] && \
+                 [ "$c" = 'f51db99287b5acf81513ece82a0c95eb5db008e3' ] && \
+                 [ "$conflicts" = 'fs/f2fs/segment.c' ]; then
+                f='fs/f2fs/segment.c'
+                git checkout --ours -- "$f"
+
+                python3 - "$f" <<'PY'
+          from pathlib import Path
+          import sys
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          old = '''\t\t} else {
+          \t\t\tf2fs_down_write(&sbi->gc_lock);
+          \t\t\tf2fs_gc(sbi, false, false, false, NULL_SEGNO);
+          \t\t}'''
+          new = '''\t\t} else {
+          \t\t\t/*
+          \t\t\t * Submit all cached OPU/IPU DATA bios before triggering
+          \t\t\t * foreground GC to avoid potential deadlocks.
+          \t\t\t */
+          \t\t\tf2fs_submit_merged_write(sbi, DATA);
+          \t\t\tf2fs_submit_all_merged_ipu_writes(sbi);
+
+          \t\t\tf2fs_down_write(&sbi->gc_lock);
+          \t\t\tf2fs_gc(sbi, false, false, false, NULL_SEGNO);
+          \t\t}'''
+          if s.count(old) != 1:
+              raise SystemExit(f'FAIL_F2FS_ANDROID_RESOLUTION: expected one target, got {s.count(old)}')
+          s = s.replace(old, new, 1)
+          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
+              raise SystemExit('FAIL_F2FS_ANDROID_RESOLUTION: conflict markers remain')
+          p.write_text(s)
+          PY
+
+                grep -Fq 'f2fs_submit_merged_write(sbi, DATA);' "$f" || exit 43
+                grep -Fq 'f2fs_submit_all_merged_ipu_writes(sbi);' "$f" || exit 43
+                grep -Fq 'void f2fs_submit_all_merged_ipu_writes(struct f2fs_sb_info *sbi)' fs/f2fs/data.c || exit 43
+                grep -Fq 'void f2fs_submit_all_merged_ipu_writes(struct f2fs_sb_info *sbi);' fs/f2fs/f2fs.h || exit 43
+                git add -- "$f"
+                if ! git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue; then
+                  echo "FAIL_F2FS_ANDROID_RESOLUTION: cherry-pick --continue failed" >&2
+                  exit 43
+                fi
+                echo "ANDROID_OFFICIAL_RESOLVED=$c $f"
+                continue
+              fi
+
+              if [ -z "$conflicts" ] && git diff --cached --quiet; then
+                echo "SKIP_EMPTY=$c"
+                git cherry-pick --skip
+                continue
+              fi
+
+              echo "FIRST_CONFLICT_TAG=$tag"
+              echo "FIRST_CONFLICT_COMMIT=$c"
+              echo "FIRST_CONFLICT_SUBJECT=$subject"
+              echo "CONFLICT_FILES_BEGIN"
+              printf '%s\n' "$conflicts"
+              echo "CONFLICT_FILES_END"
+              exit 42
             done < <(git rev-list --reverse --no-merges "$prev..$tag")
 
             current="$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' Makefile)"
