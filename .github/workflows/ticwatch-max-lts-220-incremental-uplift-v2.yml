@@ -25,7 +25,7 @@ jobs:
         with:
           ref: ticwatch-max-lts-220-incremental
 
-      - name: Build corrected uplift scripts from proven workflow
+      - name: Build ABI-aware scripts from proven workflow
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -33,43 +33,9 @@ jobs:
           from pathlib import Path
 
           src = Path('.github/workflows/ticwatch-max-lts-220-incremental-uplift.yml').read_text()
-          lines = src.splitlines()
-
-          start = next(i for i, line in enumerate(lines)
-                       if '# 87177497 is a one-line security hardening' in line)
-          end = next(i for i in range(start + 1, len(lines))
-                     if 'if resolve_known_android_515212 ' in lines[i])
-
-          body = r'''    # Android intentionally merged around c1c74584 plus its BPF
-              # prerequisite chain on the way to 5.15.192 because those changes
-              # break the frozen Android ABI (official merge dc37dbdfb169...).
-              # 87177497 is a follow-up to c1c74584, so it has no valid semantic
-              # target in this ABI-preserving Android BPF layout. Skip only this
-              # exact dependent commit/file, after proving the Android decision
-              # and the expected pre-prerequisite layout are still present.
-              if [ "$tag" = 'v5.15.212' ] && [ "$c" = '87177497cca90bf4fcfb759eb898560eb5b46a10' ] && [ "$conflicts" = 'kernel/bpf/core.c' ]; then
-                android_bpf_skip='dc37dbdfb169e0364a21abe482f909bb764afb31'
-                git cherry-pick --abort
-                git cat-file -e "${android_bpf_skip}^{commit}" || { echo "FAIL_ANDROID_BPF_SKIP_OBJECT=$android_bpf_skip" >&2; exit 47; }
-                note="$(git show -s --format=%B "$android_bpf_skip")"
-                grep -Fq 'due to abi breakages' <<< "$note" || { echo 'FAIL_ANDROID_BPF_SKIP_REASON' >&2; exit 47; }
-                grep -Fq 'c1c74584b9b4 bpf: Fix oob access in cgroup local storage' <<< "$note" || { echo 'FAIL_ANDROID_BPF_SKIP_PREREQ' >&2; exit 47; }
-                grep -Fq 'bool bpf_prog_array_compatible(struct bpf_array *array,' kernel/bpf/core.c || { echo 'FAIL_ANDROID_BPF_LAYOUT' >&2; exit 47; }
-                if grep -Fq 'storage_cookie' include/linux/bpf.h || grep -Fq 'map->owner->storage_cookie' kernel/bpf/core.c; then
-                  echo 'FAIL_ANDROID_BPF_UNEXPECTED_STABLE_LAYOUT' >&2
-                  exit 47
-                fi
-                echo "ANDROID_ABI_SKIP_DEPENDENT_BPF=$c PREREQ_SKIPPED=c1c74584b9b4 OFFICIAL=$android_bpf_skip"
-                continue
-              fi
-'''
-          replacement = [('          ' + line) if line else '' for line in body.splitlines()]
-
-          lines[start:end] = replacement
-          patched = '\n'.join(lines) + '\n'
 
           def extract_run(step_name: str) -> str:
-              ls = patched.splitlines()
+              ls = src.splitlines()
               marker = f'      - name: {step_name}'
               i = ls.index(marker)
               while i < len(ls) and ls[i].strip() != 'run: |':
@@ -88,8 +54,40 @@ jobs:
                   i += 1
               return '\n'.join(out) + '\n'
 
-          Path('/tmp/prepare.sh').write_text(extract_run('Prepare exact TicWatch 5.15.211 + September ASB'))
-          Path('/tmp/uplift.sh').write_text(extract_run('Apply missing stable commits with Android resolutions'))
+          prepare = extract_run('Prepare exact TicWatch 5.15.211 + September ASB')
+          uplift = extract_run('Apply missing stable commits with Android resolutions')
+
+          start_marker = '    # 87177497 is a one-line security hardening'
+          end_marker = '    if resolve_known_android_515212 '
+          start = uplift.index(start_marker)
+          end = uplift.index(end_marker, start)
+
+          replacement = r'''    # Android intentionally merged around c1c74584 and its BPF prerequisite
+              # chain because those changes break Android's frozen ABI. 87177497 is a
+              # dependent follow-up, so there is no compatible storage-cookie target
+              # in this ABI-preserving tree. Skip only this exact commit/file after
+              # proving the official Android decision and expected layout.
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = '87177497cca90bf4fcfb759eb898560eb5b46a10' ] && [ "$conflicts" = 'kernel/bpf/core.c' ]; then
+                android_bpf_skip='dc37dbdfb169e0364a21abe482f909bb764afb31'
+                git cherry-pick --abort
+                git cat-file -e "${android_bpf_skip}^{commit}" || { echo "FAIL_ANDROID_BPF_SKIP_OBJECT=$android_bpf_skip" >&2; exit 47; }
+                note="$(git show -s --format=%B "$android_bpf_skip")"
+                grep -Fq 'due to abi breakages' <<< "$note" || { echo 'FAIL_ANDROID_BPF_SKIP_REASON' >&2; exit 47; }
+                grep -Fq 'c1c74584b9b4 bpf: Fix oob access in cgroup local storage' <<< "$note" || { echo 'FAIL_ANDROID_BPF_SKIP_PREREQ' >&2; exit 47; }
+                grep -Fq 'bool bpf_prog_array_compatible(struct bpf_array *array,' kernel/bpf/core.c || { echo 'FAIL_ANDROID_BPF_LAYOUT' >&2; exit 47; }
+                if grep -Fq 'storage_cookie' include/linux/bpf.h || grep -Fq 'map->owner->storage_cookie' kernel/bpf/core.c; then
+                  echo 'FAIL_ANDROID_BPF_UNEXPECTED_STABLE_LAYOUT' >&2
+                  exit 47
+                fi
+                echo "ANDROID_ABI_SKIP_DEPENDENT_BPF=$c PREREQ_SKIPPED=c1c74584b9b4 OFFICIAL=$android_bpf_skip"
+                continue
+              fi
+
+          '''
+          uplift = uplift[:start] + replacement + uplift[end:]
+
+          Path('/tmp/prepare.sh').write_text(prepare)
+          Path('/tmp/uplift.sh').write_text(uplift)
           PY
           bash -n /tmp/prepare.sh
           bash -n /tmp/uplift.sh
