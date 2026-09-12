@@ -63,7 +63,7 @@ jobs:
                 continue
               fi
 
-'''.splitlines()
+          '''.splitlines()
 
           lines[start:end] = replacement
           patched = '\n'.join(lines) + '\n'
