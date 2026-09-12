@@ -50,7 +50,121 @@ jobs:
           cd kernel
           git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
           git fetch -q stable refs/tags/v5.15.211:refs/tags/v5.15.211
+
+          # Bring in Google's android13-5.15-lts merge objects once.  We do not
+          # merge this branch wholesale: its known conflict-resolution commits
+          # are used only as exact first-parent deltas for matching stable commits.
+          git fetch -q aosp refs/heads/android13-5.15-lts:refs/remotes/aosp/android13-5.15-lts
           prev='v5.15.211'
+
+          resolve_known_android_515212() {
+            local tag="$1" c="$2" conflicts="$3" subject="$4"
+            local merge='' expected='' patch=''
+
+            [ "$tag" = 'v5.15.212' ] || return 1
+
+            # Map only commits for which Google explicitly published an
+            # android13-5.15-lts merge resolving conflicts.  Match both the
+            # stable commit and the exact conflict path; anything else is a STOP.
+            case "${c:0:12}" in
+              2047eeb38db8)
+                merge='943a14e51ab4edb7997eab2843b8a47083c015a4'
+                expected='drivers/dma-buf/dma-fence-unwrap.c'
+                ;;
+              6adfaf07a044)
+                merge='82c2028c2627538636162c6018e4f31ad5bc33d9'
+                expected='fs/f2fs/inode.c'
+                ;;
+              8226d0bee05f)
+                merge='0ebdd0175e372714fde617de984849ab045ceea4'
+                expected='drivers/i2c/i2c-core-base.c'
+                ;;
+              9b49b2c4e39c)
+                merge='77d01828713ba4a167f5c5df6232c65a0696f85f'
+                expected='drivers/i2c/i2c-core-base.c'
+                ;;
+              8448877bf274)
+                merge='f4668edb928c7bc1b70005cde37dcd0fe92b292f'
+                expected='drivers/i2c/i2c-core-base.c'
+                ;;
+              a4365bc41baa)
+                merge='771777348d20ffba17482b8981f1f75a3b153e63'
+                expected='drivers/i2c/i2c-core-base.c'
+                ;;
+              889ca6000ac7)
+                merge='e5c46601142e03b9462a00bd24de752a225a598c'
+                expected='drivers/android/binder.c'
+                ;;
+              d39282f552dd)
+                merge='ad6989c00f02dc9e12cb67310edcf6fac0b6de99'
+                expected='drivers/i2c/i2c-core-base.c'
+                ;;
+              15dd81da3573)
+                merge='6cf4b0211fa5cd05704705088d68554a297157c2'
+                expected='crypto/af_alg.c'
+                ;;
+              277b699584ec)
+                merge='eca0004313071f400e52346c2b2f9e6fcf00aba4'
+                expected='kernel/bpf/core.c'
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+
+            if [ "$conflicts" != "$expected" ]; then
+              echo "REFUSE_KNOWN_ANDROID_RESOLUTION=$c" >&2
+              echo "EXPECTED_CONFLICT=$expected" >&2
+              echo "ACTUAL_CONFLICT_BEGIN" >&2
+              printf '%s\n' "$conflicts" >&2
+              echo "ACTUAL_CONFLICT_END" >&2
+              return 1
+            fi
+
+            git cat-file -e "${merge}^{commit}" || {
+              echo "FAIL_ANDROID_MERGE_OBJECT_MISSING=$merge" >&2
+              exit 45
+            }
+
+            # Abort the generic stable cherry-pick and apply exactly the tree
+            # delta that Google's merge introduced relative to its Android first
+            # parent.  This imports both the stable change and Google's conflict
+            # decision, without replacing whole files from another tree.
+            git cherry-pick --abort
+            patch="$(mktemp)"
+            git diff --binary "${merge}^1" "$merge" > "$patch"
+
+            if [ ! -s "$patch" ]; then
+              rm -f "$patch"
+              echo "ANDROID_OFFICIAL_SKIP=$c MERGE=$merge"
+              return 0
+            fi
+
+            if ! git apply --3way --index "$patch"; then
+              rm -f "$patch"
+              echo "FAIL_ANDROID_OFFICIAL_DELTA=$c MERGE=$merge" >&2
+              echo "UNRESOLVED_BEGIN" >&2
+              git diff --name-only --diff-filter=U >&2 || true
+              echo "UNRESOLVED_END" >&2
+              exit 45
+            fi
+            rm -f "$patch"
+
+            git diff --cached --check || {
+              echo "FAIL_ANDROID_OFFICIAL_DELTA_CHECK=$c" >&2
+              exit 45
+            }
+
+            if git diff --cached --quiet; then
+              echo "ANDROID_OFFICIAL_ALREADY_EQUIVALENT=$c MERGE=$merge"
+              return 0
+            fi
+
+            git -c user.name='TicWatch LTS CI' -c user.email='ci@local' \
+              commit -m "Android official resolution: $subject" >/dev/null
+            echo "ANDROID_OFFICIAL_DELTA_APPLIED=$c MERGE=$merge FILE=$expected"
+            return 0
+          }
 
           for n in 212 213 214 215 216 217 218 219 220; do
             tag="v5.15.$n"
@@ -75,8 +189,8 @@ jobs:
 
               conflicts="$(git diff --name-only --diff-filter=U)"
 
-              # Android official 5.15.212 resolution: merge 9c43b169ac7e
-              # keeps the Android first-parent tree for this nfsd conflict.
+              # Proven Android resolution: 9c43b169ac7e keeps the Android
+              # first-parent tree for this nfsd conflict.
               if [ "$tag" = 'v5.15.212' ] && \
                  [ "$c" = '5540899da89461cf3bf17227d37cc9c0b73fe256' ] && \
                  [ "$conflicts" = 'fs/nfsd/nfs4recover.c' ]; then
@@ -85,7 +199,7 @@ jobs:
                 continue
               fi
 
-              # Android official 5.15.212 resolution: merge 21756fda13d1.
+              # Proven Android resolution: 21756fda13d1.
               if [ "$tag" = 'v5.15.212' ] && \
                  [ "$c" = 'f51db99287b5acf81513ece82a0c95eb5db008e3' ] && \
                  [ "$conflicts" = 'fs/f2fs/segment.c' ]; then
@@ -126,9 +240,7 @@ jobs:
                 continue
               fi
 
-              # Android official 5.15.212 resolution: merge 845a0e67e300.
-              # Move the cached OPU/IPU DATA submission before the GC_MERGE split,
-              # exactly as Android does, so both GC paths are protected.
+              # Proven Android resolution: 845a0e67e300.
               if [ "$tag" = 'v5.15.212' ] && \
                  [ "$c" = '8071500a8124e5a6d47d901a8d5ffd91743107a1' ] && \
                  [ "$conflicts" = 'fs/f2fs/segment.c' ]; then
@@ -182,6 +294,12 @@ jobs:
                 git add -- "$f"
                 git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 44
                 echo "ANDROID_OFFICIAL_RESOLVED=$c $f"
+                continue
+              fi
+
+              # All remaining published Android 5.15.212 conflict resolutions
+              # are handled from Google's exact merge delta above.
+              if resolve_known_android_515212 "$tag" "$c" "$conflicts" "$subject"; then
                 continue
               fi
 
