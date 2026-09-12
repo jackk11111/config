@@ -83,6 +83,40 @@ jobs:
                 continue
               fi
 
+              # 5e6ec0ba7027 adds RTNL_FLAG_DUMP_UNLOCKED with value BIT(2).
+              # The TicWatch/Android base keeps the older enum layout with
+              # RTNL_FLAG_DOIT_UNLOCKED = 1 and without the bulk-delete flag,
+              # so preserve that layout and apply only this commit's semantic delta.
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = '5e6ec0ba70276c9d95a68768da20a7e427011bc0' ] && [ "$conflicts" = 'include/net/rtnetlink.h' ]; then
+                f='include/net/rtnetlink.h'
+                git checkout --ours -- "$f"
+                python3 - "$f" <<'PYRTNL'
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          old = "enum rtnl_link_flags {\n\tRTNL_FLAG_DOIT_UNLOCKED = 1,\n};"
+          new = "enum rtnl_link_flags {\n\tRTNL_FLAG_DOIT_UNLOCKED = 1,\n\tRTNL_FLAG_DUMP_UNLOCKED = BIT(2),\n};"
+          if s.count(old) != 1:
+              start = s.find('enum rtnl_link_flags {')
+              end = s.find('\n};', start)
+              block = s[start:end + 3] if start >= 0 and end >= 0 else '<enum not found>'
+              raise SystemExit('FAIL_RTNL_DUMP_UNLOCKED_LAYOUT:\n' + block)
+          if 'RTNL_FLAG_DUMP_UNLOCKED' in s or 'RTNL_FLAG_BULK_DEL_SUPPORTED' in s:
+              raise SystemExit('FAIL_RTNL_DUMP_UNLOCKED_UNEXPECTED_FLAGS')
+          s = s.replace(old, new, 1)
+          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
+              raise SystemExit('FAIL_RTNL_DUMP_UNLOCKED_MARKERS')
+          p.write_text(s)
+          PYRTNL
+                git add -- "$f"
+                git diff --cached --check || exit 48
+                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 48
+                grep -Fq 'RTNL_FLAG_DUMP_UNLOCKED = BIT(2),' "$f" || exit 48
+                echo "ANDROID_TICWATCH_RTNL_DUMP_UNLOCKED_RESOLVED=$c $f"
+                continue
+              fi
+
           '''
           uplift = uplift[:start] + replacement + uplift[end:]
 
