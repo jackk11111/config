@@ -120,7 +120,7 @@ jobs:
               # 2a2e5f7393b2 is officially merged by Android 13 5.15 LTS with
               # conflicts in these same two XFRM files. Preserve Android's
               # untranslated-format wrapper and apply only the upstream ABI guard.
-              if [ "$tag" = 'v5.15.212' ] && [ "$c" = '2a2e5f7393b260944b18c019a9715da749114038' ] && [ "$conflicts" = $'net/xfrm/xfrm_state.c\nnet/xfrm/xfrm_user.c' ]; then
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = '2a2e5f7393b260944b18c019a9715da749114038' ]; then
                 sfile='net/xfrm/xfrm_state.c'
                 ufile='net/xfrm/xfrm_user.c'
                 git checkout --ours -- "$sfile" "$ufile"
