@@ -173,6 +173,74 @@ jobs:
                 continue
               fi
 
+              # d841f14eeba3 moves the common BPF RCU lock predicate into bpf.h
+              # and replaces open-coded checks in hashtab/helpers. Android keeps
+              # android_kabi.h next to bpfptr.h, which makes only bpf.h conflict.
+              # Preserve Android's header layout and inject exactly the stable delta.
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = 'd841f14eeba341c0ae3f8c554a538519c5166350' ]; then
+                f='include/linux/bpf.h'
+                actual_conflicts="$(git diff --name-only --diff-filter=U)"
+                [ "$actual_conflicts" = "$f" ] || {
+                  echo 'FAIL_BPF_RCU_CONFLICT_FILES' >&2
+                  printf 'EXPECTED:%s\nACTUAL_BEGIN\n%s\nACTUAL_END\n' "$f" "$actual_conflicts" >&2
+                  exit 50
+                }
+                expected_commit_files="$(printf '%s\n' 'include/linux/bpf.h' 'kernel/bpf/hashtab.c' 'kernel/bpf/helpers.c' | sort)"
+                commit_files="$(git diff-tree --no-commit-id --name-only -r "$c" | sort)"
+                [ "$commit_files" = "$expected_commit_files" ] || {
+                  echo 'FAIL_BPF_RCU_COMMIT_FILES' >&2
+                  printf 'EXPECTED_BEGIN\n%s\nEXPECTED_END\nACTUAL_BEGIN\n%s\nACTUAL_END\n' "$expected_commit_files" "$commit_files" >&2
+                  exit 50
+                }
+                git checkout --ours -- "$f"
+                python3 - "$f" <<'PYBPFRCU'
+          from pathlib import Path
+          import sys
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          include_anchor = '#include <linux/bpfptr.h>\n'
+          include_line = '#include <linux/rcupdate_trace.h>\n'
+          if s.count(include_anchor) != 1:
+              raise SystemExit(f'FAIL_BPF_RCU_INCLUDE_ANCHOR=count={s.count(include_anchor)}')
+          if include_line in s:
+              raise SystemExit('FAIL_BPF_RCU_INCLUDE_ALREADY_PRESENT')
+          if '#define bpf_rcu_lock_held()' in s:
+              raise SystemExit('FAIL_BPF_RCU_MACRO_ALREADY_PRESENT')
+          if s.count('#include <linux/android_kabi.h>') != 1:
+              raise SystemExit('FAIL_BPF_RCU_ANDROID_KABI_LAYOUT')
+          s = s.replace(include_anchor, include_anchor + include_line, 1)
+
+          anchor = '\n#ifdef CONFIG_BPF_SYSCALL\nDECLARE_PER_CPU(int, bpf_prog_active);'
+          if s.count(anchor) != 1:
+              raise SystemExit(f'FAIL_BPF_RCU_MACRO_ANCHOR=count={s.count(anchor)}')
+          macro = (
+              '#define bpf_rcu_lock_held() ' + chr(92) +
+              '\n\t(rcu_read_lock_held() || rcu_read_lock_trace_held() || rcu_read_lock_bh_held())\n'
+          )
+          s = s.replace(anchor, '\n' + macro + anchor, 1)
+          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
+              raise SystemExit('FAIL_BPF_RCU_MARKERS')
+          p.write_text(s)
+          PYBPFRCU
+                git add -- "$f"
+                staged="$(git diff --cached --name-only | sort)"
+                [ "$staged" = "$expected_commit_files" ] || {
+                  echo 'FAIL_BPF_RCU_STAGED_FILES' >&2
+                  printf 'EXPECTED_BEGIN\n%s\nEXPECTED_END\nACTUAL_BEGIN\n%s\nACTUAL_END\n' "$expected_commit_files" "$staged" >&2
+                  exit 50
+                }
+                git diff --cached --check || exit 50
+                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 50
+                grep -Fq '#include <linux/rcupdate_trace.h>' "$f" || exit 50
+                grep -Fq '#include <linux/android_kabi.h>' "$f" || exit 50
+                grep -Fq '#define bpf_rcu_lock_held()' "$f" || exit 50
+                grep -Fq 'WARN_ON_ONCE(!bpf_rcu_lock_held());' kernel/bpf/hashtab.c || exit 50
+                grep -Fq 'WARN_ON_ONCE(!bpf_rcu_lock_held());' kernel/bpf/helpers.c || exit 50
+                echo "ANDROID_TICWATCH_BPF_RCU_LOCK_HELD_RESOLVED=$c FILE=$f"
+                continue
+              fi
+
           '''
           uplift = uplift[:start] + replacement + uplift[end:]
 
