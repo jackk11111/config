@@ -43,26 +43,31 @@ jobs:
           test "$ver" = 5.15.211
           echo "BASE_READY=$ver + SEP-ASB"
 
-      - name: Incremental stable uplift 5.15.212 to 5.15.220
+      - name: Apply stable point-release deltas 5.15.212 to 5.15.220
         shell: bash
         run: |
           set -Eeuo pipefail
           cd kernel
           git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+          git fetch -q stable refs/tags/v5.15.211:refs/tags/v5.15.211
+          prev='v5.15.211'
           for n in 212 213 214 215 216 217 218 219 220; do
             tag="v5.15.$n"
-            echo "=== TRY $tag ==="
+            echo "=== APPLY DELTA $prev -> $tag ==="
             git fetch -q stable "refs/tags/$tag:refs/tags/$tag"
-            if ! git -c user.name='TicWatch LTS CI' -c user.email='ci@local' merge --no-ff --no-commit "refs/tags/$tag"; then
+            git diff --binary "$prev" "$tag" > /tmp/stable-point.patch
+            if ! git apply --3way --index /tmp/stable-point.patch; then
               echo "FIRST_CONFLICT=$tag"
               echo "CONFLICT_FILES_BEGIN"
               git diff --name-only --diff-filter=U
               echo "CONFLICT_FILES_END"
               exit 42
             fi
-            git -c user.name='TicWatch LTS CI' -c user.email='ci@local' commit -m "TicWatch Android-compatible uplift to $tag"
+            git -c user.name='TicWatch LTS CI' -c user.email='ci@local' commit -m "TicWatch Android-compatible stable delta to $tag"
             current="$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' Makefile)"
-            echo "MERGED=$current"
+            test "$current" = "5.15.$n"
+            echo "APPLIED=$current"
+            prev="$tag"
           done
           final="$(awk '$1=="VERSION"{v=$3} $1=="PATCHLEVEL"{p=$3} $1=="SUBLEVEL"{s=$3} END{print v"."p"."s}' Makefile)"
           test "$final" = 5.15.220
