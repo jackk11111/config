@@ -50,114 +50,54 @@ jobs:
           cd kernel
           git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
           git fetch -q stable refs/tags/v5.15.211:refs/tags/v5.15.211
-
-          # Bring in Google's android13-5.15-lts merge objects once.  We do not
-          # merge this branch wholesale: its known conflict-resolution commits
-          # are used only as exact first-parent deltas for matching stable commits.
           git fetch -q aosp refs/heads/android13-5.15-lts:refs/remotes/aosp/android13-5.15-lts
           prev='v5.15.211'
 
           resolve_known_android_515212() {
             local tag="$1" c="$2" conflicts="$3" subject="$4"
             local merge='' expected='' patch=''
-
             [ "$tag" = 'v5.15.212' ] || return 1
-
-            # Map only commits for which Google explicitly published an
-            # android13-5.15-lts merge resolving conflicts. Match both the
-            # stable commit and the exact conflict path; anything else is a STOP.
             case "${c:0:12}" in
-              2047eeb38db8)
-                merge='943a14e51ab4edb7997eab2843b8a47083c015a4'
-                expected='drivers/dma-buf/dma-fence-unwrap.c'
-                ;;
-              6adfaf07a044)
-                merge='82c2028c2627538636162c6018e4f31ad5bc33d9'
-                expected='fs/f2fs/inode.c'
-                ;;
-              8226d0bee05f)
-                merge='0ebdd0175e372714fde617de984849ab045ceea4'
-                expected='drivers/i2c/i2c-core-base.c'
-                ;;
-              9b49b2c4e39c)
-                merge='77d01828713ba4a167f5c5df6232c65a0696f85f'
-                expected='drivers/i2c/i2c-core-base.c'
-                ;;
-              8448877bf274)
-                merge='f4668edb928c7bc1b70005cde37dcd0fe92b292f'
-                expected='drivers/i2c/i2c-core-base.c'
-                ;;
-              a4365bc41baa)
-                merge='771777348d20ffba17482b8981f1f75a3b153e63'
-                expected='drivers/i2c/i2c-core-base.c'
-                ;;
-              889ca6000ac7)
-                merge='e5c46601142e03b9462a00bd24de752a225a598c'
-                expected='drivers/android/binder.c'
-                ;;
-              d39282f552dd)
-                merge='ad6989c00f02dc9e12cb67310edcf6fac0b6de99'
-                expected='drivers/i2c/i2c-core-base.c'
-                ;;
-              15dd81da3573)
-                merge='6cf4b0211fa5cd05704705088d68554a297157c2'
-                expected='crypto/af_alg.c'
-                ;;
-              277b699584ec)
-                merge='eca0004313071f400e52346c2b2f9e6fcf00aba4'
-                expected='kernel/bpf/core.c'
-                ;;
-              *)
-                return 1
-                ;;
+              2047eeb38db8) merge='943a14e51ab4edb7997eab2843b8a47083c015a4'; expected='drivers/dma-buf/dma-fence-unwrap.c' ;;
+              6adfaf07a044) merge='82c2028c2627538636162c6018e4f31ad5bc33d9'; expected='fs/f2fs/inode.c' ;;
+              8226d0bee05f) merge='0ebdd0175e372714fde617de984849ab045ceea4'; expected='drivers/i2c/i2c-core-base.c' ;;
+              9b49b2c4e39c) merge='77d01828713ba4a167f5c5df6232c65a0696f85f'; expected='drivers/i2c/i2c-core-base.c' ;;
+              8448877bf274) merge='f4668edb928c7bc1b70005cde37dcd0fe92b292f'; expected='drivers/i2c/i2c-core-base.c' ;;
+              a4365bc41baa) merge='771777348d20ffba17482b8981f1f75a3b153e63'; expected='drivers/i2c/i2c-core-base.c' ;;
+              889ca6000ac7) merge='e5c46601142e03b9462a00bd24de752a225a598c'; expected='drivers/android/binder.c' ;;
+              d39282f552dd) merge='ad6989c00f02dc9e12cb67310edcf6fac0b6de99'; expected='drivers/i2c/i2c-core-base.c' ;;
+              15dd81da3573) merge='6cf4b0211fa5cd05704705088d68554a297157c2'; expected='crypto/af_alg.c' ;;
+              277b699584ec) merge='eca0004313071f400e52346c2b2f9e6fcf00aba4'; expected='kernel/bpf/core.c' ;;
+              *) return 1 ;;
             esac
-
             if [ "$conflicts" != "$expected" ]; then
               echo "REFUSE_KNOWN_ANDROID_RESOLUTION=$c" >&2
               echo "EXPECTED_CONFLICT=$expected" >&2
-              echo "ACTUAL_CONFLICT_BEGIN" >&2
-              printf '%s\n' "$conflicts" >&2
-              echo "ACTUAL_CONFLICT_END" >&2
+              printf 'ACTUAL_CONFLICT_BEGIN\n%s\nACTUAL_CONFLICT_END\n' "$conflicts" >&2
               return 1
             fi
-
-            git cat-file -e "${merge}^{commit}" || {
-              echo "FAIL_ANDROID_MERGE_OBJECT_MISSING=$merge" >&2
-              exit 45
-            }
-
+            git cat-file -e "${merge}^{commit}" || { echo "FAIL_ANDROID_MERGE_OBJECT_MISSING=$merge" >&2; exit 45; }
             git cherry-pick --abort
             patch="$(mktemp)"
             git diff --binary "${merge}^1" "$merge" > "$patch"
-
             if [ ! -s "$patch" ]; then
               rm -f "$patch"
               echo "ANDROID_OFFICIAL_SKIP=$c MERGE=$merge"
               return 0
             fi
-
             if ! git apply --3way --index "$patch"; then
               rm -f "$patch"
               echo "FAIL_ANDROID_OFFICIAL_DELTA=$c MERGE=$merge" >&2
-              echo "UNRESOLVED_BEGIN" >&2
               git diff --name-only --diff-filter=U >&2 || true
-              echo "UNRESOLVED_END" >&2
               exit 45
             fi
             rm -f "$patch"
-
-            git diff --cached --check || {
-              echo "FAIL_ANDROID_OFFICIAL_DELTA_CHECK=$c" >&2
-              exit 45
-            }
-
+            git diff --cached --check || exit 45
             if git diff --cached --quiet; then
               echo "ANDROID_OFFICIAL_ALREADY_EQUIVALENT=$c MERGE=$merge"
               return 0
             fi
-
-            git -c user.name='TicWatch LTS CI' -c user.email='ci@local' \
-              commit -m "Android official resolution: $subject" >/dev/null
+            git -c user.name='TicWatch LTS CI' -c user.email='ci@local' commit -m "Android official resolution: $subject" >/dev/null
             echo "ANDROID_OFFICIAL_DELTA_APPLIED=$c MERGE=$merge FILE=$expected"
             return 0
           }
@@ -166,7 +106,6 @@ jobs:
             tag="v5.15.$n"
             echo "=== CHECK MISSING COMMITS $prev -> $tag ==="
             git fetch -q stable "refs/tags/$tag:refs/tags/$tag"
-
             missing="$(git cherry HEAD "$tag" "$prev" | awk '$1=="+"{print $2}')"
             total="$(git rev-list --count "$prev..$tag")"
             missing_count="$(printf '%s\n' "$missing" | sed '/^$/d' | wc -l)"
@@ -175,37 +114,26 @@ jobs:
             while read -r c; do
               [ -n "$c" ] || continue
               grep -Fqx "$c" <<< "$missing" || continue
-
               subject="$(git show -s --format=%s "$c")"
               echo "APPLY_COMMIT=$c $subject"
-
               if git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick -x "$c"; then
                 continue
               fi
-
               conflicts="$(git diff --name-only --diff-filter=U)"
 
-              # Proven Android resolution: 9c43b169ac7e keeps the Android
-              # first-parent tree for this nfsd conflict.
-              if [ "$tag" = 'v5.15.212' ] && \
-                 [ "$c" = '5540899da89461cf3bf17227d37cc9c0b73fe256' ] && \
-                 [ "$conflicts" = 'fs/nfsd/nfs4recover.c' ]; then
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = '5540899da89461cf3bf17227d37cc9c0b73fe256' ] && [ "$conflicts" = 'fs/nfsd/nfs4recover.c' ]; then
                 echo "ANDROID_OFFICIAL_SKIP=$c fs/nfsd/nfs4recover.c"
                 git cherry-pick --abort
                 continue
               fi
 
-              # Proven Android resolution: 21756fda13d1.
-              if [ "$tag" = 'v5.15.212' ] && \
-                 [ "$c" = 'f51db99287b5acf81513ece82a0c95eb5db008e3' ] && \
-                 [ "$conflicts" = 'fs/f2fs/segment.c' ]; then
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = 'f51db99287b5acf81513ece82a0c95eb5db008e3' ] && [ "$conflicts" = 'fs/f2fs/segment.c' ]; then
                 f='fs/f2fs/segment.c'
                 git checkout --ours -- "$f"
                 python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
-          p = Path(sys.argv[1])
-          s = p.read_text()
+          p = Path(sys.argv[1]); s = p.read_text()
           old = '''\t\t} else {
           \t\t\tf2fs_down_write(&sbi->gc_lock);
           \t\t\tf2fs_gc(sbi, false, false, false, NULL_SEGNO);
@@ -221,11 +149,9 @@ jobs:
           \t\t\tf2fs_down_write(&sbi->gc_lock);
           \t\t\tf2fs_gc(sbi, false, false, false, NULL_SEGNO);
           \t\t}'''
-          if s.count(old) != 1:
-              raise SystemExit(f'FAIL_F2FS_1: expected one target, got {s.count(old)}')
+          if s.count(old) != 1: raise SystemExit(f'FAIL_F2FS_1 target count={s.count(old)}')
           s = s.replace(old, new, 1)
-          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
-              raise SystemExit('FAIL_F2FS_1: conflict markers remain')
+          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')): raise SystemExit('FAIL_F2FS_1 markers')
           p.write_text(s)
           PY
                 grep -Fq 'void f2fs_submit_all_merged_ipu_writes(struct f2fs_sb_info *sbi)' fs/f2fs/data.c || exit 43
@@ -236,17 +162,13 @@ jobs:
                 continue
               fi
 
-              # Proven Android resolution: 845a0e67e300.
-              if [ "$tag" = 'v5.15.212' ] && \
-                 [ "$c" = '8071500a8124e5a6d47d901a8d5ffd91743107a1' ] && \
-                 [ "$conflicts" = 'fs/f2fs/segment.c' ]; then
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = '8071500a8124e5a6d47d901a8d5ffd91743107a1' ] && [ "$conflicts" = 'fs/f2fs/segment.c' ]; then
                 f='fs/f2fs/segment.c'
                 git checkout --ours -- "$f"
                 python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
-          p = Path(sys.argv[1])
-          s = p.read_text()
+          p = Path(sys.argv[1]); s = p.read_text()
           anchor = '''\tif (has_not_enough_free_secs(sbi, 0, 0)) {
           \t\tif (test_opt(sbi, GC_MERGE) && sbi->gc_thread &&'''
           inserted = '''\tif (has_not_enough_free_secs(sbi, 0, 0)) {
@@ -269,22 +191,14 @@ jobs:
           \t\t\tf2fs_down_write(&sbi->gc_lock);'''
           new_else = '''\t\t} else {
           \t\t\tf2fs_down_write(&sbi->gc_lock);'''
-          if s.count(anchor) != 1:
-              raise SystemExit(f'FAIL_F2FS_2 anchor: expected 1, got {s.count(anchor)}')
-          if s.count(old_else) != 1:
-              raise SystemExit(f'FAIL_F2FS_2 else: expected 1, got {s.count(old_else)}')
+          if s.count(anchor) != 1: raise SystemExit(f'FAIL_F2FS_2 anchor={s.count(anchor)}')
+          if s.count(old_else) != 1: raise SystemExit(f'FAIL_F2FS_2 else={s.count(old_else)}')
           s = s.replace(anchor, inserted, 1).replace(old_else, new_else, 1)
-          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
-              raise SystemExit('FAIL_F2FS_2: conflict markers remain')
-          start = s.index('void f2fs_balance_fs(')
-          end = s.index('\n}\n', start)
-          fn = s[start:end]
-          if fn.count('f2fs_submit_merged_write(sbi, DATA);') != 1:
-              raise SystemExit('FAIL_F2FS_2: merged write call count != 1')
-          if fn.count('f2fs_submit_all_merged_ipu_writes(sbi);') != 1:
-              raise SystemExit('FAIL_F2FS_2: IPU call count != 1')
-          if fn.index('f2fs_submit_merged_write(sbi, DATA);') > fn.index('if (test_opt(sbi, GC_MERGE)'):
-              raise SystemExit('FAIL_F2FS_2: submission still after GC_MERGE split')
+          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')): raise SystemExit('FAIL_F2FS_2 markers')
+          start = s.index('void f2fs_balance_fs('); end = s.index('\n}\n', start); fn = s[start:end]
+          if fn.count('f2fs_submit_merged_write(sbi, DATA);') != 1: raise SystemExit('FAIL_F2FS_2 merged count')
+          if fn.count('f2fs_submit_all_merged_ipu_writes(sbi);') != 1: raise SystemExit('FAIL_F2FS_2 ipu count')
+          if fn.index('f2fs_submit_merged_write(sbi, DATA);') > fn.index('if (test_opt(sbi, GC_MERGE)'): raise SystemExit('FAIL_F2FS_2 order')
           p.write_text(s)
           PY
                 git add -- "$f"
@@ -293,53 +207,59 @@ jobs:
                 continue
               fi
 
-              # The September Android ASB already contains the df1a17 UAF fix
-              # in an expanded binder_free_transaction(): to_proc and to_thread
-              # are read under t->lock and target_thread is pinned before unlock.
-              if [ "$tag" = 'v5.15.212' ] && \
-                 [ "$c" = 'df1a17abba8d6fac5f965adcb8113ceace6e4949' ] && \
-                 [ "$conflicts" = 'drivers/android/binder.c' ]; then
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = 'df1a17abba8d6fac5f965adcb8113ceace6e4949' ] && [ "$conflicts" = 'drivers/android/binder.c' ]; then
                 f='drivers/android/binder.c'
                 git checkout --ours -- "$f"
                 python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
-          p = Path(sys.argv[1])
-          s = p.read_text()
+          s = Path(sys.argv[1]).read_text()
           sig = 'static void binder_free_transaction(struct binder_transaction *t)'
-          start = s.find(sig)
-          if start < 0:
-              raise SystemExit('FAIL_BINDER_UAF_EQUIV: function not found')
-          end = s.find('\n}\n', start)
-          if end < 0:
-              raise SystemExit('FAIL_BINDER_UAF_EQUIV: function end not found')
+          start = s.find(sig); end = s.find('\n}\n', start)
+          if start < 0 or end < 0: raise SystemExit('FAIL_BINDER_UAF_EQUIV: function')
           fn = s[start:end]
-          needles = [
-              'struct binder_thread *target_thread;',
-              'struct binder_proc *target_proc;',
-              'spin_lock(&t->lock);',
-              'target_proc = t->to_proc;',
-              'target_thread = t->to_thread;',
-              'atomic_inc(&target_thread->tmp_ref);',
-              'spin_unlock(&t->lock);',
-          ]
+          needles = ['struct binder_thread *target_thread;', 'struct binder_proc *target_proc;', 'spin_lock(&t->lock);', 'target_proc = t->to_proc;', 'target_thread = t->to_thread;', 'atomic_inc(&target_thread->tmp_ref);', 'spin_unlock(&t->lock);']
           for needle in needles:
-              if fn.count(needle) != 1:
-                  raise SystemExit(f'FAIL_BINDER_UAF_EQUIV: {needle} count={fn.count(needle)}')
-          if not (fn.index('spin_lock(&t->lock);')
-                  < fn.index('target_proc = t->to_proc;')
-                  < fn.index('target_thread = t->to_thread;')
-                  < fn.index('atomic_inc(&target_thread->tmp_ref);')
-                  < fn.index('spin_unlock(&t->lock);')):
-              raise SystemExit('FAIL_BINDER_UAF_EQUIV: lock/order mismatch')
+              if fn.count(needle) != 1: raise SystemExit(f'FAIL_BINDER_UAF_EQUIV: {needle} count={fn.count(needle)}')
+          if not (fn.index('spin_lock(&t->lock);') < fn.index('target_proc = t->to_proc;') < fn.index('target_thread = t->to_thread;') < fn.index('atomic_inc(&target_thread->tmp_ref);') < fn.index('spin_unlock(&t->lock);')): raise SystemExit('FAIL_BINDER_UAF_EQUIV: order')
           PY
                 git cherry-pick --abort
                 echo "BINDER_UAF_ALREADY_EQUIVALENT=$c $f"
                 continue
               fi
 
-              # All remaining published Android 5.15.212 conflict resolutions
-              # are handled from Google's exact merge delta above.
+              # 87177497 is a one-line security hardening, but Android's BPF
+              # context has diverged enough for the hunk to conflict. Preserve
+              # the Android function and apply only the stable semantic change.
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = '87177497cca90bf4fcfb759eb898560eb5b46a10' ] && [ "$conflicts" = 'kernel/bpf/core.c' ]; then
+                f='kernel/bpf/core.c'
+                git checkout --ours -- "$f"
+                python3 - "$f" <<'PY'
+          from pathlib import Path
+          import re, sys
+          p = Path(sys.argv[1]); s = p.read_text()
+          sig = 'static bool __bpf_prog_map_compatible('
+          start = s.find(sig)
+          if start < 0: raise SystemExit('FAIL_BPF_COOKIE: function not found')
+          end = s.find('\n}\n', start)
+          if end < 0: raise SystemExit('FAIL_BPF_COOKIE: function end not found')
+          fn = s[start:end]
+          pat = re.compile(r'(ret\s*=\s*map->owner->storage_cookie\[i\]\s*==\s*cookie\s*\|\|\s*)!cookie\s*;')
+          matches = pat.findall(fn)
+          if len(matches) != 1: raise SystemExit(f'FAIL_BPF_COOKIE: old semantic target count={len(matches)}')
+          fn = pat.sub(r'\1(!cookie && !aux->tail_call_reachable);', fn, count=1)
+          if fn.count('(!cookie && !aux->tail_call_reachable)') != 1: raise SystemExit('FAIL_BPF_COOKIE: verification failed')
+          s = s[:start] + fn + s[end:]
+          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')): raise SystemExit('FAIL_BPF_COOKIE: conflict markers remain')
+          p.write_text(s)
+          PY
+                git add -- "$f"
+                git diff --cached --check || exit 47
+                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 47
+                echo "BPF_COOKIE_RESOLVED=$c $f"
+                continue
+              fi
+
               if resolve_known_android_515212 "$tag" "$c" "$conflicts" "$subject"; then
                 continue
               fi
