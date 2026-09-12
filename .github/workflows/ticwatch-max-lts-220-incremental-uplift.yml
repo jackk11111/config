@@ -64,7 +64,7 @@ jobs:
             [ "$tag" = 'v5.15.212' ] || return 1
 
             # Map only commits for which Google explicitly published an
-            # android13-5.15-lts merge resolving conflicts.  Match both the
+            # android13-5.15-lts merge resolving conflicts. Match both the
             # stable commit and the exact conflict path; anything else is a STOP.
             case "${c:0:12}" in
               2047eeb38db8)
@@ -126,10 +126,6 @@ jobs:
               exit 45
             }
 
-            # Abort the generic stable cherry-pick and apply exactly the tree
-            # delta that Google's merge introduced relative to its Android first
-            # parent.  This imports both the stable change and Google's conflict
-            # decision, without replacing whole files from another tree.
             git cherry-pick --abort
             patch="$(mktemp)"
             git diff --binary "${merge}^1" "$merge" > "$patch"
@@ -294,6 +290,51 @@ jobs:
                 git add -- "$f"
                 git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 44
                 echo "ANDROID_OFFICIAL_RESOLVED=$c $f"
+                continue
+              fi
+
+              # Stable df1a17abba8d has no separate Android merge-resolution.
+              # Preserve Android binder.c and apply only the UAF fix: read
+              # t->to_proc under the transaction lock.
+              if [ "$tag" = 'v5.15.212' ] && \
+                 [ "$c" = 'df1a17abba8d6fac5f965adcb8113ceace6e4949' ] && \
+                 [ "$conflicts" = 'drivers/android/binder.c' ]; then
+                f='drivers/android/binder.c'
+                git checkout --ours -- "$f"
+                python3 - "$f" <<'PY'
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          sig = 'static void binder_free_transaction(struct binder_transaction *t)'
+          start = s.find(sig)
+          if start < 0:
+              raise SystemExit('FAIL_BINDER_UAF: binder_free_transaction not found')
+          end = s.find('\n}\n', start)
+          if end < 0:
+              raise SystemExit('FAIL_BINDER_UAF: function end not found')
+          fn = s[start:end]
+          old = '\tstruct binder_proc *target_proc = t->to_proc;'
+          new = ('\tstruct binder_proc *target_proc;\n\n'
+                 '\tspin_lock(&t->lock);\n'
+                 '\ttarget_proc = t->to_proc;\n'
+                 '\tspin_unlock(&t->lock);')
+          if fn.count(old) != 1:
+              raise SystemExit(f'FAIL_BINDER_UAF: expected one target in function, got {fn.count(old)}')
+          fn = fn.replace(old, new, 1)
+          s = s[:start] + fn + s[end:]
+          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
+              raise SystemExit('FAIL_BINDER_UAF: conflict markers remain')
+          check = s[start:s.find('\n}\n', start)]
+          for needle in ('spin_lock(&t->lock);', 'target_proc = t->to_proc;', 'spin_unlock(&t->lock);'):
+              if check.count(needle) != 1:
+                  raise SystemExit(f'FAIL_BINDER_UAF_VERIFY: {needle}')
+          p.write_text(s)
+          PY
+                git add -- "$f"
+                git diff --cached --check || exit 46
+                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 46
+                echo "BINDER_UAF_RESOLVED=$c $f"
                 continue
               fi
 
