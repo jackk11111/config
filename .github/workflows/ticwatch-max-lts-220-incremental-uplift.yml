@@ -57,8 +57,6 @@ jobs:
             echo "=== CHECK MISSING COMMITS $prev -> $tag ==="
             git fetch -q stable "refs/tags/$tag:refs/tags/$tag"
 
-            # Compare stable commits by patch-id against the current Android/ASB tree.
-            # '-' means an equivalent patch already exists and must not be reapplied.
             missing="$(git cherry HEAD "$tag" "$prev" | awk '$1=="+"{print $2}')"
             total="$(git rev-list --count "$prev..$tag")"
             missing_count="$(printf '%s\n' "$missing" | sed '/^$/d' | wc -l)"
@@ -66,9 +64,7 @@ jobs:
 
             while read -r c; do
               [ -n "$c" ] || continue
-              if ! grep -Fqx "$c" <<< "$missing"; then
-                continue
-              fi
+              grep -Fqx "$c" <<< "$missing" || continue
 
               subject="$(git show -s --format=%s "$c")"
               echo "APPLY_COMMIT=$c $subject"
@@ -79,10 +75,8 @@ jobs:
 
               conflicts="$(git diff --name-only --diff-filter=U)"
 
-              # Official Android android13-5.15-lts resolution:
-              # 9c43b169ac7e merges 5540899da894 and produces no tree delta
-              # from its Android first parent. Do not import the generic-Linux
-              # ownership conversion into this Android tree.
+              # Android official 5.15.212 resolution: merge 9c43b169ac7e
+              # keeps the Android first-parent tree for this nfsd conflict.
               if [ "$tag" = 'v5.15.212' ] && \
                  [ "$c" = '5540899da89461cf3bf17227d37cc9c0b73fe256' ] && \
                  [ "$conflicts" = 'fs/nfsd/nfs4recover.c' ]; then
@@ -91,20 +85,15 @@ jobs:
                 continue
               fi
 
-              # Official Android android13-5.15-lts resolution:
-              # 21756fda13d1 merges f51db99287b5. In our Sep-ASB tree data.c
-              # and f2fs.h apply cleanly; only segment.c conflicts. Reproduce
-              # Google's resolved segment.c hunk exactly and keep the clean hunks.
+              # Android official 5.15.212 resolution: merge 21756fda13d1.
               if [ "$tag" = 'v5.15.212' ] && \
                  [ "$c" = 'f51db99287b5acf81513ece82a0c95eb5db008e3' ] && \
                  [ "$conflicts" = 'fs/f2fs/segment.c' ]; then
                 f='fs/f2fs/segment.c'
                 git checkout --ours -- "$f"
-
                 python3 - "$f" <<'PY'
           from pathlib import Path
           import sys
-
           p = Path(sys.argv[1])
           s = p.read_text()
           old = '''\t\t} else {
@@ -123,22 +112,75 @@ jobs:
           \t\t\tf2fs_gc(sbi, false, false, false, NULL_SEGNO);
           \t\t}'''
           if s.count(old) != 1:
-              raise SystemExit(f'FAIL_F2FS_ANDROID_RESOLUTION: expected one target, got {s.count(old)}')
+              raise SystemExit(f'FAIL_F2FS_1: expected one target, got {s.count(old)}')
           s = s.replace(old, new, 1)
           if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
-              raise SystemExit('FAIL_F2FS_ANDROID_RESOLUTION: conflict markers remain')
+              raise SystemExit('FAIL_F2FS_1: conflict markers remain')
           p.write_text(s)
           PY
-
-                grep -Fq 'f2fs_submit_merged_write(sbi, DATA);' "$f" || exit 43
-                grep -Fq 'f2fs_submit_all_merged_ipu_writes(sbi);' "$f" || exit 43
                 grep -Fq 'void f2fs_submit_all_merged_ipu_writes(struct f2fs_sb_info *sbi)' fs/f2fs/data.c || exit 43
                 grep -Fq 'void f2fs_submit_all_merged_ipu_writes(struct f2fs_sb_info *sbi);' fs/f2fs/f2fs.h || exit 43
                 git add -- "$f"
-                if ! git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue; then
-                  echo "FAIL_F2FS_ANDROID_RESOLUTION: cherry-pick --continue failed" >&2
-                  exit 43
-                fi
+                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 43
+                echo "ANDROID_OFFICIAL_RESOLVED=$c $f"
+                continue
+              fi
+
+              # Android official 5.15.212 resolution: merge 845a0e67e300.
+              # Move the cached OPU/IPU DATA submission before the GC_MERGE split,
+              # exactly as Android does, so both GC paths are protected.
+              if [ "$tag" = 'v5.15.212' ] && \
+                 [ "$c" = '8071500a8124e5a6d47d901a8d5ffd91743107a1' ] && \
+                 [ "$conflicts" = 'fs/f2fs/segment.c' ]; then
+                f='fs/f2fs/segment.c'
+                git checkout --ours -- "$f"
+                python3 - "$f" <<'PY'
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          anchor = '''\tif (has_not_enough_free_secs(sbi, 0, 0)) {
+          \t\tif (test_opt(sbi, GC_MERGE) && sbi->gc_thread &&'''
+          inserted = '''\tif (has_not_enough_free_secs(sbi, 0, 0)) {
+          \t\t/*
+          \t\t * Submit all cached OPU/IPU DATA bios before triggering
+          \t\t * foreground GC to avoid potential deadlocks.
+          \t\t */
+          \t\tf2fs_submit_merged_write(sbi, DATA);
+          \t\tf2fs_submit_all_merged_ipu_writes(sbi);
+
+          \t\tif (test_opt(sbi, GC_MERGE) && sbi->gc_thread &&'''
+          old_else = '''\t\t} else {
+          \t\t\t/*
+          \t\t\t * Submit all cached OPU/IPU DATA bios before triggering
+          \t\t\t * foreground GC to avoid potential deadlocks.
+          \t\t\t */
+          \t\t\tf2fs_submit_merged_write(sbi, DATA);
+          \t\t\tf2fs_submit_all_merged_ipu_writes(sbi);
+
+          \t\t\tf2fs_down_write(&sbi->gc_lock);'''
+          new_else = '''\t\t} else {
+          \t\t\tf2fs_down_write(&sbi->gc_lock);'''
+          if s.count(anchor) != 1:
+              raise SystemExit(f'FAIL_F2FS_2 anchor: expected 1, got {s.count(anchor)}')
+          if s.count(old_else) != 1:
+              raise SystemExit(f'FAIL_F2FS_2 else: expected 1, got {s.count(old_else)}')
+          s = s.replace(anchor, inserted, 1).replace(old_else, new_else, 1)
+          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
+              raise SystemExit('FAIL_F2FS_2: conflict markers remain')
+          start = s.index('void f2fs_balance_fs(')
+          end = s.index('\n}\n', start)
+          fn = s[start:end]
+          if fn.count('f2fs_submit_merged_write(sbi, DATA);') != 1:
+              raise SystemExit('FAIL_F2FS_2: merged write call count != 1')
+          if fn.count('f2fs_submit_all_merged_ipu_writes(sbi);') != 1:
+              raise SystemExit('FAIL_F2FS_2: IPU call count != 1')
+          if fn.index('f2fs_submit_merged_write(sbi, DATA);') > fn.index('if (test_opt(sbi, GC_MERGE)'):
+              raise SystemExit('FAIL_F2FS_2: submission still after GC_MERGE split')
+          p.write_text(s)
+          PY
+                git add -- "$f"
+                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 44
                 echo "ANDROID_OFFICIAL_RESOLVED=$c $f"
                 continue
               fi
