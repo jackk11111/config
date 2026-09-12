@@ -230,7 +230,7 @@ jobs:
 
               # 87177497 is a one-line security hardening, but Android's BPF
               # context has diverged enough for the hunk to conflict. Preserve
-              # the Android function and apply only the stable semantic change.
+              # Android's version and apply only the exact stable semantic delta.
               if [ "$tag" = 'v5.15.212' ] && [ "$c" = '87177497cca90bf4fcfb759eb898560eb5b46a10' ] && [ "$conflicts" = 'kernel/bpf/core.c' ]; then
                 f='kernel/bpf/core.c'
                 git checkout --ours -- "$f"
@@ -238,19 +238,20 @@ jobs:
           from pathlib import Path
           import re, sys
           p = Path(sys.argv[1]); s = p.read_text()
-          sig = 'static bool __bpf_prog_map_compatible('
-          start = s.find(sig)
-          if start < 0: raise SystemExit('FAIL_BPF_COOKIE: function not found')
-          end = s.find('\n}\n', start)
-          if end < 0: raise SystemExit('FAIL_BPF_COOKIE: function end not found')
-          fn = s[start:end]
           pat = re.compile(r'(ret\s*=\s*map->owner->storage_cookie\[i\]\s*==\s*cookie\s*\|\|\s*)!cookie\s*;')
-          matches = pat.findall(fn)
-          if len(matches) != 1: raise SystemExit(f'FAIL_BPF_COOKIE: old semantic target count={len(matches)}')
-          fn = pat.sub(r'\1(!cookie && !aux->tail_call_reachable);', fn, count=1)
-          if fn.count('(!cookie && !aux->tail_call_reachable)') != 1: raise SystemExit('FAIL_BPF_COOKIE: verification failed')
-          s = s[:start] + fn + s[end:]
-          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')): raise SystemExit('FAIL_BPF_COOKIE: conflict markers remain')
+          matches = list(pat.finditer(s))
+          if len(matches) != 1:
+              raise SystemExit(f'FAIL_BPF_COOKIE: old semantic target count={len(matches)}')
+          m = matches[0]
+          context = s[max(0, m.start() - 800):min(len(s), m.end() + 800)]
+          for needle in ('aux->cgroup_storage[i]', 'map->owner->storage_cookie[i]'):
+              if needle not in context:
+                  raise SystemExit(f'FAIL_BPF_COOKIE: missing context {needle}')
+          s = pat.sub(r'\1(!cookie && !aux->tail_call_reachable);', s, count=1)
+          if s.count('(!cookie && !aux->tail_call_reachable)') != 1:
+              raise SystemExit('FAIL_BPF_COOKIE: verification failed')
+          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
+              raise SystemExit('FAIL_BPF_COOKIE: conflict markers remain')
           p.write_text(s)
           PY
                 git add -- "$f"
