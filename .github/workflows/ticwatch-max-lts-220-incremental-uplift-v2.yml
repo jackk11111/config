@@ -117,6 +117,62 @@ jobs:
                 continue
               fi
 
+              # 2a2e5f7393b2 is officially merged by Android 13 5.15 LTS with
+              # conflicts in these same two XFRM files. Preserve Android's
+              # untranslated-format wrapper and apply only the upstream ABI guard.
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = '2a2e5f7393b260944b18c019a9715da749114038' ] && [ "$conflicts" = $'net/xfrm/xfrm_state.c\nnet/xfrm/xfrm_user.c' ]; then
+                sfile='net/xfrm/xfrm_state.c'
+                ufile='net/xfrm/xfrm_user.c'
+                git checkout --ours -- "$sfile" "$ufile"
+                python3 - "$sfile" "$ufile" <<'PYXFRM'
+          from pathlib import Path
+          import sys
+
+          targets = (
+              (Path(sys.argv[1]), 'int xfrm_user_policy('),
+              (Path(sys.argv[2]), 'static int xfrm_user_rcv_msg('),
+          )
+          outer = 'if (!IS_ENABLED(CONFIG_ANDROID) || IS_ENABLED(CONFIG_XFRM_USER_COMPAT)) {'
+          old = 'if (in_compat_syscall()) {'
+          new = 'if (IS_ENABLED(CONFIG_COMPAT_FOR_U64_ALIGNMENT) && in_compat_syscall()) {'
+
+          for p, sig in targets:
+              text = p.read_text()
+              start = text.find(sig)
+              if start < 0:
+                  raise SystemExit(f'FAIL_XFRM_U64_GUARD_FUNCTION={p}:{sig}')
+              end = text.find('\n}\n', start)
+              if end < 0:
+                  raise SystemExit(f'FAIL_XFRM_U64_GUARD_END={p}:{sig}')
+              fn = text[start:end]
+              if fn.count(outer) != 1:
+                  raise SystemExit(f'FAIL_XFRM_U64_GUARD_ANDROID_WRAPPER={p}:count={fn.count(outer)}')
+              if fn.count(old) != 1:
+                  raise SystemExit(f'FAIL_XFRM_U64_GUARD_TARGET={p}:count={fn.count(old)}')
+              if new in fn:
+                  raise SystemExit(f'FAIL_XFRM_U64_GUARD_ALREADY_PRESENT={p}')
+              fn = fn.replace(old, new, 1)
+              text = text[:start] + fn + text[end:]
+              if any(x in text for x in ('<<<<<<<', '=======', '>>>>>>>')):
+                  raise SystemExit(f'FAIL_XFRM_U64_GUARD_MARKERS={p}')
+              p.write_text(text)
+          PYXFRM
+                git add -- "$sfile" "$ufile"
+                staged="$(git diff --cached --name-only | sort)"
+                expected="$(printf '%s\n' "$sfile" "$ufile" | sort)"
+                [ "$staged" = "$expected" ] || {
+                  echo 'FAIL_XFRM_U64_GUARD_STAGED_FILES' >&2
+                  printf 'EXPECTED:\n%s\nACTUAL:\n%s\n' "$expected" "$staged" >&2
+                  exit 49
+                }
+                git diff --cached --check || exit 49
+                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 49
+                grep -Fq 'if (IS_ENABLED(CONFIG_COMPAT_FOR_U64_ALIGNMENT) && in_compat_syscall()) {' "$sfile" || exit 49
+                grep -Fq 'if (IS_ENABLED(CONFIG_COMPAT_FOR_U64_ALIGNMENT) && in_compat_syscall()) {' "$ufile" || exit 49
+                echo "ANDROID_TICWATCH_XFRM_U64_GUARD_RESOLVED=$c FILES=$sfile,$ufile"
+                continue
+              fi
+
           '''
           uplift = uplift[:start] + replacement + uplift[end:]
 
