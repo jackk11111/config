@@ -114,7 +114,6 @@ jobs:
           count="$(grep -vc '^#' "$MAP")"
           [ "$count" -eq 337 ] || { echo "Unexpected KMI override count: $count" >&2; exit 1; }
           awk 'BEGIN{FS="\t"} /^#/ {next} NF!=2 || $2 !~ /^0x[0-9a-fA-F]{8}$/ {bad=1} END{exit bad}' "$MAP"
-          # Every override must agree exactly with the known-good 5.15.211 Module.symvers.
           python3 - "$MAP" previous/audit/Module.symvers <<'PY'
           import sys
           mp, sp = sys.argv[1:]
@@ -158,32 +157,32 @@ jobs:
               raise SystemExit('genksyms export_symbol anchor mismatch')
           helper=r'''static unsigned long ticwatch_kmi_crc_override(const char *name, unsigned long crc)
           {
-          	const char *path = getenv("TICWATCH_KMI_CRC_MAP");
-          	FILE *f;
-          	char line[512];
-          	char sym[256];
-          	unsigned long expected;
+          \tconst char *path = getenv("TICWATCH_KMI_CRC_MAP");
+          \tFILE *f;
+          \tchar line[512];
+          \tchar sym[256];
+          \tunsigned long expected;
 
-          	if (!path || !*path)
-          		return crc;
+          \tif (!path || !*path)
+          \t\treturn crc;
 
-          	f = fopen(path, "r");
-          	if (!f) {
-          		perror(path);
-          		exit(2);
-          	}
+          \tf = fopen(path, "r");
+          \tif (!f) {
+          \t\tperror(path);
+          \t\texit(2);
+          \t}
 
-          	while (fgets(line, sizeof(line), f)) {
-          		if (line[0] == '#' || line[0] == '\n')
-          			continue;
-          		if (sscanf(line, "%255s %lx", sym, &expected) == 2 &&
-          		    strcmp(sym, name) == 0) {
-          			fclose(f);
-          			return expected;
-          		}
-          	}
-          	fclose(f);
-          	return crc;
+          \twhile (fgets(line, sizeof(line), f)) {
+          \t\tif (line[0] == '#' || line[0] == '\n')
+          \t\t\tcontinue;
+          \t\tif (sscanf(line, "%255s %lx", sym, &expected) == 2 &&
+          \t\t    strcmp(sym, name) == 0) {
+          \t\t\tfclose(f);
+          \t\t\treturn expected;
+          \t\t}
+          \t}
+          \tfclose(f);
+          \treturn crc;
           }
 
           '''
@@ -197,7 +196,6 @@ jobs:
           grep -Fq 'ticwatch_kmi_crc_override' "$F"
           git -C "$K" diff -- scripts/genksyms/genksyms.c > "$GITHUB_WORKSPACE/genksyms-kmi-preserve.patch"
           test -s "$GITHUB_WORKSPACE/genksyms-kmi-preserve.patch"
-          # Force the host tool to rebuild from the modified source.
           rm -f "$K/out/scripts/genksyms/genksyms" "$K/out/scripts/genksyms/"*.o 2>/dev/null || true
 
       - name: Compile real KMI-preserved 5.15.220 kernel
@@ -219,10 +217,8 @@ jobs:
           test -s out/vmlinux
           test -s out/System.map
           test -s out/Module.symvers
-
           nm out/vmlinux > "$RUNNER_TEMP/vmlinux.nm"
           grep -Fq 'slatecom_nowarn_init' "$RUNNER_TEMP/vmlinux.nm"
-
           cmp -s out/.config "$GITHUB_WORKSPACE/final.config"
           cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"
           cp out/System.map "$GITHUB_WORKSPACE/System.map"
@@ -317,11 +313,12 @@ jobs:
           s=p.read_text(); sha=sys.argv[1]
           s,n=re.subn(r'^EXPECTED_IMAGE_SHA="[0-9a-f]+"$',f'EXPECTED_IMAGE_SHA="{sha}"',s,count=1,flags=re.M)
           if n != 1: raise SystemExit('flasher SHA anchor missing')
-          s,n=re.subn(r'^EXPECTED_RELEASE_PREFIX="[^"]+"$','EXPECTED_RELEASE_PREFIX="5.15.220-Xinran_StarBai-Test"',s,count=1,flags=re.M)
+          s,n=re.subn(r'^EXPECTED_RELEASE_PREFIX="[^"]+"$','EXPECTED_RELEASE_PREFIX="5.15.211-Xinran_StarBai-Test"',s,count=1,flags=re.M)
           if n != 1: raise SystemExit('flasher release anchor missing')
           p.write_text(s)
           PY
           sh -n bundle/wireless-flasher/flash.sh
+          grep -Fqx 'EXPECTED_RELEASE_PREFIX="5.15.211-Xinran_StarBai-Test"' bundle/wireless-flasher/flash.sh
           (cd bundle/wireless-flasher && sha256sum Image busybox magiskboot flash.sh > SHA256SUMS && sha256sum -c SHA256SUMS)
 
           unzip -q "previous/$PREVIOUS_ANYKERNEL" -d anykernel
@@ -347,6 +344,7 @@ jobs:
           STOCK379_KMI_CRC_OVERRIDES=337
           STOCK379_KMI_CRC_OVERRIDE_GATE=PASS
           KMI_REFERENCE=KNOWN_GOOD_5.15.211_MATCHING_STOCK379
+          FLASH_ALLOWED_BASELINE=5.15.211-Xinran_StarBai-Test
           WEAR7_PROFILE=ENABLED
           KEXEC=ENABLED_CLASSIC
           KEXEC_FILE=DISABLED
@@ -372,6 +370,7 @@ jobs:
           CONFIG_ANDROID_BINDERFS=y
           STOCK379_KMI_TARGETED_CRC_OVERRIDES=337
           STOCK379_KMI_CRC_OVERRIDE_GATE=PASS
+          FLASH_ALLOWED_BASELINE=5.15.211-Xinran_StarBai-Test
           BOOT_IMG=NOT_PREBUILT_ANYKERNEL_REPLACES_KERNEL_ONLY
           VENDOR_BOOT_IMG=STOCK_379_UNCHANGED
           INIT_BOOT_IMG=STOCK_379_UNCHANGED
