@@ -2,7 +2,8 @@
 set -Eeuo pipefail
 
 WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
-ROOT="$WORKSPACE/.ticwatch-preflight/common/KernelSU-Next/kernel"
+KERNEL="$WORKSPACE/.ticwatch-preflight/common"
+ROOT="$KERNEL/KernelSU-Next/kernel"
 RUNTIME="$ROOT/runtime/ksud_integration.c"
 SUCOMPAT="$ROOT/feature/sucompat.c"
 
@@ -70,5 +71,52 @@ SAFEKEY_FIX="$WORKSPACE/ticwatch-ultimate/fix-ksu-safekey-ticwatch.sh"
 [ -f "$SAFEKEY_FIX" ] || fail "final SafeKey fixer missing: $SAFEKEY_FIX"
 cp "$SAFEKEY_FIX" /tmp/fix-ksu-safekey-ticwatch.sh
 chmod +x /tmp/fix-ksu-safekey-ticwatch.sh
+
+# Linux 5.15.217+ carries the PSI teardown fix using timer_shutdown_sync().
+# Android 13 ACK 5.15 intentionally merged around the timer shutdown API series
+# to avoid its KMI/ABI churn.  The stable uplift can therefore contain the PSI
+# caller while the ACK timer API is absent.  Keep the PSI lifetime fix, but use
+# the synchronization primitive actually provided by this ACK tree rather than
+# importing the ABI-changing timer series.  This is intentionally fail-closed:
+# exactly one known caller may be adapted, and only when timer_shutdown_sync()
+# is not declared by the target tree.
+PSI="$KERNEL/kernel/sched/psi.c"
+TIMER_H="$KERNEL/include/linux/timer.h"
+[ -f "$PSI" ] || fail "PSI source missing: $PSI"
+[ -f "$TIMER_H" ] || fail "timer header missing: $TIMER_H"
+python3 - "$PSI" "$TIMER_H" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+psi = Path(sys.argv[1])
+timer_h = Path(sys.argv[2])
+s = psi.read_text()
+h = timer_h.read_text()
+needle = 'timer_shutdown_sync(&cgroup->psi.poll_timer);'
+count = s.count(needle)
+
+# If the ACK tree eventually gains the real shutdown API, preserve it untouched.
+if re.search(r'\btimer_shutdown_sync\s*\(', h):
+    print('PSI_TIMER_COMPAT=NOT_NEEDED_REAL_API_PRESENT')
+    raise SystemExit(0)
+
+if count != 1:
+    raise SystemExit(f'PSI timer shutdown anchor count changed: {count}')
+
+if re.search(r'\bdel_timer_sync\s*\(', h):
+    replacement = 'del_timer_sync(&cgroup->psi.poll_timer);'
+elif re.search(r'\btimer_delete_sync\s*\(', h):
+    replacement = 'timer_delete_sync(&cgroup->psi.poll_timer);'
+else:
+    raise SystemExit('no synchronous timer deletion API available in ACK timer.h')
+
+psi.write_text(s.replace(needle, replacement, 1))
+print(f'PSI_TIMER_COMPAT=APPLIED:{replacement.split("(", 1)[0]}')
+PY
+
+! grep -Fq 'timer_shutdown_sync(&cgroup->psi.poll_timer);' "$PSI" || \
+  grep -Eq 'timer_shutdown_sync[[:space:]]*\(' "$TIMER_H" || \
+  fail "unresolved PSI timer_shutdown_sync API mismatch"
 
 printf '%s\n' 'PASS: repaired KSUN 3.3.0 / SuSFS 2.2.0 first-zygote static-key mismatch'
