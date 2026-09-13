@@ -7,7 +7,6 @@ on:
       - ticwatch-max-lts-220-incremental
     paths:
       - '.github/workflows/ticwatch-max-lts-220-incremental-uplift-v3.yml'
-      - '.github/scripts/ticwatch-uplift-v3-overlay.py'
 
 permissions:
   contents: read
@@ -26,7 +25,7 @@ jobs:
         with:
           ref: ticwatch-max-lts-220-incremental
 
-      - name: Materialize V2 ABI-aware scripts
+      - name: Materialize proven V2 ABI-aware scripts unchanged
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -60,9 +59,9 @@ jobs:
           PY
           bash -n /tmp/v2-build-scripts.sh
           bash /tmp/v2-build-scripts.sh
-          python3 .github/scripts/ticwatch-uplift-v3-overlay.py /tmp/uplift.sh
           bash -n /tmp/prepare.sh
           bash -n /tmp/uplift.sh
+          echo 'V3_USES_V2_UPLIFT_UNCHANGED=1'
 
       - name: Create checkpoint parent
         shell: bash
@@ -97,29 +96,45 @@ jobs:
             git -C kernel cat-file -e "${ASB}^{commit}"
             git -C kernel merge-base --is-ancestor "$BASE" HEAD
             git -C kernel merge-base --is-ancestor "$ASB" HEAD
-
-            resume_from="$(cat kernel/.git/ticwatch-last-complete 2>/dev/null || true)"
-            case "$resume_from" in
-              211|212|213|214|215|216|217|218|219|220) ;;
-              *)
-                echo "FAIL_RESUME_METADATA=${resume_from:-missing}" >&2
-                exit 60
-                ;;
-            esac
             test -z "$(git -C kernel status --porcelain)"
+
             echo "CHECKPOINT_RESTORED=$CACHE_MATCHED_KEY"
-            echo "RESUME_AFTER_POINT=5.15.$resume_from"
+            echo "CHECKPOINT_HEAD=$(git -C kernel rev-parse HEAD)"
           else
             rm -rf kernel
             bash /tmp/prepare.sh
-            printf '%s\n' 211 > kernel/.git/ticwatch-last-complete
+            test -d kernel/.git
+            git -C kernel merge-base --is-ancestor "$BASE" HEAD
+            git -C kernel merge-base --is-ancestor "$ASB" HEAD
+            test -z "$(git -C kernel status --porcelain)"
             echo 'CHECKPOINT_FRESH_BASE=5.15.211'
           fi
 
       - name: Apply missing stable commits with resumable Android ABI-aware resolutions
         id: uplift
         shell: bash
-        run: bash /tmp/uplift.sh
+        run: |
+          set -Eeuo pipefail
+          # The proven V2 script adds the stable remote itself. A restored checkpoint
+          # already contains that remote, so remove only that remote first; git cherry
+          # will detect all already-applied commits and skip them automatically.
+          if git -C kernel remote get-url stable >/dev/null 2>&1; then
+            git -C kernel remote remove stable
+          fi
+          bash /tmp/uplift.sh
+
+      - name: Verify uplift reached 5.15.220
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(make -s -C kernel kernelversion)"
+          [ "$version" = '5.15.220' ] || {
+            echo "FAIL_FINAL_KERNELVERSION=$version" >&2
+            exit 64
+          }
+          test -z "$(git -C kernel status --porcelain)"
+          echo "UPLIFT_FINAL_KERNELVERSION=$version"
+          echo "UPLIFT_FINAL_HEAD=$(git -C kernel rev-parse HEAD)"
 
       - name: Normalize clean checkpoint
         id: normalize
@@ -127,6 +142,8 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          BASE='3929c55fbc7559af6df290d2c0f66dc551af161a'
+          ASB='56cdb4d13a91efb666d571084ab82de351cc4900'
           test -d kernel/.git
           cd kernel
           if git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null 2>&1; then
@@ -134,18 +151,12 @@ jobs:
           fi
           git reset --hard HEAD
           git clean -fdx
+          git cat-file -e "${BASE}^{commit}"
+          git cat-file -e "${ASB}^{commit}"
+          git merge-base --is-ancestor "$BASE" HEAD
+          git merge-base --is-ancestor "$ASB" HEAD
           test -z "$(git status --porcelain)"
-
-          resume_from="$(cat .git/ticwatch-last-complete 2>/dev/null || true)"
-          case "$resume_from" in
-            211|212|213|214|215|216|217|218|219|220) ;;
-            *)
-              echo "FAIL_CHECKPOINT_METADATA=${resume_from:-missing}" >&2
-              exit 61
-              ;;
-          esac
           echo "CHECKPOINT_CLEAN_HEAD=$(git rev-parse HEAD)"
-          echo "CHECKPOINT_LAST_COMPLETE=5.15.$resume_from"
 
       - name: Save clean uplift checkpoint
         if: always() && steps.normalize.outcome == 'success'
