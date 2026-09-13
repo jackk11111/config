@@ -8,9 +8,9 @@ if len(sys.argv) != 2:
 p = Path(sys.argv[1])
 s = p.read_text()
 
-anchor = '''              echo "FIRST_CONFLICT_TAG=$tag"
-              echo "FIRST_CONFLICT_COMMIT=$c"
-              echo "FIRST_CONFLICT_SUBJECT=$subject"'''
+anchor = '''    echo "FIRST_CONFLICT_TAG=$tag"
+    echo "FIRST_CONFLICT_COMMIT=$c"
+    echo "FIRST_CONFLICT_SUBJECT=$subject"'''
 
 resolver = r'''              # v5.15.217 7f125ea143d0: introduce kern_path_parent() for audit.
               # Only kernel/audit_fsnotify.c conflicts on the Android/TicWatch tree.
