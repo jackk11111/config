@@ -41,7 +41,9 @@ anchor = '''    echo "FIRST_CONFLICT_TAG=$tag"
     echo "FIRST_CONFLICT_COMMIT=$c"
     echo "FIRST_CONFLICT_SUBJECT=$subject"'''
 
-resolver = r'''              # v5.15.217: VFS/audit kern_path_parent() Android conflict.
+resolver = r'''              # v5.15.217: resolve only the conflicted audit_alloc_mark() hunks.
+              # Keep every already-auto-merged Android/TicWatch line outside the
+              # conflicted function; select stable only inside the conflict hunks.
               if [ "$tag" = 'v5.15.217' ] && [ "$c" = '7f125ea143d05393c107792aa862bb6ae0f09a85' ]; then
                 f='kernel/audit_fsnotify.c'
                 [ "$subject" = 'VFS/audit: introduce kern_path_parent() for audit' ] || {
@@ -55,69 +57,51 @@ resolver = r'''              # v5.15.217: VFS/audit kern_path_parent() Android c
                   exit 52
                 }
 
-                theirs="$(mktemp)"
-                git show ":3:$f" > "$theirs" || { rm -f "$theirs"; exit 52; }
-                git checkout --ours -- "$f"
-
-                python3 - "$f" "$theirs" <<'PYAUDIT'
+                python3 - "$f" <<'PYAUDIT'
 from pathlib import Path
 import re
 import sys
 
 p = Path(sys.argv[1])
-theirs = Path(sys.argv[2]).read_text()
 s = p.read_text()
 
-old_lookup = "\tdentry = kern_path_locked(pathname, &path);\n"
-parent_lookup = "\tdentry = kern_path_parent(pathname, &path);\n"
-inode_decl = "\tstruct inode *inode;\n"
-unlock = "\tinode = path.dentry->d_inode;\n\tinode_unlock(inode);\n"
+start = s.find('struct audit_fsnotify_mark *audit_alloc_mark(')
+end = s.find('\nstatic void audit_mark_log_rule_change', start)
+if start < 0 or end < 0:
+    raise SystemExit('FAIL_AUDIT_PARENT_FUNCTION_BOUNDS')
 
-if s.count(old_lookup) != 1 or s.count(inode_decl) != 1 or s.count(unlock) != 1:
-    raise SystemExit('FAIL_AUDIT_PARENT_OURS_LAYOUT')
-if parent_lookup in s:
-    raise SystemExit('FAIL_AUDIT_PARENT_ALREADY_APPLIED')
-if theirs.count(parent_lookup) != 1:
-    raise SystemExit('FAIL_AUDIT_PARENT_THEIRS_LOOKUP')
+outside = s[:start] + s[end:]
+if any(m in outside for m in ('<<<<<<<', '=======', '>>>>>>>')):
+    raise SystemExit('FAIL_AUDIT_PARENT_CONFLICT_OUTSIDE_FUNCTION')
 
-helpers = [h for h in ('d_really_is_negative', 'd_is_negative')
-           if f"\tif ({h}(dentry)) {{\n" in theirs]
-if len(helpers) != 1:
-    raise SystemExit(f'FAIL_AUDIT_PARENT_NEGATIVE_HELPER={helpers}')
-helper = helpers[0]
-negative = (
-    f"\tif ({helper}(dentry)) {{\n"
-    "\t\taudit_mark = ERR_PTR(-ENOENT);\n"
-    "\t\tgoto out;\n"
-    "\t}\n"
-)
+body = s[start:end]
+left = body.count('<<<<<<<')
+mid = body.count('=======')
+right = body.count('>>>>>>>')
+if left < 1 or left != mid or left != right:
+    raise SystemExit(f'FAIL_AUDIT_PARENT_MARKER_COUNTS={left},{mid},{right}')
 
-m = re.findall(r'^\tret = fsnotify_add_inode_mark\(&audit_mark->mark, inode, (true|0)\);$', s, re.M)
-if len(m) != 1:
-    raise SystemExit(f'FAIL_AUDIT_PARENT_ADD_MARK={m}')
-allow_dups = m[0]
+pat = re.compile(r'^<<<<<<<[^\n]*\n(.*?)^=======\n(.*?)^>>>>>>>[^\n]*\n?', re.M | re.S)
+resolved, n = pat.subn(lambda m: m.group(2), body)
+if n != left:
+    raise SystemExit(f'FAIL_AUDIT_PARENT_RESOLVED_HUNKS={n}/{left}')
+if any(m in resolved for m in ('<<<<<<<', '=======', '>>>>>>>')):
+    raise SystemExit('FAIL_AUDIT_PARENT_MARKERS_REMAIN')
 
-s = s.replace(inode_decl, '', 1)
-s = s.replace(old_lookup, parent_lookup, 1)
-s = s.replace(unlock, negative, 1)
-old_add = f"\tret = fsnotify_add_inode_mark(&audit_mark->mark, inode, {allow_dups});"
-new_add = f"\tret = fsnotify_add_inode_mark(&audit_mark->mark, path.dentry->d_inode, {allow_dups});"
-if s.count(old_add) != 1:
-    raise SystemExit('FAIL_AUDIT_PARENT_ADD_REPLACE')
-s = s.replace(old_add, new_add, 1)
+# Stable semantic gate for this exact commit.
+if 'kern_path_parent(pathname, &path)' not in resolved:
+    raise SystemExit('FAIL_AUDIT_PARENT_NO_KERN_PATH_PARENT')
+if 'kern_path_locked(pathname, &path)' in resolved:
+    raise SystemExit('FAIL_AUDIT_PARENT_OLD_LOOKUP_REMAINS')
+if 'inode_unlock(' in resolved:
+    raise SystemExit('FAIL_AUDIT_PARENT_UNLOCK_REMAINS')
+if 'fsnotify_add_inode_mark(' not in resolved:
+    raise SystemExit('FAIL_AUDIT_PARENT_NO_FSNOTIFY_MARK')
 
-if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
-    raise SystemExit('FAIL_AUDIT_PARENT_MARKERS')
-if s.count(parent_lookup) != 1 or old_lookup in s or 'inode_unlock(inode);' in s:
-    raise SystemExit('FAIL_AUDIT_PARENT_POST')
-if s.count(new_add) != 1:
-    raise SystemExit('FAIL_AUDIT_PARENT_POST_ADD_MARK')
-
-p.write_text(s)
-print(f'AUDIT_PARENT_PRESERVED_ALLOW_DUPS={allow_dups}')
-print(f'AUDIT_PARENT_NEGATIVE_HELPER={helper}')
+p.write_text(s[:start] + resolved + s[end:])
+print(f'AUDIT_PARENT_STABLE_CONFLICT_HUNKS={n}')
 PYAUDIT
-                rm -f "$theirs"
+
                 git add -- "$f"
                 [ -z "$(git diff --name-only --diff-filter=U)" ] || {
                   echo 'FAIL_AUDIT_PARENT_UNMERGED_REMAIN' >&2
@@ -126,9 +110,9 @@ PYAUDIT
                 }
                 git diff --cached --check || exit 52
                 git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 52
-                grep -Fq 'kern_path_parent(pathname, &path);' "$f" || exit 52
-                ! grep -Fq 'kern_path_locked(pathname, &path);' "$f" || exit 52
-                ! grep -Fq 'inode_unlock(inode);' "$f" || exit 52
+                grep -Fq 'kern_path_parent(pathname, &path)' "$f" || exit 52
+                ! grep -Fq 'kern_path_locked(pathname, &path)' "$f" || exit 52
+                ! grep -Fq 'inode_unlock(' "$f" || exit 52
                 echo "ANDROID_TICWATCH_AUDIT_PARENT_RESOLVED=$c FILE=$f"
                 continue
               fi
@@ -140,4 +124,4 @@ if s.count(anchor) != 1:
 s = s.replace(anchor, resolver + anchor, 1)
 
 p.write_text(s)
-print("V3_SIMPLE_RESUME_RESOLVER_APPLIED=1")
+print("V3_DIRECT_STABLE_HUNK_RESOLVER_APPLIED=1")
