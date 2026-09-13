@@ -1,0 +1,82 @@
+name: TicWatch KMI ABI Header Diff
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-max-lts-220
+    paths:
+      - '.github/workflows/ticwatch-kmi-abi-diff.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  CHECKPOINT_RUN_ID: '34757911119'
+  CHECKPOINT_NAME: 'TicWatch-5.15.220-precompile-checkpoint'
+  BASE_KERNEL_SHA: '3929c55fbc7559af6df290d2c0f66dc551af161a'
+
+jobs:
+  diff:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-220
+          fetch-depth: 1
+      - run: sudo apt-get update -y >/dev/null && sudo apt-get install -y --no-install-recommends zstd >/dev/null
+      - name: Restore checkpoint and reconstruct exact clean 5.15.211
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p checkpoint
+          gh run download "$CHECKPOINT_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_NAME" --dir checkpoint
+          cp checkpoint/precompile-checkpoint.tar.zst .
+          cp checkpoint/precompile-checkpoint.sha256 .
+          sha256sum -c precompile-checkpoint.sha256
+          tar --zstd -xf precompile-checkpoint.tar.zst
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          P="$GITHUB_WORKSPACE/previous/audit/kernel-source-lts211-clean.patch"
+          test -d "$K/.git"; test -s "$P"
+          rm -rf /tmp/k211
+          git -C "$K" worktree add --detach /tmp/k211 "$BASE_KERNEL_SHA"
+          git -C /tmp/k211 apply --check "$P"
+          git -C /tmp/k211 apply "$P"
+          test "$(make -s -C /tmp/k211 kernelversion)" = 5.15.211
+          test "$(make -s -C "$K" kernelversion)" = 5.15.220
+      - name: Produce full ABI-sensitive source diff
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          diff -ruN --exclude=susfs.h --exclude=susfs_def.h /tmp/k211/include "$K/include" > all-include-211-to-220.patch || true
+          diff -ruN /tmp/k211/arch/arm64/include "$K/arch/arm64/include" > arm64-include-211-to-220.patch || true
+          diff -u /tmp/k211/android/abi_gki_aarch64.xml "$K/android/abi_gki_aarch64.xml" > abi-xml-211-to-220.patch || true
+          diff -ruN /tmp/k211/scripts/genksyms "$K/scripts/genksyms" > genksyms-211-to-220.patch || true
+          diff -ruN /tmp/k211/scripts/mod "$K/scripts/mod" > modpost-211-to-220.patch || true
+          {
+            echo "ALL_INCLUDE_DIFF_BYTES=$(wc -c < all-include-211-to-220.patch)"
+            echo "ARM64_INCLUDE_DIFF_BYTES=$(wc -c < arm64-include-211-to-220.patch)"
+            echo "ABI_XML_DIFF_BYTES=$(wc -c < abi-xml-211-to-220.patch)"
+            echo "GENKSYMS_DIFF_BYTES=$(wc -c < genksyms-211-to-220.patch)"
+            echo "MODPOST_DIFF_BYTES=$(wc -c < modpost-211-to-220.patch)"
+            echo
+            echo 'ANDROID_KABI lines in changed include context:'
+            grep -nE '^[+-].*ANDROID_KABI_(RESERVE|USE|USE2|REPLACE)' all-include-211-to-220.patch || true
+          } | tee abi-diff-summary.txt
+      - name: Upload full source ABI diff
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-KMI-ABI-DIFF-211-220
+          path: |
+            all-include-211-to-220.patch
+            arm64-include-211-to-220.patch
+            abi-xml-211-to-220.patch
+            genksyms-211-to-220.patch
+            modpost-211-to-220.patch
+            abi-diff-summary.txt
+          if-no-files-found: error
+          retention-days: 30
