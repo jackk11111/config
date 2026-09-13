@@ -1,0 +1,118 @@
+name: TicWatch 5.15.220 KMI History Diagnose
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-max-lts-220
+    paths:
+      - '.github/workflows/ticwatch-kmi-history-diagnose.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  CHECKPOINT_RUN_ID: '34757911119'
+  CHECKPOINT_NAME: 'TicWatch-5.15.220-precompile-checkpoint'
+  KNOWN_GOOD_211_HEAD: 'ed49d65edb175de4a39fa73f3a91b8465377cfe2'
+  FINAL_220_HEAD: '8f4898eca83cedcd0c3a8f304452f4c143778547'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout orchestration branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-220
+          fetch-depth: 1
+
+      - name: Install zstd
+        run: sudo apt-get update -y >/dev/null && sudo apt-get install -y --no-install-recommends zstd >/dev/null
+
+      - name: Restore verified precompile checkpoint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p checkpoint
+          gh run download "$CHECKPOINT_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_NAME" --dir checkpoint
+          test -s checkpoint/precompile-checkpoint.tar.zst
+          test -s checkpoint/precompile-checkpoint.sha256
+          cp checkpoint/precompile-checkpoint.tar.zst .
+          cp checkpoint/precompile-checkpoint.sha256 .
+          sha256sum -c precompile-checkpoint.sha256
+          tar --zstd -xf precompile-checkpoint.tar.zst
+          test -d .ticwatch-preflight/common/.git
+
+      - name: Inspect uplift history and ABI-sensitive deltas
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K=.ticwatch-preflight/common
+          R=kmi-history-report.txt
+          : > "$R"
+          {
+            echo "CURRENT_HEAD=$(git -C "$K" rev-parse HEAD)"
+            echo "EXPECTED_FINAL=$FINAL_220_HEAD"
+            echo "KNOWN_GOOD_211=$KNOWN_GOOD_211_HEAD"
+            echo "KERNELVERSION=$(make -s -C "$K" kernelversion)"
+            echo
+            echo '=== WORKTREE STATUS ==='
+            git -C "$K" status --short
+            echo
+            for c in "$KNOWN_GOOD_211_HEAD" "$FINAL_220_HEAD"; do
+              if git -C "$K" cat-file -e "${c}^{commit}" 2>/dev/null; then echo "COMMIT_PRESENT $c YES"; else echo "COMMIT_PRESENT $c NO"; fi
+            done
+            echo
+            if git -C "$K" cat-file -e "${KNOWN_GOOD_211_HEAD}^{commit}" 2>/dev/null; then
+              if git -C "$K" merge-base --is-ancestor "$KNOWN_GOOD_211_HEAD" "$FINAL_220_HEAD"; then echo '211_IS_ANCESTOR_OF_220=YES'; else echo '211_IS_ANCESTOR_OF_220=NO'; fi
+              echo
+              echo '=== POINT RELEASE MARKERS ==='
+              git -C "$K" log --reverse --format='%H|%s' "$KNOWN_GOOD_211_HEAD..$FINAL_220_HEAD" | grep -E 'Linux 5\.15\.(21[2-9]|220)$' || true
+              echo
+              echo '=== ALL COMMITS 211..220 ==='
+              git -C "$K" log --reverse --format='%H|%s' "$KNOWN_GOOD_211_HEAD..$FINAL_220_HEAD"
+              echo
+              echo '=== DIFF STAT 211..220 ==='
+              git -C "$K" diff --stat "$KNOWN_GOOD_211_HEAD" "$FINAL_220_HEAD"
+              echo
+              echo '=== CHANGED HEADER/API FILES ==='
+              git -C "$K" diff --name-status "$KNOWN_GOOD_211_HEAD" "$FINAL_220_HEAD" -- 'include/**' 'arch/arm64/include/**' 'drivers/gpu/drm/**/*.h' 'drivers/net/**/*.h' 'net/**/*.h' 'kernel/**/*.h' 'mm/**/*.h' 'fs/**/*.h'
+              echo
+              echo '=== COMMITS TOUCHING HEADER/API FILES ==='
+              while read -r c; do
+                files="$(git -C "$K" diff-tree --no-commit-id --name-only -r "$c" -- 'include/**' 'arch/arm64/include/**' 'drivers/gpu/drm/**/*.h' 'drivers/net/**/*.h' 'net/**/*.h' 'kernel/**/*.h' 'mm/**/*.h' 'fs/**/*.h' || true)"
+                if [ -n "$files" ]; then
+                  echo "--- $c $(git -C "$K" show -s --format='%s' "$c")"
+                  printf '%s\n' "$files"
+                fi
+              done < <(git -C "$K" rev-list --reverse "$KNOWN_GOOD_211_HEAD..$FINAL_220_HEAD")
+            fi
+          } | tee "$R"
+
+          if git -C "$K" cat-file -e "${KNOWN_GOOD_211_HEAD}^{commit}" 2>/dev/null; then
+            git -C "$K" diff "$KNOWN_GOOD_211_HEAD" "$FINAL_220_HEAD" -- \
+              'include/**' 'arch/arm64/include/**' 'drivers/gpu/drm/**/*.h' 'drivers/net/**/*.h' 'net/**/*.h' 'kernel/**/*.h' 'mm/**/*.h' 'fs/**/*.h' \
+              > kmi-header-diff.patch
+            git -C "$K" diff > final-worktree-local.patch
+            git -C "$K" diff --stat > final-worktree-local.stat
+          else
+            : > kmi-header-diff.patch
+            git -C "$K" diff > final-worktree-local.patch
+            git -C "$K" diff --stat > final-worktree-local.stat
+          fi
+
+      - name: Upload diagnostic
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-5.15.220-KMI-HISTORY-DIAG
+          path: |
+            kmi-history-report.txt
+            kmi-header-diff.patch
+            final-worktree-local.patch
+            final-worktree-local.stat
+          if-no-files-found: error
+          retention-days: 30
