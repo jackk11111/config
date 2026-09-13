@@ -12,7 +12,105 @@ anchor = '''    echo "FIRST_CONFLICT_TAG=$tag"
     echo "FIRST_CONFLICT_COMMIT=$c"
     echo "FIRST_CONFLICT_SUBJECT=$subject"'''
 
-resolver = r'''              # v5.15.217 7f125ea143d0: introduce kern_path_parent() for audit.
+resolver = r'''              # v5.15.212 0198d5799483: initialize all remaining fwnode fields.
+              # Android keeps a frozen KABI layout (u8 flags + ANDROID_KABI_RESERVE),
+              # while stable changed nearby flag representation. Preserve Android's
+              # struct/API layout and apply only this commit's two semantic assignments.
+              if [ "$tag" = 'v5.15.212' ] && [ "$c" = '0198d579948322cda5178b9672d448375a32f947' ]; then
+                f='include/linux/fwnode.h'
+                expected_subject='device property: initialize the remaining fields of fwnode_handle in fwnode_init()'
+                [ "$subject" = "$expected_subject" ] || {
+                  echo "FAIL_FWNODE_INIT_SUBJECT=$subject" >&2
+                  exit 53
+                }
+                actual_conflicts="$(git diff --name-only --diff-filter=U)"
+                [ "$actual_conflicts" = "$f" ] || {
+                  echo 'FAIL_FWNODE_INIT_CONFLICT_FILES' >&2
+                  printf 'EXPECTED:%s\nACTUAL_BEGIN\n%s\nACTUAL_END\n' "$f" "$actual_conflicts" >&2
+                  exit 53
+                }
+                commit_files="$(git diff-tree --no-commit-id --name-only -r "$c" | sort)"
+                [ "$commit_files" = "$f" ] || {
+                  echo 'FAIL_FWNODE_INIT_COMMIT_FILES' >&2
+                  printf 'EXPECTED:%s\nACTUAL_BEGIN\n%s\nACTUAL_END\n' "$f" "$commit_files" >&2
+                  exit 53
+                }
+
+                git checkout --ours -- "$f"
+                python3 - "$f" <<'PYFWNODEINIT'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+
+# Fail closed unless this is still the Android/TicWatch KABI-preserving layout.
+if s.count('#include <linux/android_kabi.h>') != 1:
+    raise SystemExit('FAIL_FWNODE_INIT_ANDROID_KABI_INCLUDE')
+if s.count('\tu8 flags;\n') != 1:
+    raise SystemExit('FAIL_FWNODE_INIT_ANDROID_FLAGS_LAYOUT')
+if s.count('\tANDROID_KABI_RESERVE(1);\n') < 1:
+    raise SystemExit('FAIL_FWNODE_INIT_ANDROID_KABI_RESERVE')
+
+old = (
+    'static inline void fwnode_init(struct fwnode_handle *fwnode,\n'
+    '\t\t\t       const struct fwnode_operations *ops)\n'
+    '{\n'
+    '\tfwnode->secondary = NULL;\n'
+    '\tfwnode->ops = ops;\n'
+    '\tINIT_LIST_HEAD(&fwnode->consumers);\n'
+    '\tINIT_LIST_HEAD(&fwnode->suppliers);\n'
+    '}\n'
+)
+new = (
+    'static inline void fwnode_init(struct fwnode_handle *fwnode,\n'
+    '\t\t\t       const struct fwnode_operations *ops)\n'
+    '{\n'
+    '\tfwnode->secondary = NULL;\n'
+    '\tfwnode->ops = ops;\n'
+    '\tfwnode->dev = NULL;\n'
+    '\tINIT_LIST_HEAD(&fwnode->consumers);\n'
+    '\tINIT_LIST_HEAD(&fwnode->suppliers);\n'
+    '\tfwnode->flags = 0;\n'
+    '}\n'
+)
+if s.count(old) != 1:
+    start = s.find('static inline void fwnode_init(')
+    end = s.find('\n}\n', start)
+    block = s[start:end + 3] if start >= 0 and end >= 0 else '<fwnode_init not found>'
+    raise SystemExit('FAIL_FWNODE_INIT_OURS_LAYOUT:\n' + block)
+if 'fwnode->dev = NULL;' in s or 'fwnode->flags = 0;' in s:
+    raise SystemExit('FAIL_FWNODE_INIT_ALREADY_APPLIED')
+s = s.replace(old, new, 1)
+if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
+    raise SystemExit('FAIL_FWNODE_INIT_MARKERS')
+if s.count('\tfwnode->secondary = NULL;\n') < 1:
+    raise SystemExit('FAIL_FWNODE_INIT_SECONDARY_POST')
+if s.count('\tfwnode->dev = NULL;\n') != 1:
+    raise SystemExit('FAIL_FWNODE_INIT_DEV_POST')
+if s.count('\tfwnode->flags = 0;\n') != 1:
+    raise SystemExit('FAIL_FWNODE_INIT_FLAGS_POST')
+p.write_text(s)
+PYFWNODEINIT
+                git add -- "$f"
+                staged="$(git diff --cached --name-only)"
+                [ "$staged" = "$f" ] || {
+                  echo 'FAIL_FWNODE_INIT_STAGED_FILES' >&2
+                  printf 'EXPECTED:%s\nACTUAL_BEGIN\n%s\nACTUAL_END\n' "$f" "$staged" >&2
+                  exit 53
+                }
+                git diff --cached --check || exit 53
+                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 53
+                grep -Fq 'fwnode->secondary = NULL;' "$f" || exit 53
+                grep -Fq 'fwnode->dev = NULL;' "$f" || exit 53
+                grep -Fq 'fwnode->flags = 0;' "$f" || exit 53
+                grep -Fq '#include <linux/android_kabi.h>' "$f" || exit 53
+                grep -Fq $'\tu8 flags;' "$f" || exit 53
+                echo "ANDROID_TICWATCH_FWNODE_INIT_RESOLVED=$c FILE=$f"
+                continue
+              fi
+
+              # v5.15.217 7f125ea143d0: introduce kern_path_parent() for audit.
               # Only kernel/audit_fsnotify.c conflicts on the Android/TicWatch tree.
               # Preserve Android's existing fsnotify allow_dups argument and apply
               # only this commit's path-lookup/locking semantic delta.
