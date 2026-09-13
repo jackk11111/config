@@ -24,3 +24,5 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --ref ticwatch-max-lts-220
           echo 'FINAL_KERNEL_WORKFLOW_DISPATCHED=YES'
+
+# Trigger revision: full-KMI-preserved GENI UART build (function-local extern)
