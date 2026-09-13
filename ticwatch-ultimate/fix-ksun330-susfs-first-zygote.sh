@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-ROOT="${GITHUB_WORKSPACE:-$PWD}/.ticwatch-preflight/common/KernelSU-Next/kernel"
+WORKSPACE="${GITHUB_WORKSPACE:-$PWD}"
+ROOT="$WORKSPACE/.ticwatch-preflight/common/KernelSU-Next/kernel"
 RUNTIME="$ROOT/runtime/ksud_integration.c"
 SUCOMPAT="$ROOT/feature/sucompat.c"
 
@@ -61,5 +62,13 @@ grep -Fq 'static_branch_disable(&is_first_zygote);' "$RUNTIME" || \
   fail "is_first_zygote disable transition was not inserted"
 grep -Fq 'ksu_handle_sys_reboot' "$RUNTIME" || \
   fail "MAX-SAFE SuSFS reboot-hook audit marker missing"
+
+# Final Build V2 materializes an older pinned SafeKey helper into /tmp before
+# KSU/SuSFS integration. Replace only that runner-local helper with the audited
+# final-branch variant, which preserves SuSFS' inner input-stop logic.
+SAFEKEY_FIX="$WORKSPACE/ticwatch-ultimate/fix-ksu-safekey-ticwatch.sh"
+[ -f "$SAFEKEY_FIX" ] || fail "final SafeKey fixer missing: $SAFEKEY_FIX"
+cp "$SAFEKEY_FIX" /tmp/fix-ksu-safekey-ticwatch.sh
+chmod +x /tmp/fix-ksu-safekey-ticwatch.sh
 
 printf '%s\n' 'PASS: repaired KSUN 3.3.0 / SuSFS 2.2.0 first-zygote static-key mismatch'
