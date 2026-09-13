@@ -1,0 +1,161 @@
+name: TicWatch Recovery V1 - Stage0 ARMv8l KEXEC Fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-recovery-v1-stage0-build]
+    paths:
+      - '.github/workflows/ticwatch-recovery-v1-stage0-armv8l-fix.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  BASE_STAGE0_RUN_ID: '34769336971'
+  BASE_STAGE0_ARTIFACT: 'TicWatch-RECOVERY-V1-STAGE0-KEXEC'
+  KEXEC_TOOLS_TAG: 'v2.0.32'
+
+jobs:
+  rebuild-kexec:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout recovery branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-recovery-v1-stage0-build
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool make gcc git file unzip zip \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross >/dev/null
+
+      - name: Download known-good Stage0 bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p base
+          gh run download "$BASE_STAGE0_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "$BASE_STAGE0_ARTIFACT" --dir base
+          test -s base/TicWatch-RECOVERY-V1-STAGE0-KEXEC.zip
+          unzip -q base/TicWatch-RECOVERY-V1-STAGE0-KEXEC.zip -d work
+          test -d work/TicWatch-RECOVERY-V1-STAGE0-KEXEC
+
+      - name: Build patched static ARM64 kexec-tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone --depth 1 --branch "$KEXEC_TOOLS_TAG" https://github.com/horms/kexec-tools.git kexec-tools
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('kexec-tools/kexec/arch/arm64/kexec-arm64.c')
+          s=p.read_text()
+          old='const struct arch_map_entry arches[] = {\n\t{ "aarch64", KEXEC_ARCH_ARM64 },\n\t{ "aarch64_be", KEXEC_ARCH_ARM64 },\n\t{ NULL, 0 },\n};'
+          new='const struct arch_map_entry arches[] = {\n\t{ "aarch64", KEXEC_ARCH_ARM64 },\n\t{ "aarch64_be", KEXEC_ARCH_ARM64 },\n\t/* TicWatch/Android userspace may expose uname machine as armv8l even while\n\t * executing a 64-bit AArch64 binary on the ARM64 kernel. Treat only this\n\t * observed alias as ARM64; the loader binary itself remains ELF64 AArch64. */\n\t{ "armv8l", KEXEC_ARCH_ARM64 },\n\t{ NULL, 0 },\n};'
+          if s.count(old) != 1:
+              raise SystemExit('arm64 arches[] anchor mismatch')
+          p.write_text(s.replace(old,new,1))
+          PY
+          grep -Fq '{ "armv8l", KEXEC_ARCH_ARM64 }' kexec-tools/kexec/arch/arm64/kexec-arm64.c
+          cd kexec-tools
+          ./bootstrap
+          env \
+            CC=aarch64-linux-gnu-gcc \
+            LD=aarch64-linux-gnu-ld \
+            AS=aarch64-linux-gnu-as \
+            AR=aarch64-linux-gnu-ar \
+            STRIP=aarch64-linux-gnu-strip \
+            OBJCOPY=aarch64-linux-gnu-objcopy \
+            BUILD_CC=gcc \
+            TARGET_CC=aarch64-linux-gnu-gcc \
+            TARGET_LD=aarch64-linux-gnu-ld \
+            LDFLAGS='-static' \
+            ./configure \
+              --build=x86_64-linux-gnu \
+              --host=aarch64-linux-gnu \
+              --target=aarch64-linux-gnu \
+              --without-zlib --without-lzma --without-zstd --without-xen
+          make -j"$(nproc)"
+          KEXEC_BIN="$(find build -type f -name kexec -perm -111 | head -n1)"
+          test -n "$KEXEC_BIN"
+          cp "$KEXEC_BIN" "$GITHUB_WORKSPACE/kexec-arm64-fixed"
+          cd "$GITHUB_WORKSPACE"
+          file kexec-arm64-fixed | tee kexec-fixed-file.txt
+          file kexec-arm64-fixed | grep -Fq 'ARM aarch64'
+          file kexec-arm64-fixed | grep -Fq 'statically linked'
+          strings kexec-arm64-fixed | grep -Fqx 'armv8l'
+          if readelf -l kexec-arm64-fixed | grep -qi 'interpreter'; then
+            echo 'FAIL: patched kexec unexpectedly dynamic' >&2
+            exit 11
+          fi
+
+      - name: Replace loader and re-seal bundle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          B="$GITHUB_WORKSPACE/work/TicWatch-RECOVERY-V1-STAGE0-KEXEC"
+          cp kexec-arm64-fixed "$B/kexec-arm64"
+          chmod 0755 "$B/kexec-arm64"
+          NEW_SHA="$(sha256sum "$B/kexec-arm64" | awk '{print $1}')"
+          python3 - "$B/01-preflight-and-load.sh" "$NEW_SHA" <<'PY'
+          from pathlib import Path
+          import re,sys
+          p=Path(sys.argv[1]); sha=sys.argv[2]; s=p.read_text()
+          s,n=re.subn(r"^EXPECT_KEXEC='[0-9a-f]{64}'$", f"EXPECT_KEXEC='{sha}'", s, count=1, flags=re.M)
+          if n != 1:
+              raise SystemExit('EXPECT_KEXEC anchor mismatch')
+          p.write_text(s)
+          PY
+          grep -Fq "EXPECT_KEXEC='$NEW_SHA'" "$B/01-preflight-and-load.sh"
+          cat >> "$B/README-STAGE0.txt" <<'EOF'
+
+          ARMV8L COMPATIBILITY FIX
+          The ARM64 kexec-tools loader is patched to recognize the observed TicWatch uname machine alias "armv8l" as KEXEC_ARCH_ARM64. The binary remains a static ELF64 AArch64 executable. No kernel, DTB, initramfs, or partition payload was changed by this rebuild.
+          EOF
+          (
+            cd "$B"
+            sha256sum Image busybox kexec-arm64 rescue-stage0.cpio.gz \
+              01-preflight-and-load.sh 02-execute-stage0.sh 03-unload-stage0.sh README-STAGE0.txt \
+              > SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+          )
+          rm -f TicWatch-RECOVERY-V1-STAGE0-KEXEC-ARMV8L-FIX.zip
+          (cd work && zip -qr9 "$GITHUB_WORKSPACE/TicWatch-RECOVERY-V1-STAGE0-KEXEC-ARMV8L-FIX.zip" TicWatch-RECOVERY-V1-STAGE0-KEXEC)
+          test -s TicWatch-RECOVERY-V1-STAGE0-KEXEC-ARMV8L-FIX.zip
+          sha256sum TicWatch-RECOVERY-V1-STAGE0-KEXEC-ARMV8L-FIX.zip | tee ARMV8L-FIX-ZIP.sha256
+
+      - name: Audit unchanged safety-critical payloads
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          OLD="$GITHUB_WORKSPACE/base-unpacked"
+          NEW="$GITHUB_WORKSPACE/work/TicWatch-RECOVERY-V1-STAGE0-KEXEC"
+          mkdir -p "$OLD"
+          unzip -q base/TicWatch-RECOVERY-V1-STAGE0-KEXEC.zip -d "$OLD"
+          OLD="$OLD/TicWatch-RECOVERY-V1-STAGE0-KEXEC"
+          cmp -s "$OLD/Image" "$NEW/Image"
+          cmp -s "$OLD/rescue-stage0.cpio.gz" "$NEW/rescue-stage0.cpio.gz"
+          cmp -s "$OLD/busybox" "$NEW/busybox"
+          cmp -s "$OLD/02-execute-stage0.sh" "$NEW/02-execute-stage0.sh"
+          cmp -s "$OLD/03-unload-stage0.sh" "$NEW/03-unload-stage0.sh"
+          test "$(sha256sum "$OLD/Image" | awk '{print $1}')" = 'a0e13c73b692c5a1f4a36e08772984432bd61e4919808e228b9647c2c933377d'
+          echo 'SAFETY_AUDIT=PASS'
+          echo 'ONLY_KEXEC_LOADER_PLUS_HASH_METADATA_CHANGED=YES'
+
+      - name: Upload corrected Stage0 artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-RECOVERY-V1-STAGE0-KEXEC-ARMV8L-FIX
+          path: |
+            TicWatch-RECOVERY-V1-STAGE0-KEXEC-ARMV8L-FIX.zip
+            ARMV8L-FIX-ZIP.sha256
+            kexec-fixed-file.txt
+          if-no-files-found: error
+          retention-days: 90
