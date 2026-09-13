@@ -241,6 +241,98 @@ jobs:
                 continue
               fi
 
+              # 723bf81751ae keeps AC64 capability visible while letting VIA VL805
+              # use a 36-bit DMA mask. Android 5.15 still has the fixed 64-bit setup
+              # in xhci.c, while xhci-pci.c and xhci.h apply cleanly. Preserve the
+              # Android xhci.c body and inject only this commit's two semantic hunks.
+              if [ "$tag" = 'v5.15.216' ] && [ "$c" = '723bf81751aec13b0c0750f02a15a1406e87985d' ]; then
+                f='drivers/usb/host/xhci.c'
+                pfile='drivers/usb/host/xhci-pci.c'
+                hfile='drivers/usb/host/xhci.h'
+                actual_conflicts="$(git diff --name-only --diff-filter=U)"
+                [ "$actual_conflicts" = "$f" ] || {
+                  echo 'FAIL_XHCI_DMA_CONFLICT_FILES' >&2
+                  printf 'EXPECTED:%s\nACTUAL_BEGIN\n%s\nACTUAL_END\n' "$f" "$actual_conflicts" >&2
+                  exit 51
+                }
+                expected_commit_files="$(printf '%s\n' "$pfile" "$f" "$hfile" | sort)"
+                commit_files="$(git diff-tree --no-commit-id --name-only -r "$c" | sort)"
+                [ "$commit_files" = "$expected_commit_files" ] || {
+                  echo 'FAIL_XHCI_DMA_COMMIT_FILES' >&2
+                  printf 'EXPECTED_BEGIN\n%s\nEXPECTED_END\nACTUAL_BEGIN\n%s\nACTUAL_END\n' "$expected_commit_files" "$commit_files" >&2
+                  exit 51
+                }
+                [ "$(grep -Fc 'xhci->dma_mask_bits = 36;' "$pfile")" -eq 1 ] || { echo 'FAIL_XHCI_DMA_PCI_AUTOMERGE' >&2; exit 51; }
+                [ "$(grep -Fc 'dma_mask_bits;' "$hfile")" -eq 1 ] || { echo 'FAIL_XHCI_DMA_HEADER_AUTOMERGE' >&2; exit 51; }
+                git checkout --ours -- "$f"
+                python3 - "$f" <<'PYXHCIDMA'
+          from pathlib import Path
+          import sys
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          if 'dma_mask_bits' in s:
+              raise SystemExit('FAIL_XHCI_DMA_OURS_ALREADY_HAS_FIELD_USE')
+
+          init_anchor = (
+              '\tif (xhci->hci_version > 0x100)\n'
+              '\t\txhci->hcc_params2 = readl(&xhci->cap_regs->hcc_params2);\n'
+          )
+          if s.count(init_anchor) != 1:
+              raise SystemExit(f'FAIL_XHCI_DMA_INIT_ANCHOR=count={s.count(init_anchor)}')
+          s = s.replace(init_anchor, init_anchor + '\n\txhci->dma_mask_bits = 64;\n', 1)
+
+          old = (
+              '\t/* Set dma_mask and coherent_dma_mask to 64-bits,\n'
+              '\t * if xHC supports 64-bit addressing */\n'
+              '\tif (HCC_64BIT_ADDR(xhci->hcc_params) &&\n'
+              '\t\t\t!dma_set_mask(dev, DMA_BIT_MASK(64))) {\n'
+              '\t\txhci_dbg(xhci, "Enabling 64-bit DMA addresses.\\n");\n'
+              '\t\tdma_set_coherent_mask(dev, DMA_BIT_MASK(64));\n'
+          )
+          new = (
+              '\t/*\n'
+              '\t * Set dma_mask and coherent_dma_mask to 64-bits if xHC supports\n'
+              '\t * 64-bit addressing, unless a controller-specific quirk callback\n'
+              '\t * limits the usable address width.\n'
+              '\t */\n'
+              '\tif (HCC_64BIT_ADDR(xhci->hcc_params) &&\n'
+              '\t    !dma_set_mask(dev, DMA_BIT_MASK(xhci->dma_mask_bits))) {\n'
+              '\t\txhci_dbg(xhci, "Enabling %u-bit DMA addresses.\\n",\n'
+              '\t\t\t xhci->dma_mask_bits);\n'
+              '\t\tdma_set_coherent_mask(dev, DMA_BIT_MASK(xhci->dma_mask_bits));\n'
+          )
+          if s.count(old) != 1:
+              raise SystemExit(f'FAIL_XHCI_DMA_MASK_BLOCK=count={s.count(old)}')
+          s = s.replace(old, new, 1)
+
+          init_pos = s.index('\txhci->dma_mask_bits = 64;')
+          quirks_pos = s.find('\n\tget_quirks(dev, xhci);', init_pos)
+          if quirks_pos < 0:
+              raise SystemExit('FAIL_XHCI_DMA_INIT_ORDER')
+          if s.count('DMA_BIT_MASK(xhci->dma_mask_bits)') != 2:
+              raise SystemExit('FAIL_XHCI_DMA_DYNAMIC_MASK_COUNT')
+          if any(x in s for x in ('<<<<<<<', '=======', '>>>>>>>')):
+              raise SystemExit('FAIL_XHCI_DMA_MARKERS')
+          p.write_text(s)
+          PYXHCIDMA
+                git add -- "$f"
+                staged="$(git diff --cached --name-only | sort)"
+                [ "$staged" = "$expected_commit_files" ] || {
+                  echo 'FAIL_XHCI_DMA_STAGED_FILES' >&2
+                  printf 'EXPECTED_BEGIN\n%s\nEXPECTED_END\nACTUAL_BEGIN\n%s\nACTUAL_END\n' "$expected_commit_files" "$staged" >&2
+                  exit 51
+                }
+                git diff --cached --check || exit 51
+                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 51
+                grep -Fq 'xhci->dma_mask_bits = 36;' "$pfile" || exit 51
+                grep -Fq 'dma_mask_bits;' "$hfile" || exit 51
+                grep -Fq 'xhci->dma_mask_bits = 64;' "$f" || exit 51
+                [ "$(grep -Fc 'DMA_BIT_MASK(xhci->dma_mask_bits)' "$f")" -eq 2 ] || exit 51
+                echo "ANDROID_TICWATCH_XHCI_VL805_DMA36_RESOLVED=$c FILE=$f"
+                continue
+              fi
+
           '''
           uplift = uplift[:start] + replacement + uplift[end:]
 
