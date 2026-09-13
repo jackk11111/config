@@ -7,6 +7,7 @@ on:
       - ticwatch-max-lts-220-incremental
     paths:
       - '.github/workflows/ticwatch-max-lts-220-incremental-uplift-v3.yml'
+      - '.github/scripts/ticwatch-uplift-v3-overlay.py'
 
 permissions:
   contents: read
@@ -25,7 +26,7 @@ jobs:
         with:
           ref: ticwatch-max-lts-220-incremental
 
-      - name: Materialize proven V2 ABI-aware scripts unchanged
+      - name: Materialize proven V2 scripts with narrow V3 resolvers
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -59,9 +60,10 @@ jobs:
           PY
           bash -n /tmp/v2-build-scripts.sh
           bash /tmp/v2-build-scripts.sh
+          python3 .github/scripts/ticwatch-uplift-v3-overlay.py /tmp/uplift.sh
           bash -n /tmp/prepare.sh
           bash -n /tmp/uplift.sh
-          echo 'V3_USES_V2_UPLIFT_UNCHANGED=1'
+          echo 'V3_USES_V2_UPLIFT_WITH_NARROW_RESOLVERS=1'
 
       - name: Create checkpoint parent
         shell: bash
