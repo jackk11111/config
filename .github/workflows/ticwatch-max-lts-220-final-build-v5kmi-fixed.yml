@@ -100,6 +100,9 @@ jobs:
       - name: Apply compile compatibility fixes
         run: bash .github/scripts/ticwatch-5.15.220-compile-compat.sh .ticwatch-preflight/common
 
+      - name: Apply TicWatch KEXEC BT541 shutdown quirk
+        run: bash .github/scripts/ticwatch-kexec-zinitix-quirk.sh .ticwatch-preflight/common
+
       - name: Install targeted genksyms CRC preservation
         shell: bash
         run: |
@@ -204,6 +207,7 @@ jobs:
           cp Image TicWatch-MAX-LTS-5.15.220-KMI-PRESERVED.zip bundle/
           cp final.config System.map Module.symvers kernelrelease.txt kernel-build.log kmi-crc-audit.txt llvm-version.txt genksyms-kmi-preserve.patch kmi-crc-map.sha256 lts-merged-head.txt bundle/audit/
           cp "$KMI_CRC_MAP_REL" bundle/audit/
+          cp .github/scripts/ticwatch-kexec-zinitix-quirk.sh bundle/audit/
           cat > bundle/docs/KERNEL_FINAL_REPORT.txt <<EOF
           DEVICE=TicWatch Pro 5 Enduro (dace)
           KERNEL_RELEASE=$(cat kernelrelease.txt)
@@ -215,6 +219,7 @@ jobs:
           CONFIG_MODVERSIONS=y
           STOCK379_REQUIRED_CHANGED_CRCS_PRESERVED=337
           STOCK379_KMI_TARGETED_GATE=PASS
+          KEXEC_BT541_SHUTDOWN_QUIRK=ENABLED_ONLY_WHEN_KEXEC_IN_PROGRESS
           FLASH_ALLOWED_BASELINE=5.15.211-Xinran_StarBai-Test
           VENDOR_BOOT_IMG=STOCK_379_UNCHANGED
           INIT_BOOT_IMG=STOCK_379_UNCHANGED
@@ -227,6 +232,7 @@ jobs:
           KERNEL_RELEASE=$(cat kernelrelease.txt)
           UPLIFT_SOURCE_HEAD=$(cat lts-merged-head.txt)
           KMI_REFERENCE=KNOWN_GOOD_5.15.211_MATCHING_STOCK379
+          KEXEC_BT541_SHUTDOWN_QUIRK=ENABLED_ONLY_WHEN_KEXEC_IN_PROGRESS
           FLASH_PERFORMED=NO
           EOF
           (cd bundle && sha256sum Image TicWatch-MAX-LTS-5.15.220-KMI-PRESERVED.zip PROVENANCE.txt audit/final.config audit/System.map audit/Module.symvers docs/KERNEL_FINAL_REPORT.txt > SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
