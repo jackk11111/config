@@ -1,0 +1,319 @@
+name: TicWatch Recovery V1 - Stage0 KEXEC Rescue Bundle
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-recovery-v1-stage0-build]
+    paths:
+      - '.github/workflows/ticwatch-recovery-v1-stage0-build.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ticwatch-recovery-v1-stage0
+  cancel-in-progress: true
+
+env:
+  FINAL_KERNEL_RUN_ID: '34765521372'
+  FINAL_KERNEL_ARTIFACT: 'TicWatch-MAX-LTS-5.15.220-KMI-PRESERVED-FINAL'
+  EXPECTED_IMAGE_SHA256: 'a0e13c73b692c5a1f4a36e08772984432bd61e4919808e228b9647c2c933377d'
+  EXPECTED_BUSYBOX_SHA256: 'c629fce4b0dd3ba9775f851d0941e74582115f423258d3a79800f2bd11d30f5c'
+  KEXEC_TOOLS_TAG: 'v2.0.32'
+
+jobs:
+  build-stage0:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout recovery branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-recovery-v1-stage0-build
+
+      - name: Install host and AArch64 build dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y --no-install-recommends \
+            autoconf automake libtool make gcc git file cpio gzip \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross >/dev/null
+
+      - name: Download and verify approved final kernel artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p final-kernel
+          gh run download "$FINAL_KERNEL_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "$FINAL_KERNEL_ARTIFACT" --dir final-kernel
+          test -s final-kernel/Image
+          echo "$EXPECTED_IMAGE_SHA256  final-kernel/Image" | sha256sum -c -
+          test -s final-kernel/wireless-flasher/busybox
+          echo "$EXPECTED_BUSYBOX_SHA256  final-kernel/wireless-flasher/busybox" | sha256sum -c -
+          file final-kernel/Image final-kernel/wireless-flasher/busybox | tee approved-input-types.txt
+          file final-kernel/wireless-flasher/busybox | grep -Fq 'ARM aarch64'
+          file final-kernel/wireless-flasher/busybox | grep -Fq 'statically linked'
+
+      - name: Build static AArch64 kexec-tools 2.0.32
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone --depth 1 --branch "$KEXEC_TOOLS_TAG" https://github.com/horms/kexec-tools.git kexec-tools
+          cd kexec-tools
+          ./bootstrap
+          env \
+            CC=aarch64-linux-gnu-gcc \
+            LD=aarch64-linux-gnu-ld \
+            AS=aarch64-linux-gnu-as \
+            AR=aarch64-linux-gnu-ar \
+            STRIP=aarch64-linux-gnu-strip \
+            OBJCOPY=aarch64-linux-gnu-objcopy \
+            BUILD_CC=gcc \
+            TARGET_CC=aarch64-linux-gnu-gcc \
+            TARGET_LD=aarch64-linux-gnu-ld \
+            LDFLAGS='-static' \
+            ./configure \
+              --build=x86_64-linux-gnu \
+              --host=aarch64-linux-gnu \
+              --target=aarch64-linux-gnu \
+              --without-zlib --without-lzma --without-zstd --without-xen
+          make -j"$(nproc)"
+          KEXEC_BIN="$(find build -type f -name kexec -perm -111 | head -n1)"
+          test -n "$KEXEC_BIN"
+          cp "$KEXEC_BIN" "$GITHUB_WORKSPACE/kexec-arm64"
+          cd "$GITHUB_WORKSPACE"
+          file kexec-arm64 | tee kexec-file.txt
+          file kexec-arm64 | grep -Fq 'ARM aarch64'
+          file kexec-arm64 | grep -Fq 'statically linked'
+          if readelf -l kexec-arm64 | grep -qi 'interpreter'; then
+            echo 'FAIL: kexec-arm64 unexpectedly has a dynamic interpreter' >&2
+            exit 11
+          fi
+
+      - name: Build zero-write Stage0 initramfs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ROOT="$GITHUB_WORKSPACE/rootfs-stage0"
+          rm -rf "$ROOT"
+          mkdir -p "$ROOT"/{bin,sbin,proc,sys,dev,run,tmp,etc,mnt}
+          cp final-kernel/wireless-flasher/busybox "$ROOT/bin/busybox"
+          chmod 0755 "$ROOT/bin/busybox"
+          for a in sh mount umount mkdir sleep reboot sync cat echo dmesg uname id ls grep sed awk cut head tail od wc test true false; do
+            ln -s busybox "$ROOT/bin/$a"
+          done
+          cat > "$ROOT/init" <<'EOF'
+          #!/bin/sh
+          export PATH=/bin:/sbin
+          /bin/mkdir -p /proc /sys /dev /dev/pts /run /tmp /sys/fs/pstore
+          /bin/mount -t proc proc /proc 2>/dev/null || true
+          /bin/mount -t sysfs sysfs /sys 2>/dev/null || true
+          /bin/mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+          /bin/mkdir -p /dev/pts /sys/fs/pstore
+          /bin/mount -t devpts devpts /dev/pts 2>/dev/null || true
+          /bin/mount -t pstore pstore /sys/fs/pstore 2>/dev/null || true
+
+          if [ -w /dev/kmsg ]; then
+            echo 'TICWATCH_RESCUE_STAGE0_INIT_OK' > /dev/kmsg
+            echo 'TICWATCH_RESCUE_STAGE0_ZERO_PARTITION_WRITES' > /dev/kmsg
+            cat /proc/version > /dev/kmsg 2>/dev/null || true
+          fi
+
+          # Stage0 deliberately touches no block device and loads no vendor module.
+          # If /init is alive, wait long enough to make the transition observable,
+          # then return to the normal boot path using a forced kernel reboot.
+          /bin/sleep 20
+          /bin/sync
+          /bin/reboot -f
+
+          # Normally unreachable. If reboot(2) is rejected, try SysRq only when exposed;
+          # no filesystem is mounted by this rescue, so this remains a zero-write fallback.
+          /bin/sleep 2
+          if [ -w /proc/sysrq-trigger ]; then
+            echo b > /proc/sysrq-trigger
+          fi
+          while true; do /bin/sleep 60; done
+          EOF
+          chmod 0755 "$ROOT/init"
+          echo 'ticwatch-dace recovery-v1 stage0; zero block-device writes; 2026-09-13' > "$ROOT/etc/rescue-build-id"
+          (
+            cd "$ROOT"
+            find . -xdev -print0 | sort -z | cpio --null -o --format=newc --owner=0:0 2>"$GITHUB_WORKSPACE/cpio-stage0.log" | gzip -9 > "$GITHUB_WORKSPACE/rescue-stage0.cpio.gz"
+          )
+          gzip -t rescue-stage0.cpio.gz
+          test -s rescue-stage0.cpio.gz
+          mkdir -p initramfs-check
+          (cd initramfs-check && gzip -dc ../rescue-stage0.cpio.gz | cpio -idmu --quiet)
+          test -x initramfs-check/init
+          cmp -s final-kernel/wireless-flasher/busybox initramfs-check/bin/busybox
+          grep -Fq 'TICWATCH_RESCUE_STAGE0_ZERO_PARTITION_WRITES' initramfs-check/init
+
+      - name: Assemble guarded device-side loader bundle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          B="$GITHUB_WORKSPACE/TicWatch-RECOVERY-V1-STAGE0-KEXEC"
+          rm -rf "$B"
+          mkdir -p "$B"
+          cp final-kernel/Image "$B/Image"
+          cp final-kernel/wireless-flasher/busybox "$B/busybox"
+          cp kexec-arm64 "$B/kexec-arm64"
+          cp rescue-stage0.cpio.gz "$B/rescue-stage0.cpio.gz"
+          chmod 0755 "$B/busybox" "$B/kexec-arm64"
+
+          cat > "$B/01-preflight-and-load.sh" <<'EOF'
+          #!/system/bin/sh
+          set -eu
+          DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+          BB="$DIR/busybox"
+          KX="$DIR/kexec-arm64"
+          EXPECT_KERNEL='a0e13c73b692c5a1f4a36e08772984432bd61e4919808e228b9647c2c933377d'
+          EXPECT_RAMFS='__RAMFS_SHA__'
+          EXPECT_KEXEC='__KEXEC_SHA__'
+          EXPECT_BB='c629fce4b0dd3ba9775f851d0941e74582115f423258d3a79800f2bd11d30f5c'
+
+          fail() { echo "FAIL: $*" >&2; exit 1; }
+          [ "$($BB id -u)" = 0 ] || fail 'root UID 0 required'
+          [ -r /proc/version ] || fail '/proc/version unavailable'
+          $BB grep -Fq '5.15.220-Xinran_StarBai-Test+' /proc/version || fail 'running kernel is not approved 5.15.220 baseline'
+          [ -s /sys/firmware/fdt ] || fail '/sys/firmware/fdt missing; do not kexec without the runtime FDT'
+          FDT_SIZE="$($BB wc -c < /sys/firmware/fdt | $BB tr -d ' ')"
+          [ "$FDT_SIZE" -gt 1024 ] || fail 'runtime FDT is implausibly small'
+          if [ -r /proc/sys/kernel/kexec_load_disabled ]; then
+            KD="$($BB cat /proc/sys/kernel/kexec_load_disabled | $BB tr -d '\r\n ')"
+            [ "$KD" = 0 ] || fail "kernel.kexec_load_disabled=$KD"
+          fi
+          echo "$EXPECT_KERNEL  $DIR/Image" | $BB sha256sum -c - || fail 'Image hash mismatch'
+          echo "$EXPECT_RAMFS  $DIR/rescue-stage0.cpio.gz" | $BB sha256sum -c - || fail 'initramfs hash mismatch'
+          echo "$EXPECT_KEXEC  $DIR/kexec-arm64" | $BB sha256sum -c - || fail 'kexec hash mismatch'
+          echo "$EXPECT_BB  $DIR/busybox" | $BB sha256sum -c - || fail 'busybox hash mismatch'
+
+          $BB cp /sys/firmware/fdt "$DIR/runtime-current.dtb"
+          $BB sync
+          SAFE_CMDLINE=''
+          for arg in $($BB cat /proc/cmdline); do
+            case "$arg" in
+              skip_initramfs|root=*|init=*|rdinit=*|initrd=*) ;;
+              *) SAFE_CMDLINE="$SAFE_CMDLINE $arg" ;;
+            esac
+          done
+          SAFE_CMDLINE="$SAFE_CMDLINE rdinit=/init panic=10"
+          echo "$SAFE_CMDLINE" > "$DIR/stage0.cmdline.txt"
+          $BB sha256sum "$DIR/runtime-current.dtb" > "$DIR/runtime-current.dtb.sha256"
+
+          chmod 0755 "$KX"
+          "$KX" -u >/dev/null 2>&1 || true
+          "$KX" -l "$DIR/Image" \
+            --initrd="$DIR/rescue-stage0.cpio.gz" \
+            --dtb="$DIR/runtime-current.dtb" \
+            --append="$SAFE_CMDLINE"
+
+          if [ -r /sys/kernel/kexec_loaded ]; then
+            LOADED="$($BB cat /sys/kernel/kexec_loaded | $BB tr -d '\r\n ')"
+            [ "$LOADED" = 1 ] || fail "kexec returned success but /sys/kernel/kexec_loaded=$LOADED"
+          fi
+          echo 'STAGE0_KEXEC_LOAD_OK' > "$DIR/STAGE0_LOADED_OK"
+          $BB sync
+          echo 'PASS: Stage0 kernel+initramfs loaded in RAM only. No partition was written.'
+          echo 'Do NOT reboot normally before either executing 02-execute-stage0.sh or unloading with 03-unload-stage0.sh.'
+          EOF
+
+          cat > "$B/02-execute-stage0.sh" <<'EOF'
+          #!/system/bin/sh
+          set -eu
+          DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+          BB="$DIR/busybox"
+          KX="$DIR/kexec-arm64"
+          [ "$($BB id -u)" = 0 ] || { echo 'FAIL: root UID 0 required' >&2; exit 1; }
+          [ -f "$DIR/STAGE0_LOADED_OK" ] || { echo 'FAIL: run 01-preflight-and-load.sh successfully first' >&2; exit 1; }
+          if [ -r /sys/kernel/kexec_loaded ]; then
+            [ "$($BB cat /sys/kernel/kexec_loaded | $BB tr -d '\r\n ')" = 1 ] || { echo 'FAIL: no kexec image currently loaded' >&2; exit 1; }
+          fi
+          echo 'Executing zero-write Stage0 KEXEC in 5 seconds.'
+          echo 'Expected: temporary rescue boot, ~20 s pause, automatic reboot back to Wear OS 4.'
+          echo 'No partition is written by Stage0.'
+          $BB sync
+          $BB sleep 5
+          exec "$KX" -e
+          EOF
+
+          cat > "$B/03-unload-stage0.sh" <<'EOF'
+          #!/system/bin/sh
+          set -eu
+          DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+          BB="$DIR/busybox"
+          KX="$DIR/kexec-arm64"
+          [ "$($BB id -u)" = 0 ] || { echo 'FAIL: root UID 0 required' >&2; exit 1; }
+          "$KX" -u || true
+          $BB rm -f "$DIR/STAGE0_LOADED_OK"
+          $BB sync
+          echo 'Stage0 kexec image unloaded. Normal Wear OS continues unchanged.'
+          EOF
+
+          RAMFS_SHA="$(sha256sum "$B/rescue-stage0.cpio.gz" | awk '{print $1}')"
+          KEXEC_SHA="$(sha256sum "$B/kexec-arm64" | awk '{print $1}')"
+          sed -i "s/__RAMFS_SHA__/$RAMFS_SHA/; s/__KEXEC_SHA__/$KEXEC_SHA/" "$B/01-preflight-and-load.sh"
+          chmod 0755 "$B/01-preflight-and-load.sh" "$B/02-execute-stage0.sh" "$B/03-unload-stage0.sh"
+
+          cat > "$B/README-STAGE0.txt" <<EOF
+          TICWATCH PRO 5 ENDURO (dace) - RECOVERY V1 STAGE0 KEXEC TEST
+
+          PURPOSE
+          Prove the final 5.15.220 kernel can KEXEC into an external cpio.gz initramfs before any recovery partition write.
+
+          SAFETY PROPERTY
+          Stage0 itself performs ZERO block-device mounts and ZERO partition writes.
+          01-preflight-and-load.sh loads kernel/initramfs/FDT only into RAM.
+          02-execute-stage0.sh performs the actual KEXEC transition.
+          The rescue /init waits 20 seconds and then requests a forced reboot back to normal Wear OS 4.
+
+          APPROVED KERNEL SHA256
+          $EXPECTED_IMAGE_SHA256
+
+          IMPORTANT
+          - boot/recovery/vendor_boot/init_boot/dtbo/vbmeta/super are not written by these scripts.
+          - runtime DTB is copied from /sys/firmware/fdt immediately before kexec.
+          - current cmdline is preserved except root/init/initrd/rdinit/skip_initramfs are removed; rdinit=/init panic=10 is appended.
+          - If automatic reboot does not happen after the rescue transition, use the watch's normal physical forced-reboot procedure. Because Stage0 writes no partitions, the installed Wear OS boot remains unchanged.
+          - Physical recovery has NOT been validated by this test.
+          EOF
+
+          (
+            cd "$B"
+            sha256sum Image busybox kexec-arm64 rescue-stage0.cpio.gz 01-preflight-and-load.sh 02-execute-stage0.sh 03-unload-stage0.sh README-STAGE0.txt > SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+          )
+          cp approved-input-types.txt kexec-file.txt cpio-stage0.log "$B/"
+          (cd "$GITHUB_WORKSPACE" && zip -qr9 TicWatch-RECOVERY-V1-STAGE0-KEXEC.zip "$(basename "$B")")
+          sha256sum TicWatch-RECOVERY-V1-STAGE0-KEXEC.zip | tee TicWatch-RECOVERY-V1-STAGE0-KEXEC.zip.sha256
+
+      - name: Host-side final audit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          B=TicWatch-RECOVERY-V1-STAGE0-KEXEC
+          test -s "$B/Image"
+          test -s "$B/rescue-stage0.cpio.gz"
+          test -x "$B/kexec-arm64"
+          sh -n "$B/01-preflight-and-load.sh"
+          sh -n "$B/02-execute-stage0.sh"
+          sh -n "$B/03-unload-stage0.sh"
+          ! grep -REn '/dev/(block/)?(mmc|sd|ufs)|by-name|dd if=|dd of=|flash|recovery' rootfs-stage0/init
+          grep -Fq 'ZERO block-device mounts and ZERO partition writes' "$B/README-STAGE0.txt"
+          unzip -t TicWatch-RECOVERY-V1-STAGE0-KEXEC.zip >/dev/null
+          echo 'HOST_STAGE0_AUDIT=PASS'
+
+      - name: Upload Stage0 rescue artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-RECOVERY-V1-STAGE0-KEXEC
+          path: |
+            TicWatch-RECOVERY-V1-STAGE0-KEXEC.zip
+            TicWatch-RECOVERY-V1-STAGE0-KEXEC.zip.sha256
+            TicWatch-RECOVERY-V1-STAGE0-KEXEC/
+          if-no-files-found: error
+          retention-days: 90
