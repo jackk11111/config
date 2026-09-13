@@ -10,6 +10,7 @@ on:
       - '.github/scripts/ticwatch-uplift-v3-overlay.py'
       - '.github/scripts/ticwatch-uplift-v3-resume-ledger.py'
       - '.github/scripts/ticwatch-uplift-v3-ipv4-android.py'
+      - '.github/scripts/ticwatch-uplift-v3-lsm-default.py'
 
 permissions:
   contents: read
@@ -65,11 +66,13 @@ jobs:
           python3 .github/scripts/ticwatch-uplift-v3-overlay.py /tmp/uplift.sh
           python3 .github/scripts/ticwatch-uplift-v3-resume-ledger.py /tmp/uplift.sh
           python3 .github/scripts/ticwatch-uplift-v3-ipv4-android.py /tmp/uplift.sh
+          python3 .github/scripts/ticwatch-uplift-v3-lsm-default.py /tmp/uplift.sh
           bash -n /tmp/prepare.sh
           bash -n /tmp/uplift.sh
           echo 'V3_USES_V2_UPLIFT_WITH_NARROW_RESOLVERS=1'
           echo 'V3_EXACT_STABLE_SHA_RESUME_LEDGER=1'
           echo 'V3_IPV4_ANDROID_DSTDEV_COMPAT=1'
+          echo 'V3_LSM_DEFAULT_COMPAT=1'
 
       - name: Create checkpoint parent
         shell: bash
