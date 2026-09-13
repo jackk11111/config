@@ -48,32 +48,34 @@ if s.count(old_kernel_start) != 1:
     raise SystemExit(f"FAIL_LEDGER_KERNEL_START=count={s.count(old_kernel_start)}")
 s = s.replace(old_kernel_start, new_kernel_start, 1)
 
-old_missing = '''    missing="$(git cherry HEAD "$tag" "$prev" | awk '$1=="+"{print $2}')"
-    total="$(git rev-list --count "$prev..$tag")"
-    missing_count="$(printf '%s\\n' "$missing" | sed '/^$/d' | wc -l)"
-    echo "POINT_RELEASE=$tag TOTAL_COMMITS=$total MISSING_COMMITS=$missing_count"'''
-new_missing = r'''    raw_missing="$(git cherry HEAD "$tag" "$prev" | awk '$1=="+"{print $2}')"
-    if [ -s "$ledger" ]; then
-      missing="$(printf '%s\n' "$raw_missing" | grep -Fvx -f "$ledger" || true)"
-    else
-      missing="$raw_missing"
-    fi
-    total="$(git rev-list --count "$prev..$tag")"
-    raw_missing_count="$(printf '%s\n' "$raw_missing" | sed '/^$/d' | wc -l)"
-    missing_count="$(printf '%s\n' "$missing" | sed '/^$/d' | wc -l)"
-    ledger_filtered=$((raw_missing_count - missing_count))
-    echo "POINT_RELEASE=$tag TOTAL_COMMITS=$total MISSING_COMMITS=$missing_count LEDGER_FILTERED=$ledger_filtered"'''
+# /tmp/uplift.sh is extracted from a YAML run block, so loop-body indentation
+# is two spaces here (not the YAML indentation visible in the workflow file).
+old_missing = '''  missing="$(git cherry HEAD "$tag" "$prev" | awk '$1=="+"{print $2}')"
+  total="$(git rev-list --count "$prev..$tag")"
+  missing_count="$(printf '%s\\n' "$missing" | sed '/^$/d' | wc -l)"
+  echo "POINT_RELEASE=$tag TOTAL_COMMITS=$total MISSING_COMMITS=$missing_count"'''
+new_missing = r'''  raw_missing="$(git cherry HEAD "$tag" "$prev" | awk '$1=="+"{print $2}')"
+  if [ -s "$ledger" ]; then
+    missing="$(printf '%s\n' "$raw_missing" | grep -Fvx -f "$ledger" || true)"
+  else
+    missing="$raw_missing"
+  fi
+  total="$(git rev-list --count "$prev..$tag")"
+  raw_missing_count="$(printf '%s\n' "$raw_missing" | sed '/^$/d' | wc -l)"
+  missing_count="$(printf '%s\n' "$missing" | sed '/^$/d' | wc -l)"
+  ledger_filtered=$((raw_missing_count - missing_count))
+  echo "POINT_RELEASE=$tag TOTAL_COMMITS=$total MISSING_COMMITS=$missing_count LEDGER_FILTERED=$ledger_filtered"'''
 if s.count(old_missing) != 1:
     raise SystemExit(f"FAIL_LEDGER_MISSING_BLOCK=count={s.count(old_missing)}")
 s = s.replace(old_missing, new_missing, 1)
 
-old_clean = '''      if git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick -x "$c"; then
-        continue
-      fi'''
-new_clean = r'''      if git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick -x "$c"; then
-        grep -Fqx "$c" "$ledger" || printf '%s\n' "$c" >> "$ledger"
-        continue
-      fi'''
+old_clean = '''    if git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick -x "$c"; then
+      continue
+    fi'''
+new_clean = r'''    if git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick -x "$c"; then
+      grep -Fqx "$c" "$ledger" || printf '%s\n' "$c" >> "$ledger"
+      continue
+    fi'''
 if s.count(old_clean) != 1:
     raise SystemExit(f"FAIL_LEDGER_CLEAN_PICK=count={s.count(old_clean)}")
 s = s.replace(old_clean, new_clean, 1)
