@@ -25,4 +25,4 @@ jobs:
             --ref ticwatch-max-lts-220
           echo 'FINAL_KERNEL_WORKFLOW_DISPATCHED=YES'
 
-# Trigger revision: full-KMI-preserved GENI UART build (function-local extern)
+# Trigger revision: KEXEC dual exact fix (BT541 I2C + GENI serial-core)
