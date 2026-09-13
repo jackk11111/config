@@ -88,7 +88,6 @@ if n != left:
 if any(m in resolved for m in ('<<<<<<<', '=======', '>>>>>>>')):
     raise SystemExit('FAIL_AUDIT_PARENT_MARKERS_REMAIN')
 
-# Stable semantic gate for this exact commit.
 if 'kern_path_parent(pathname, &path)' not in resolved:
     raise SystemExit('FAIL_AUDIT_PARENT_NO_KERN_PATH_PARENT')
 if 'kern_path_locked(pathname, &path)' in resolved:
@@ -117,6 +116,69 @@ PYAUDIT
                 continue
               fi
 
+              # v5.15.217: mechanical dst_dev conversion; only route.c conflicts.
+              # Start from Android/TicWatch route.c and apply exactly the three
+              # route.c semantic substitutions from the 5.15.y backport.
+              if [ "$tag" = 'v5.15.217' ] && [ "$c" = 'db686880dcade127da4fb1a9462b669027469376' ]; then
+                f='net/ipv4/route.c'
+                [ "$subject" = 'ipv4: adopt dst_dev, skb_dst_dev and skb_dst_dev_net[_rcu]' ] || {
+                  echo "FAIL_IPV4_DSTDEV_SUBJECT=$subject" >&2
+                  exit 54
+                }
+                conflicts="$(git diff --name-only --diff-filter=U)"
+                [ "$conflicts" = "$f" ] || {
+                  echo 'FAIL_IPV4_DSTDEV_CONFLICT_FILES' >&2
+                  printf 'EXPECTED:%s\nACTUAL_BEGIN\n%s\nACTUAL_END\n' "$f" "$conflicts" >&2
+                  exit 54
+                }
+
+                git checkout --ours -- "$f"
+                python3 - "$f" <<'PYIPV4DST'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+s = p.read_text()
+
+old_dev = '\tstruct net_device *dev = dst->dev;\n'
+new_dev = '\tstruct net_device *dev = dst_dev(dst);\n'
+old_net = '\tnet = dev_net_rcu(dst->dev);\n'
+new_net = '\tnet = dev_net_rcu(dst_dev(dst));\n'
+
+# 5.15.y changes exactly two route.c dev declarations and one PMTU net lookup.
+# Accept already-converted Android code, but require the final stable semantics.
+dev_total = s.count(old_dev) + s.count(new_dev)
+net_total = s.count(old_net) + s.count(new_net)
+if dev_total != 2:
+    raise SystemExit(f'FAIL_IPV4_DSTDEV_DEV_SITES={dev_total}')
+if net_total != 1:
+    raise SystemExit(f'FAIL_IPV4_DSTDEV_NET_SITES={net_total}')
+
+s = s.replace(old_dev, new_dev)
+s = s.replace(old_net, new_net)
+if s.count(new_dev) != 2 or s.count(new_net) != 1:
+    raise SystemExit('FAIL_IPV4_DSTDEV_POST')
+if any(m in s for m in ('<<<<<<<', '=======', '>>>>>>>')):
+    raise SystemExit('FAIL_IPV4_DSTDEV_MARKERS')
+
+p.write_text(s)
+print('IPV4_DSTDEV_ROUTE_PATCHED=1')
+PYIPV4DST
+
+                git add -- "$f"
+                [ -z "$(git diff --name-only --diff-filter=U)" ] || {
+                  echo 'FAIL_IPV4_DSTDEV_UNMERGED_REMAIN' >&2
+                  git diff --name-only --diff-filter=U >&2
+                  exit 54
+                }
+                git diff --cached --check || exit 54
+                git -c user.name='TicWatch LTS CI' -c user.email='ci@local' cherry-pick --continue || exit 54
+                grep -Fq 'struct net_device *dev = dst_dev(dst);' "$f" || exit 54
+                grep -Fq 'net = dev_net_rcu(dst_dev(dst));' "$f" || exit 54
+                echo "ANDROID_TICWATCH_IPV4_DSTDEV_RESOLVED=$c FILE=$f"
+                continue
+              fi
+
 '''
 
 if s.count(anchor) != 1:
@@ -124,4 +186,4 @@ if s.count(anchor) != 1:
 s = s.replace(anchor, resolver + anchor, 1)
 
 p.write_text(s)
-print("V3_DIRECT_STABLE_HUNK_RESOLVER_APPLIED=1")
+print("V3_DIRECT_RESOLVERS_APPLIED=1")
