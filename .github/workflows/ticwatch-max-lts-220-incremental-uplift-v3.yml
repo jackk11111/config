@@ -1,0 +1,155 @@
+name: TicWatch MAX-LTS 5.15.220 Incremental Uplift V3 Resumable
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-max-lts-220-incremental
+    paths:
+      - '.github/workflows/ticwatch-max-lts-220-incremental-uplift-v3.yml'
+      - '.github/scripts/ticwatch-uplift-v3-overlay.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ticwatch-max-lts-220-incremental-v3
+  cancel-in-progress: true
+
+jobs:
+  uplift:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-220-incremental
+
+      - name: Materialize V2 ABI-aware scripts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          src = Path('.github/workflows/ticwatch-max-lts-220-incremental-uplift-v2.yml').read_text()
+
+          def extract_run(step_name: str) -> str:
+              ls = src.splitlines()
+              marker = f'      - name: {step_name}'
+              i = ls.index(marker)
+              while i < len(ls) and ls[i].strip() != 'run: |':
+                  i += 1
+              if i == len(ls):
+                  raise SystemExit(f'run block not found: {step_name}')
+              i += 1
+              out = []
+              while i < len(ls):
+                  line = ls[i]
+                  if line.startswith('      - name: '):
+                      break
+                  if line and not line.startswith('          '):
+                      raise SystemExit(f'unexpected indentation in {step_name}: {line!r}')
+                  out.append(line[10:] if line else '')
+                  i += 1
+              return '\n'.join(out) + '\n'
+
+          build = extract_run('Build ABI-aware scripts from proven workflow')
+          Path('/tmp/v2-build-scripts.sh').write_text(build)
+          PY
+          bash -n /tmp/v2-build-scripts.sh
+          bash /tmp/v2-build-scripts.sh
+          python3 .github/scripts/ticwatch-uplift-v3-overlay.py /tmp/uplift.sh
+          bash -n /tmp/prepare.sh
+          bash -n /tmp/uplift.sh
+
+      - name: Create checkpoint parent
+        shell: bash
+        run: mkdir -p kernel
+
+      - name: Restore latest clean uplift checkpoint
+        id: checkpoint
+        uses: actions/cache/restore@v4
+        with:
+          path: kernel/.git
+          key: ticwatch-max-lts-220-v3-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ticwatch-max-lts-220-v3-
+
+      - name: Prepare or validate resumed kernel source
+        shell: bash
+        env:
+          CACHE_MATCHED_KEY: ${{ steps.checkpoint.outputs.cache-matched-key }}
+        run: |
+          set -Eeuo pipefail
+          BASE='3929c55fbc7559af6df290d2c0f66dc551af161a'
+          ASB='56cdb4d13a91efb666d571084ab82de351cc4900'
+
+          if [ -n "${CACHE_MATCHED_KEY:-}" ]; then
+            test -d kernel/.git
+            git -C kernel reset --hard HEAD
+            git -C kernel clean -fdx
+
+            test "$(git -C kernel config --get remote.origin.url)" = \
+              'https://github.com/Winkmoon/android_kernel_TicWatch-Pro5.git'
+            git -C kernel cat-file -e "${BASE}^{commit}"
+            git -C kernel cat-file -e "${ASB}^{commit}"
+            git -C kernel merge-base --is-ancestor "$BASE" HEAD
+            git -C kernel merge-base --is-ancestor "$ASB" HEAD
+
+            resume_from="$(cat kernel/.git/ticwatch-last-complete 2>/dev/null || true)"
+            case "$resume_from" in
+              211|212|213|214|215|216|217|218|219|220) ;;
+              *)
+                echo "FAIL_RESUME_METADATA=${resume_from:-missing}" >&2
+                exit 60
+                ;;
+            esac
+            test -z "$(git -C kernel status --porcelain)"
+            echo "CHECKPOINT_RESTORED=$CACHE_MATCHED_KEY"
+            echo "RESUME_AFTER_POINT=5.15.$resume_from"
+          else
+            rm -rf kernel
+            bash /tmp/prepare.sh
+            printf '%s\n' 211 > kernel/.git/ticwatch-last-complete
+            echo 'CHECKPOINT_FRESH_BASE=5.15.211'
+          fi
+
+      - name: Apply missing stable commits with resumable Android ABI-aware resolutions
+        id: uplift
+        shell: bash
+        run: bash /tmp/uplift.sh
+
+      - name: Normalize clean checkpoint
+        id: normalize
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -d kernel/.git
+          cd kernel
+          if git rev-parse -q --verify CHERRY_PICK_HEAD >/dev/null 2>&1; then
+            git cherry-pick --abort
+          fi
+          git reset --hard HEAD
+          git clean -fdx
+          test -z "$(git status --porcelain)"
+
+          resume_from="$(cat .git/ticwatch-last-complete 2>/dev/null || true)"
+          case "$resume_from" in
+            211|212|213|214|215|216|217|218|219|220) ;;
+            *)
+              echo "FAIL_CHECKPOINT_METADATA=${resume_from:-missing}" >&2
+              exit 61
+              ;;
+          esac
+          echo "CHECKPOINT_CLEAN_HEAD=$(git rev-parse HEAD)"
+          echo "CHECKPOINT_LAST_COMPLETE=5.15.$resume_from"
+
+      - name: Save clean uplift checkpoint
+        if: always() && steps.normalize.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: kernel/.git
+          key: ticwatch-max-lts-220-v3-${{ github.run_id }}-${{ github.run_attempt }}
