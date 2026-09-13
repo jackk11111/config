@@ -165,7 +165,7 @@ if shutdown_call in s:
         raise SystemExit('UC-Logic timer field anchor changed')
     s = s.replace(
         field,
-        field + '\t/* ACK-local equivalent of timer_shutdown_sync() no-rearm state. */\n'
+        field + '\t/* ACK-local timer shutdown no-rearm state. */\n'
                 '\tspinlock_t inrange_timer_lock;\n'
                 '\tbool inrange_timer_shutdown;\n',
         1,
