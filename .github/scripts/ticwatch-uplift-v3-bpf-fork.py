@@ -37,16 +37,16 @@ import sys
 p = Path(sys.argv[1])
 s = p.read_text()
 
-old_late = '''#ifdef CONFIG_BPF_SYSCALL
+old_late = """#ifdef CONFIG_BPF_SYSCALL
 \tRCU_INIT_POINTER(p->bpf_storage, NULL);
 \tp->bpf_ctx = NULL;
 #endif
-'''
-new_early = '''#ifdef CONFIG_BPF_SYSCALL
+"""
+new_early = """#ifdef CONFIG_BPF_SYSCALL
 \tRCU_INIT_POINTER(tsk->bpf_storage, NULL);
 \ttsk->bpf_ctx = NULL;
 #endif
-'''
+"""
 
 if s.count(old_late) != 1:
     raise SystemExit(f'FAIL_BPF_FORK_LATE_BLOCK=count={s.count(old_late)}')
@@ -62,10 +62,10 @@ if ret < 0:
     raise SystemExit('FAIL_BPF_FORK_DUP_RETURN')
 fn = s[start:ret]
 
-memcg = '''#ifdef CONFIG_MEMCG
+memcg = """#ifdef CONFIG_MEMCG
 \ttsk->active_memcg = NULL;
 #endif
-'''
+"""
 if fn.count(memcg) != 1:
     raise SystemExit(f'FAIL_BPF_FORK_MEMCG_ANCHOR=count={fn.count(memcg)}')
 if 'trace_android_vh_dup_task_struct(tsk, orig);' not in fn:
