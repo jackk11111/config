@@ -59,9 +59,6 @@ if 'if (RC != 0)' not in old_macro:
 if old_macro.count('RC = P->hook.FUNC(__VA_ARGS__);') != 1:
     raise SystemExit('FAIL_LSM_DEFAULT_OLD_HOOK_CALL')
 
-# Keep formatting close to the Android source while introducing the stable
-# semantics. The *_init variant exists only for Android callers that need an
-# explicit initial value different from the hook default.
 new_macro = old_macro
 new_macro = new_macro.replace('#define call_int_hook(FUNC, IRC, ...)',
                               '#define call_int_hook(FUNC, ...)', 1)
@@ -78,8 +75,6 @@ init_macro = init_macro.replace('if (RC != 0)',
 
 s = s[:old_macro_start] + new_macro + init_macro + s[security_ops:]
 
-# Transform only real call sites below "Security operations". Parse top-level
-# commas so multiline calls and parenthesized expressions are handled safely.
 ops = s.index('\n/* Security operations */')
 tail = s[ops:]
 needle = 'call_int_hook('
@@ -119,25 +114,30 @@ pos = 0
 zero_calls = 0
 init_calls = 0
 all_calls = 0
+zero_arg_hooks = 0
 while True:
     pos = tail.find(needle, pos)
     if pos < 0:
         break
     open_pos = pos + len('call_int_hook')
     commas, close_pos = top_level_commas(tail, open_pos)
-    if len(commas) < 2:
+    if len(commas) < 1:
         raise SystemExit(f'FAIL_LSM_DEFAULT_CALL_ARGS_AT={pos}')
-    arg2 = tail[commas[0] + 1:commas[1]].strip()
+
+    # Old form is call_int_hook(FUNC, IRC[, hook args...]). Some LSM hooks
+    # take no arguments, so a valid old invocation can have only one comma.
+    arg2_end = commas[1] if len(commas) >= 2 else close_pos
+    arg2 = tail[commas[0] + 1:arg2_end].strip()
     all_calls += 1
     if arg2 == '0':
-        # Delete only the explicit old IRC argument; retain all Android args and
-        # original whitespace after the second comma.
-        edits.append((commas[0], commas[1] + 1, ','))
+        if len(commas) >= 2:
+            edits.append((commas[0], commas[1] + 1, ','))
+        else:
+            # call_int_hook(foo, 0) -> call_int_hook(foo)
+            edits.append((commas[0], close_pos, ''))
+            zero_arg_hooks += 1
         zero_calls += 1
     else:
-        # Stable open-codes these cases. The local helper implements the same
-        # initial-value + LSM_RET_DEFAULT stop semantics without rewriting the
-        # surrounding Android function/signature.
         edits.append((pos, pos + len('call_int_hook'), 'call_int_hook_init'))
         init_calls += 1
     pos = close_pos + 1
@@ -164,19 +164,15 @@ if s.count('if (RC != LSM_RET_DEFAULT(FUNC))') < 2:
 if any(m in s for m in ('<<<<<<<', '=======', '>>>>>>>')):
     raise SystemExit('FAIL_LSM_DEFAULT_MARKERS')
 
-# A few Android-specific signatures must survive this resolution. These checks
-# prevent accidentally replacing security.c wholesale with the stable version.
 if 'const char **xattr_name' not in s:
     raise SystemExit('FAIL_LSM_DEFAULT_ANDROID_DENTRY_API_LOST')
-if 'return call_int_hook_init(sb_add_mnt_opt, -EINVAL,' not in s.replace('\n', ' '):
-    # Formatting can be multiline; a structural fallback below checks both tokens.
-    if 'call_int_hook_init(sb_add_mnt_opt,' not in s or '-EINVAL' not in s:
-        raise SystemExit('FAIL_LSM_DEFAULT_SB_ADD_MNT_OPT')
+if 'call_int_hook_init(sb_add_mnt_opt,' not in s or '-EINVAL' not in s:
+    raise SystemExit('FAIL_LSM_DEFAULT_SB_ADD_MNT_OPT')
 if 'call_int_hook_init(inode_init_security,' not in s:
     raise SystemExit('FAIL_LSM_DEFAULT_INODE_INIT_COMPAT')
 
 p.write_text(s)
-print(f'LSM_DEFAULT_ANDROID_PATCHED=1 CALLS={all_calls} DEFAULT={zero_calls} EXPLICIT_INIT={init_calls}')
+print(f'LSM_DEFAULT_ANDROID_PATCHED=1 CALLS={all_calls} DEFAULT={zero_calls} EXPLICIT_INIT={init_calls} ZERO_ARG_HOOKS={zero_arg_hooks}')
 PYLSMDEFAULT
 
                 git add -- "$f"
