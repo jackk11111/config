@@ -1,0 +1,26 @@
+name: TicWatch 5.15.220 GENI KEXEC build trigger
+
+on:
+  push:
+    branches: [ticwatch-max-lts-220]
+    paths:
+      - '.github/workflows/ticwatch-max-lts-220-geni-dispatch.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch-final-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Dispatch audited final kernel workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh workflow run ticwatch-max-lts-220-final-build-v5kmi-fixed.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref ticwatch-max-lts-220
+          echo 'FINAL_KERNEL_WORKFLOW_DISPATCHED=YES'
