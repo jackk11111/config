@@ -12,6 +12,7 @@ on:
       - '.github/scripts/ticwatch-uplift-v3-ipv4-android.py'
       - '.github/scripts/ticwatch-uplift-v3-lsm-default.py'
       - '.github/scripts/ticwatch-uplift-v3-bpf-fork.py'
+      - '.github/scripts/ticwatch-uplift-v3-mptcp-join.py'
 
 permissions:
   contents: read
@@ -69,6 +70,7 @@ jobs:
           python3 .github/scripts/ticwatch-uplift-v3-ipv4-android.py /tmp/uplift.sh
           python3 .github/scripts/ticwatch-uplift-v3-lsm-default.py /tmp/uplift.sh
           python3 .github/scripts/ticwatch-uplift-v3-bpf-fork.py /tmp/uplift.sh
+          python3 .github/scripts/ticwatch-uplift-v3-mptcp-join.py /tmp/uplift.sh
           bash -n /tmp/prepare.sh
           bash -n /tmp/uplift.sh
           echo 'V3_USES_V2_UPLIFT_WITH_NARROW_RESOLVERS=1'
@@ -76,6 +78,7 @@ jobs:
           echo 'V3_IPV4_ANDROID_DSTDEV_COMPAT=1'
           echo 'V3_LSM_DEFAULT_COMPAT=1'
           echo 'V3_BPF_FORK_COMPAT=1'
+          echo 'V3_MPTCP_JOIN_COMPAT=1'
 
       - name: Create checkpoint parent
         shell: bash
