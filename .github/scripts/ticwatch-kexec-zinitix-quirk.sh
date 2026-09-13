@@ -75,8 +75,9 @@ reboot_p.write_text(reboot)
 notifier_p.write_text(notifier)
 PY
 
-# Preserve genksyms preprocessor context: no broad kexec header in patched units.
-for F in "$I2C" "$SERIAL" "$REBOOT" "$NOTIFIER"; do
+# Preserve genksyms preprocessor context only in units where kexec.h is not
+# already part of the stock source. kernel/reboot.c legitimately includes it.
+for F in "$I2C" "$SERIAL" "$NOTIFIER"; do
   if grep -Fq '#include <linux/kexec.h>' "$F"; then
     echo "unexpected linux/kexec.h include in $F" >&2
     exit 4
