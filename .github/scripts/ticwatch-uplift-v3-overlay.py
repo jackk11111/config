@@ -34,7 +34,7 @@ case "$resume_from" in
 esac
 prev="v5.15.$resume_from"
 echo "UPLIFT_RESUME_AFTER=$prev"""
-s, n = pattern_prev.subn(replacement_prev, s, count=1)
+s, n = pattern_prev.subn(lambda _m: replacement_prev, s, count=1)
 if n != 1:
     raise SystemExit(f"FAIL_OVERLAY_PREV=count={n}")
 
