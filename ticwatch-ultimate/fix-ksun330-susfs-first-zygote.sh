@@ -199,10 +199,11 @@ if shutdown_call in s:
 else:
     print('UCLOGIC_TIMER_COMPAT=NOT_PRESENT_OR_ALREADY_ADAPTED')
 
-# No unresolved known 5.15.220 caller may remain in these compiled paths.
+# No unresolved executable 5.15.220 caller may remain in these compiled paths.
+# Comments may legitimately mention the newer timer API; only a statement line counts.
 for path in (psi, bridge, uclogic):
     text = path.read_text()
-    if re.search(r'\btimer_shutdown_sync\s*\(', text):
+    if re.search(r'(?m)^\s*timer_shutdown_sync\s*\(', text):
         raise SystemExit(f'unresolved timer_shutdown_sync caller: {path}')
 PY
 
