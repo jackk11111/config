@@ -1,0 +1,148 @@
+name: TicWatch KMI Reconstruct 5.15.211 Diagnose
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-max-lts-220
+    paths:
+      - '.github/workflows/ticwatch-kmi-reconstruct211-diagnose.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  CHECKPOINT_RUN_ID: '34757911119'
+  CHECKPOINT_NAME: 'TicWatch-5.15.220-precompile-checkpoint'
+  BASE_KERNEL_SHA: '3929c55fbc7559af6df290d2c0f66dc551af161a'
+
+jobs:
+  reconstruct:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout orchestration branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-220
+          fetch-depth: 1
+
+      - name: Install zstd
+        run: sudo apt-get update -y >/dev/null && sudo apt-get install -y --no-install-recommends zstd >/dev/null
+
+      - name: Restore verified precompile checkpoint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p checkpoint
+          gh run download "$CHECKPOINT_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_NAME" --dir checkpoint
+          cp checkpoint/precompile-checkpoint.tar.zst .
+          cp checkpoint/precompile-checkpoint.sha256 .
+          sha256sum -c precompile-checkpoint.sha256
+          tar --zstd -xf precompile-checkpoint.tar.zst
+          test -d .ticwatch-preflight/common/.git
+          test -s previous/audit/kernel-source-lts211-clean.patch
+
+      - name: Reconstruct 5.15.211 source from exact base plus saved patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          P="$GITHUB_WORKSPACE/previous/audit/kernel-source-lts211-clean.patch"
+          R="$GITHUB_WORKSPACE/kmi-reconstruct-report.txt"
+          rm -rf /tmp/k211
+          git -C "$K" cat-file -e "${BASE_KERNEL_SHA}^{commit}"
+          git -C "$K" worktree add --detach /tmp/k211 "$BASE_KERNEL_SHA"
+          if git -C /tmp/k211 apply --check "$P"; then
+            echo 'PATCH211_APPLIES_TO_BASE=YES' | tee "$R"
+            git -C /tmp/k211 apply "$P"
+          else
+            echo 'PATCH211_APPLIES_TO_BASE=NO' | tee "$R"
+            git -C /tmp/k211 apply --check --3way "$P" 2>&1 | tee -a "$R" || true
+            exit 2
+          fi
+          {
+            echo "BASE=$BASE_KERNEL_SHA"
+            echo "RECON211_VERSION=$(make -s -C /tmp/k211 kernelversion)"
+            echo "FINAL220_VERSION=$(make -s -C "$K" kernelversion)"
+            echo
+            echo '=== 211 PATCH STAT ==='
+            git -C /tmp/k211 diff --stat
+            echo
+            echo '=== 211->220 HEADER FILE DELTAS ==='
+            diff -qr /tmp/k211/include "$K/include" | grep -E ' differ$|Only in ' || true
+            diff -qr /tmp/k211/arch/arm64/include "$K/arch/arm64/include" | grep -E ' differ$|Only in ' || true
+            echo
+            echo '=== KEY HEADER SHA256 ==='
+            for rel in \
+              include/linux/device.h \
+              include/linux/skbuff.h \
+              include/linux/netdevice.h \
+              include/linux/bpf.h \
+              include/linux/filter.h \
+              include/linux/kobject.h \
+              include/linux/fs.h \
+              include/linux/mm_types.h \
+              include/drm/drm_device.h \
+              include/drm/drm_connector.h \
+              include/drm/drm_crtc.h \
+              include/drm/drm_plane.h; do
+              if [ -f "/tmp/k211/$rel" ] && [ -f "$K/$rel" ]; then
+                echo "$rel"
+                printf ' 211 '; sha256sum "/tmp/k211/$rel" | awk '{print $1}'
+                printf ' 220 '; sha256sum "$K/$rel" | awk '{print $1}'
+              fi
+            done
+          } | tee -a "$R"
+
+          : > "$GITHUB_WORKSPACE/key-header-diffs.patch"
+          for rel in \
+            include/linux/device.h \
+            include/linux/skbuff.h \
+            include/linux/netdevice.h \
+            include/linux/bpf.h \
+            include/linux/filter.h \
+            include/linux/kobject.h \
+            include/linux/fs.h \
+            include/linux/mm_types.h \
+            include/drm/drm_device.h \
+            include/drm/drm_connector.h \
+            include/drm/drm_crtc.h \
+            include/drm/drm_plane.h; do
+            if [ -f "/tmp/k211/$rel" ] && [ -f "$K/$rel" ]; then
+              diff -u --label "211/$rel" --label "220/$rel" "/tmp/k211/$rel" "$K/$rel" >> "$GITHUB_WORKSPACE/key-header-diffs.patch" || true
+            fi
+          done
+
+          # Full changed header list, compact and deterministic.
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          a=Path('/tmp/k211'); b=Path('.ticwatch-preflight/common')
+          roots=['include','arch/arm64/include']
+          out=[]
+          for root in roots:
+              pa=a/root; pb=b/root
+              names={str(p.relative_to(pa)) for p in pa.rglob('*') if p.is_file()} | {str(p.relative_to(pb)) for p in pb.rglob('*') if p.is_file()}
+              for rel in sorted(names):
+                  x=pa/rel; y=pb/rel
+                  if not x.exists() or not y.exists():
+                      out.append((root+'/'+rel,'ONLY211' if x.exists() else 'ONLY220'))
+                  elif hashlib.sha256(x.read_bytes()).digest()!=hashlib.sha256(y.read_bytes()).digest():
+                      out.append((root+'/'+rel,'DIFF'))
+          Path('all-header-deltas.tsv').write_text('path\tstate\n' + ''.join(f'{p}\t{s}\n' for p,s in out))
+          print('HEADER_DELTA_COUNT',len(out))
+          PY
+
+      - name: Upload reconstructed comparison
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-KMI-RECON211-DIAG
+          path: |
+            kmi-reconstruct-report.txt
+            key-header-diffs.patch
+            all-header-deltas.tsv
+          if-no-files-found: error
+          retention-days: 30
