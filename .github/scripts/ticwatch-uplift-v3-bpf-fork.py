@@ -73,9 +73,6 @@ if 'trace_android_vh_dup_task_struct(tsk, orig);' not in fn:
 if '#ifdef CONFIG_ANDROID_VENDOR_OEM_DATA' not in fn:
     raise SystemExit('FAIL_BPF_FORK_ANDROID_VENDOR_DATA')
 
-# Insert immediately after the MEMCG reset, before Android vendor-data clearing
-# and the vendor hook. This is after arch_dup_task_struct() copied the parent
-# task_struct and before dup_task_struct() returns to any copy_process bailout.
 fn = fn.replace(memcg, memcg + '\n' + new_early, 1)
 s = s[:start] + fn + s[ret:]
 s = s.replace(old_late, '', 1)
@@ -87,8 +84,6 @@ if s.count(old_late) != 0:
 if any(m in s for m in ('<<<<<<<', '=======', '>>>>>>>')):
     raise SystemExit('FAIL_BPF_FORK_MARKERS')
 
-# Verify ordering in dup_task_struct(): early BPF wipe must precede Android
-# vendor/OEM initialization and the final vendor hook/return.
 start = s.index(sig)
 ret = s.index('\n\treturn tsk;', start)
 fn = s[start:ret]
@@ -118,9 +113,41 @@ PYBPFFORK
 
 '''
 
+diagnostics = r'''    echo "CONFLICT_CC_DIFF_BEGIN"
+    git diff --cc --unified=20 -- $conflicts || true
+    echo "CONFLICT_CC_DIFF_END"
+    for conflict_file in $conflicts; do
+      echo "CONFLICT_MARKERS_FILE_BEGIN=$conflict_file"
+      python3 - "$conflict_file" <<'PYCONFLICTDIAG'
+from pathlib import Path
+import sys
+
+p = Path(sys.argv[1])
+try:
+    lines = p.read_text(errors='replace').splitlines()
+except Exception as e:
+    print(f'DIAG_READ_ERROR={e}')
+    raise SystemExit(0)
+markers = [i for i, line in enumerate(lines) if line.startswith('<<<<<<<')]
+print(f'CONFLICT_HUNK_COUNT={len(markers)}')
+for n, i in enumerate(markers, 1):
+    lo = max(0, i - 20)
+    j = i
+    while j < len(lines) and not lines[j].startswith('>>>>>>>'):
+        j += 1
+    hi = min(len(lines), j + 21)
+    print(f'--- CONFLICT_HUNK_{n}_LINES_{lo+1}_{hi} ---')
+    for k in range(lo, hi):
+        print(f'{k+1:06d}: {lines[k]}')
+PYCONFLICTDIAG
+      echo "CONFLICT_MARKERS_FILE_END=$conflict_file"
+    done
+'''
+
 if s.count(anchor) != 1:
     raise SystemExit(f"FAIL_BPF_FORK_ANCHOR=count={s.count(anchor)}")
-s = s.replace(anchor, resolver + anchor, 1)
+s = s.replace(anchor, resolver + diagnostics + anchor, 1)
 
 p.write_text(s)
 print("V3_BPF_FORK_COMPAT_APPLIED=1")
+print("V3_CONFLICT_DIAGNOSTICS_APPLIED=1")
