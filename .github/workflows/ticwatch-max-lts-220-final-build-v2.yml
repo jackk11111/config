@@ -1,4 +1,5 @@
 name: TicWatch MAX-LTS 5.15.220 - Final Build V2
+# Retrigger after false-positive timer validator fix 488bfed
 
 on:
   workflow_dispatch:
