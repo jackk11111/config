@@ -25,4 +25,4 @@ jobs:
             --ref ticwatch-max-lts-220
           echo 'FINAL_KERNEL_WORKFLOW_DISPATCHED=YES'
 
-# Trigger revision: KEXEC device_shutdown per-device diagnostic build
+# Trigger revision: exact KEXEC-only GENI UART platform shutdown skip after DEVSHUT proof
