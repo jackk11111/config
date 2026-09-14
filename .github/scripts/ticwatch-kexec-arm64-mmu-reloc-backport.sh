@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+K="${1:?usage: $0 <kernel-tree>}"
+[ -d "$K/.git" ] || { echo "missing kernel git tree: $K" >&2; exit 2; }
+
+# Linux v5.16 ARM64 kexec relocation series, Pasha/Pavel Tatashin.
+# Apply as one coherent series: do not select individual commits.
+SERIES=(
+  094a3684b9b67758ccedf0e6068d90f22f2942d9
+  788bfdd97434982b6d575062581e8e72eea755af
+  a347f601452ff3e7cc15bc31307915cea3b3f3f5
+  0d8732e461d6b4dc2c625a69225f20e24da4dd79
+  5bb6834fc2900052a377df79b9ab065a698bf70b
+  3036ec599332cdfb406249270e50ad3f1a5c5940
+  878fdbd704864352b9b11e29805e92ffa182904e
+  08eae0ef618f34a813c1478200eb351d4416f3ca
+  ba959fe96a1bbb98765762da20ecb3a6eb9c9d39
+  19a046f07ce5a5c34ebb6432192d98cfdb38444f
+  3744b5280e67f54579abe92576deec0079242323
+  efc2d0f20a9dab2d0e92a271dc4b8e3496377739
+  939f1b9564c6aa2bd0f4e4e336ac74379692c38b
+  7a2512fa649397c68127a480ef8fdd9dcf323045
+  6091dd9eaf8e77311548b616281c1a9c67e6ca40
+)
+
+# This step intentionally runs before TicWatch local KEXEC quirks/diagnostics.
+# Starting from a dirty source tree would make conflict results ambiguous.
+git -C "$K" diff --quiet || { echo 'kernel source has unstaged changes before ARM64 backport' >&2; exit 3; }
+git -C "$K" diff --cached --quiet || { echo 'kernel source has staged changes before ARM64 backport' >&2; exit 3; }
+
+BASE_HEAD="$(git -C "$K" rev-parse HEAD)"
+echo "TICWATCH_ARM64_MMU_RELOC_BASE_HEAD=$BASE_HEAD"
+
+for sha in "${SERIES[@]}"; do
+  if ! git -C "$K" cat-file -e "$sha^{commit}" 2>/dev/null; then
+    echo "Fetching upstream ARM64 kexec commit $sha"
+    git -C "$K" fetch --no-tags --depth=2 https://github.com/torvalds/linux.git "$sha"
+  fi
+done
+
+for sha in "${SERIES[@]}"; do
+  echo "Applying upstream ARM64 kexec commit $sha"
+  if ! git -C "$K" cherry-pick -n "$sha"; then
+    echo "ARM64_KEXEC_BACKPORT_CONFLICT_SHA=$sha" >&2
+    git -C "$K" status --short >&2 || true
+    echo 'UNMERGED_PATHS:' >&2
+    git -C "$K" diff --name-only --diff-filter=U >&2 || true
+    exit 20
+  fi
+done
+
+# Structural gates for the completed v5.16 relocation design.
+MK="$K/arch/arm64/kernel/machine_kexec.c"
+RK="$K/arch/arm64/kernel/relocate_kernel.S"
+MMU="$K/arch/arm64/include/asm/mmu_context.h"
+TPH="$K/arch/arm64/include/asm/trans_pgd.h"
+TPC="$K/arch/arm64/mm/trans_pgd.c"
+KCFG="$K/arch/arm64/Kconfig"
+
+for f in "$MK" "$RK" "$MMU" "$TPH" "$TPC" "$KCFG"; do
+  [ -s "$f" ] || { echo "missing expected backport file: $f" >&2; exit 21; }
+done
+
+grep -Fq 'machine_kexec_post_load' "$MK"
+grep -Fq 'trans_pgd_create_copy' "$MK"
+grep -Fq 'trans_pgd_copy_el2_vectors' "$MK"
+grep -Fq 'cpu_install_ttbr0' "$MMU"
+grep -Fq 'trans_pgd_copy_el2_vectors' "$TPH"
+grep -Fq 'trans_pgd_copy_el2_vectors' "$TPC"
+grep -Fq 'turn_off_mmu' "$RK"
+grep -Fq 'depends on HIBERNATION || KEXEC_CORE' "$KCFG"
+[ ! -e "$K/arch/arm64/kernel/cpu-reset.h" ] || {
+  echo 'legacy cpu-reset.h unexpectedly remains after complete series' >&2
+  exit 22
+}
+
+git -C "$K" diff --cached --check
+
+REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
+{
+  echo 'TICWATCH_ARM64_KEXEC_BACKPORT=LINUX_V5.16_COHERENT_SERIES'
+  echo "BASE_HEAD=$BASE_HEAD"
+  echo "COMMIT_COUNT=${#SERIES[@]}"
+  printf 'UPSTREAM_COMMIT=%s\n' "${SERIES[@]}"
+  echo 'MMU_ENABLED_DURING_RELOCATION=YES'
+  echo 'LEGACY_CPU_RESET_H_REMOVED=YES'
+  echo 'BACKPORT_STRUCTURAL_GATES=PASS'
+  echo
+  git -C "$K" diff --cached --stat
+} > "$REPORT"
+
+cat "$REPORT"
+echo 'TICWATCH_ARM64_MMU_RELOC_BACKPORT=APPLIED'
