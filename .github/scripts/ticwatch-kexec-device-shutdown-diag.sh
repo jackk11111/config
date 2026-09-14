@@ -22,8 +22,6 @@ start = s.find(sig)
 if start < 0:
     raise SystemExit('device_shutdown signature not found')
 
-# Isolate the exact function by brace balancing, then apply only unique,
-# behavior-preserving logging insertions inside it.
 brace = s.find('{', start)
 depth = 0
 end = None
@@ -82,7 +80,6 @@ once('\tcpufreq_suspend();\n',
      '\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DEV: CPUFREQ AFTER\\n");\n',
      'cpufreq_suspend')
 
-# The two-tab unlock is the loop-body unlock; the final unlock has one tab.
 once('\t\tspin_unlock(&devices_kset->list_lock);\n',
      '\t\tspin_unlock(&devices_kset->list_lock);\n\n'
      '\t\tif (kexec_in_progress)\n'
@@ -134,11 +131,16 @@ once('\t\tdevice_unlock(dev);\n',
      '\t\tdevice_unlock(dev);\n',
      'device_unlock')
 
+once('\tspin_unlock(&devices_kset->list_lock);\n',
+     '\tspin_unlock(&devices_kset->list_lock);\n'
+     '\tif (kexec_in_progress)\n'
+     '\t\tpr_emerg("TWKEXEC_DEV: END\\n");\n',
+     'final spin_unlock')
+
 s = s[:start] + f + s[end:]
 p.write_text(s)
 PY
 
-# Do not perturb genksyms preprocessing with a new kexec header include.
 if grep -Fq '#include <linux/kexec.h>' "$CORE"; then
   echo "unexpected linux/kexec.h include in $CORE" >&2
   exit 3
@@ -160,7 +162,8 @@ for M in \
   'TWKEXEC_DEV: BUS_AFTER' \
   'TWKEXEC_DEV: DRIVER_BEFORE' \
   'TWKEXEC_DEV: DRIVER_AFTER' \
-  'TWKEXEC_DEV: CALLBACKS_DONE'; do
+  'TWKEXEC_DEV: CALLBACKS_DONE' \
+  'TWKEXEC_DEV: END'; do
   grep -Fq "$M" "$CORE"
 done
 
