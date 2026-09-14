@@ -4,8 +4,7 @@ set -Eeuo pipefail
 K="${1:?usage: $0 <kernel-tree>}"
 [ -d "$K/.git" ] || { echo "missing kernel git tree: $K" >&2; exit 2; }
 
-# Linux v5.16 ARM64 kexec relocation series, Pasha/Pavel Tatashin.
-# Apply the exact 15 upstream commits as one coherent ordered series.
+# Linux v5.16 ARM64 MMU-enabled kexec relocation series.
 SERIES=(
   094a3684b9b67758ccedf0e6068d90f22f2942d9
   788bfdd97434982b6d575062581e8e72eea755af
@@ -25,9 +24,6 @@ SERIES=(
 )
 FIRST_PARENT=5816b3e6577eaa676ceb00a848f0fd65fe2adc29
 
-# The verified precompile checkpoint intentionally contains tracked source
-# changes relative to its historical Git HEAD. Freeze that exact state in an
-# ephemeral runner-only commit; never reset/stash/drop checkpoint content.
 ORIGINAL_HEAD="$(git -C "$K" rev-parse HEAD)"
 BASELINE_TRACKED_DIRTY=NO
 if ! git -C "$K" diff --quiet || ! git -C "$K" diff --cached --quiet; then
@@ -37,12 +33,10 @@ if ! git -C "$K" diff --quiet || ! git -C "$K" diff --cached --quiet; then
   git -C "$K" add -u
   git -C "$K" commit -m 'ci: snapshot verified TicWatch precompile source state'
 fi
-
 BASE_HEAD="$(git -C "$K" rev-parse HEAD)"
 echo "TICWATCH_ARM64_MMU_RELOC_ORIGINAL_HEAD=$ORIGINAL_HEAD"
 echo "TICWATCH_ARM64_MMU_RELOC_BASE_HEAD=$BASE_HEAD"
 echo "TICWATCH_ARM64_MMU_RELOC_BASELINE_TRACKED_DIRTY=$BASELINE_TRACKED_DIRTY"
-
 git -C "$K" diff --quiet || { echo 'tracked unstaged changes remain after baseline snapshot' >&2; exit 3; }
 git -C "$K" diff --cached --quiet || { echo 'tracked staged changes remain after baseline snapshot' >&2; exit 3; }
 
@@ -50,101 +44,48 @@ WORK="${GITHUB_WORKSPACE:-$PWD}/arm64-kexec-upstream-patches"
 rm -rf "$WORK"
 mkdir -p "$WORK/base-blobs"
 
-# Fetch patch payloads, not Linux git trees. This avoids repeatedly downloading
-# large upstream object graphs while preserving the exact commit deltas.
 for sha in "${SERIES[@]}"; do
-  url="https://github.com/torvalds/linux/commit/${sha}.patch"
+  patch="$WORK/$sha.patch"
   echo "Downloading exact upstream patch $sha"
-  curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 20 "$url" -o "$WORK/$sha.patch"
-  test -s "$WORK/$sha.patch"
-  grep -Fq "From $sha " "$WORK/$sha.patch" || {
-    echo "upstream patch identity mismatch: $sha" >&2
-    exit 19
-  }
+  curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 20 \
+    "https://github.com/torvalds/linux/commit/${sha}.patch" -o "$patch"
+  test -s "$patch"
+  grep -Fq "From $sha " "$patch" || { echo "upstream patch identity mismatch: $sha" >&2; exit 19; }
 done
 
 capture_conflict() {
-  local sha="$1" patch="$2"
-  local root="${GITHUB_WORKSPACE:-$PWD}/backport-failure"
-  local path safe
-  rm -rf "$root"
-  mkdir -p "$root/files"
-
+  local sha="$1" patch="$2" root="${GITHUB_WORKSPACE:-$PWD}/backport-failure"
+  rm -rf "$root"; mkdir -p "$root"
   cp "$patch" "$root/failed-upstream.patch"
   {
     echo "ARM64_KEXEC_BACKPORT_CONFLICT_SHA=$sha"
     echo "ORIGINAL_HEAD=$ORIGINAL_HEAD"
     echo "BASE_HEAD=$BASE_HEAD"
-    echo "BASELINE_TRACKED_DIRTY=$BASELINE_TRACKED_DIRTY"
-    echo
-    echo 'STATUS_SHORT_BEFORE_REJECT:'
+    echo 'STATUS:'
     git -C "$K" status --short || true
-    echo
-    echo 'FAILED_PATCH_FILES:'
-    grep '^diff --git a/' "$patch" || true
-    echo
-    echo 'GIT_APPLY_CHECK_VERBOSE:'
+    echo 'CHECK:'
     git -C "$K" apply --check --verbose --whitespace=nowarn "$patch" || true
-    echo
-    echo 'ALREADY_APPLIED_SERIES_INDEX_DIFF_STAT:'
-    git -C "$K" diff --cached --stat || true
   } > "$root/summary.txt" 2>&1
-
-  while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    safe="$(printf '%s' "$path" | sha256sum | awk '{print $1}')"
-    printf '%s\n' "$path" > "$root/files/$safe.path"
-    if [ -e "$K/$path" ]; then
-      cp "$K/$path" "$root/files/$safe.vendor-before"
-    fi
-  done < <(sed -n 's#^diff --git a/\(.*\) b/.*#\1#p' "$patch" | sort -u)
-
-  find "$K" -type f -name '*.rej' -delete 2>/dev/null || true
-  git -C "$K" apply --reject --whitespace=nowarn "$patch" > "$root/reject-apply.txt" 2>&1 || true
-  while IFS= read -r rej; do
-    [ -n "$rej" ] || continue
-    path="${rej#"$K"/}"
-    safe="$(printf '%s' "$path" | sha256sum | awk '{print $1}')"
-    printf '%s\n' "$path" > "$root/files/$safe.reject-path"
-    cp "$rej" "$root/files/$safe.rej"
-  done < <(find "$K" -type f -name '*.rej' -print | sort)
-
   cat "$root/summary.txt" >&2
-  cat "$root/reject-apply.txt" >&2 || true
 }
 
-# git apply --3way can merge an upstream delta with Qualcomm/vendor edits, but
-# only when the upstream preimage blobs named by the patch exist in the local
-# object database. Prime exactly those blobs from the commit's real parent.
 prime_preimage_blobs() {
   local parent="$1" patch="$2" current='' line old path tmp full
   while IFS= read -r line; do
     case "$line" in
       'diff --git a/'*)
-        current="${line#diff --git a/}"
-        current="${current%% b/*}"
-        ;;
+        current="${line#diff --git a/}"; current="${current%% b/*}" ;;
       'index '*)
         [ -n "$current" ] || continue
-        old="${line#index }"
-        old="${old%%..*}"
-        if [[ "$old" =~ ^0+$ ]]; then
-          continue
-        fi
-        path="$current"
-        tmp="$WORK/base-blobs/${parent}-${old}"
+        old="${line#index }"; old="${old%%..*}"
+        [[ "$old" =~ ^0+$ ]] && continue
+        path="$current"; tmp="$WORK/base-blobs/${parent}-${old}"
         if [ ! -s "$tmp" ]; then
           curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 20 \
             "https://raw.githubusercontent.com/torvalds/linux/${parent}/${path}" -o "$tmp"
         fi
         full="$(git -C "$K" hash-object -w "$tmp")"
-        case "$full" in
-          "$old"*) ;;
-          *)
-            echo "preimage blob identity mismatch: parent=$parent path=$path expected=$old got=$full" >&2
-            exit 18
-            ;;
-        esac
+        case "$full" in "$old"*) ;; *) echo "preimage blob mismatch: $path" >&2; exit 18;; esac
         ;;
     esac
   done < "$patch"
@@ -165,8 +106,6 @@ for sha in "${SERIES[@]}"; do
       THREEWAY_COMMITS+=("$sha")
       echo "ARM64_KEXEC_THREEWAY_ADAPTED=$sha"
     else
-      # Restore the exact state after prior successful commits before producing
-      # diagnostics. Never let a failed three-way merge contaminate the tree.
       git -C "$K" read-tree --reset -u "$PRE_TREE"
       capture_conflict "$sha" "$patch"
       exit 20
@@ -175,14 +114,12 @@ for sha in "${SERIES[@]}"; do
   parent="$sha"
 done
 
-# Structural gates for the completed v5.16 relocation design.
 MK="$K/arch/arm64/kernel/machine_kexec.c"
 RK="$K/arch/arm64/kernel/relocate_kernel.S"
 MMU="$K/arch/arm64/include/asm/mmu_context.h"
 TPH="$K/arch/arm64/include/asm/trans_pgd.h"
 TPC="$K/arch/arm64/mm/trans_pgd.c"
 KCFG="$K/arch/arm64/Kconfig"
-
 for f in "$MK" "$RK" "$MMU" "$TPH" "$TPC" "$KCFG"; do
   [ -s "$f" ] || { echo "missing expected backport file: $f" >&2; exit 21; }
 done
@@ -195,13 +132,33 @@ grep -Fq 'trans_pgd_copy_el2_vectors' "$TPH"
 grep -Fq 'trans_pgd_copy_el2_vectors' "$TPC"
 grep -Fq 'turn_off_mmu' "$RK"
 grep -Fq 'depends on HIBERNATION || KEXEC_CORE' "$KCFG"
-[ ! -e "$K/arch/arm64/kernel/cpu-reset.h" ] || {
-  echo 'legacy cpu-reset.h unexpectedly remains after complete series' >&2
-  exit 22
-}
+[ ! -e "$K/arch/arm64/kernel/cpu-reset.h" ] || { echo 'legacy cpu-reset.h remains' >&2; exit 22; }
+
+# Runtime evidence from TicWatch run 20260914_154007 showed:
+#   Kernel panic - not syncing: CFI failure (target: copied relocation code)
+#   machine_kexec+0x124
+# The v5.16 design calls the copied assembly relocation trampoline indirectly.
+# That copied code has no Clang CFI type metadata. Disable CFI instrumentation
+# only for machine_kexec(), matching the upstream x86 fix for the same pattern.
+python3 - "$MK" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); s=p.read_text()
+old='void machine_kexec(struct kimage *kimage)'
+new='void __nocfi machine_kexec(struct kimage *kimage)'
+if s.count(new) == 1:
+    pass
+elif s.count(old) == 1:
+    s=s.replace(old,new,1)
+    p.write_text(s)
+else:
+    raise SystemExit('machine_kexec CFI compatibility anchor mismatch')
+PY
+git -C "$K" add arch/arm64/kernel/machine_kexec.c
+grep -Fq 'void __nocfi machine_kexec(struct kimage *kimage)' "$MK"
+echo 'TICWATCH_ARM64_KEXEC_CFI_RELOC_FIX=APPLIED'
 
 git -C "$K" diff --cached --check
-
 REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
 {
   echo 'TICWATCH_ARM64_KEXEC_BACKPORT=LINUX_V5.16_COHERENT_SERIES'
@@ -212,15 +169,14 @@ REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
   printf 'UPSTREAM_COMMIT=%s\n' "${SERIES[@]}"
   echo 'PATCH_SOURCE=EXACT_GITHUB_COMMIT_PATCH'
   echo "THREEWAY_ADAPT_COUNT=${#THREEWAY_COMMITS[@]}"
-  if [ "${#THREEWAY_COMMITS[@]}" -gt 0 ]; then
-    printf 'THREEWAY_ADAPTED_COMMIT=%s\n' "${THREEWAY_COMMITS[@]}"
-  fi
+  if [ "${#THREEWAY_COMMITS[@]}" -gt 0 ]; then printf 'THREEWAY_ADAPTED_COMMIT=%s\n' "${THREEWAY_COMMITS[@]}"; fi
   echo 'MMU_ENABLED_DURING_RELOCATION=YES'
   echo 'LEGACY_CPU_RESET_H_REMOVED=YES'
+  echo 'CFI_CLANG_COPIED_RELOC_TRAMPOLINE_FIX=MACHINE_KEXEC_NOCFI'
+  echo 'CFI_FIX_RUNTIME_EVIDENCE=PSTORE_20260914_154007_MACHINE_KEXEC_PLUS_0X124'
   echo 'BACKPORT_STRUCTURAL_GATES=PASS'
   echo
   git -C "$K" diff --cached --stat
 } > "$REPORT"
-
 cat "$REPORT"
 echo 'TICWATCH_ARM64_MMU_RELOC_BACKPORT=APPLIED'
