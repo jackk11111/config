@@ -54,13 +54,53 @@ for sha in "${SERIES[@]}"; do
   fi
 done
 
+capture_conflict() {
+  local sha="$1"
+  local root="${GITHUB_WORKSPACE:-$PWD}/backport-failure"
+  local path safe
+  rm -rf "$root"
+  mkdir -p "$root/files"
+
+  {
+    echo "ARM64_KEXEC_BACKPORT_CONFLICT_SHA=$sha"
+    echo "ORIGINAL_HEAD=$ORIGINAL_HEAD"
+    echo "BASE_HEAD=$BASE_HEAD"
+    echo "BASELINE_TRACKED_DIRTY=$BASELINE_TRACKED_DIRTY"
+    echo
+    echo 'STATUS_SHORT:'
+    git -C "$K" status --short || true
+    echo
+    echo 'UNMERGED_PATHS:'
+    git -C "$K" diff --name-only --diff-filter=U || true
+    echo
+    echo 'UNMERGED_INDEX:'
+    git -C "$K" ls-files -u || true
+    echo
+    echo 'COMBINED_CONFLICT_DIFF:'
+    git -C "$K" diff --cc || true
+  } > "$root/summary.txt" 2>&1
+
+  git -C "$K" show --format=fuller --stat "$sha" > "$root/upstream-commit-stat.txt" 2>&1 || true
+  git -C "$K" show --format=fuller --binary "$sha" > "$root/upstream-commit.patch" 2>&1 || true
+  git -C "$K" diff --cached --binary > "$root/index-after-failure.patch" 2>&1 || true
+
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    safe="$(printf '%s' "$path" | sha256sum | awk '{print $1}')"
+    printf '%s\n' "$path" > "$root/files/$safe.path"
+    git -C "$K" ls-files -u -- "$path" > "$root/files/$safe.index" 2>&1 || true
+    git -C "$K" show ":1:$path" > "$root/files/$safe.base" 2>/dev/null || true
+    git -C "$K" show ":2:$path" > "$root/files/$safe.ours" 2>/dev/null || true
+    git -C "$K" show ":3:$path" > "$root/files/$safe.theirs" 2>/dev/null || true
+  done < <(git -C "$K" diff --name-only --diff-filter=U)
+
+  cat "$root/summary.txt" >&2
+}
+
 for sha in "${SERIES[@]}"; do
   echo "Applying upstream ARM64 kexec commit $sha"
   if ! git -C "$K" cherry-pick -n "$sha"; then
-    echo "ARM64_KEXEC_BACKPORT_CONFLICT_SHA=$sha" >&2
-    git -C "$K" status --short >&2 || true
-    echo 'UNMERGED_PATHS:' >&2
-    git -C "$K" diff --name-only --diff-filter=U >&2 || true
+    capture_conflict "$sha"
     exit 20
   fi
 done
