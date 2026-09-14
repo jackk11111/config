@@ -22,7 +22,6 @@ serial = serial_p.read_text()
 reboot = reboot_p.read_text()
 notifier = notifier_p.read_text()
 
-# 1) Exact BT541/Zinitix shutdown skip, KEXEC only.
 i2c_old = '''static void i2c_device_shutdown(struct device *dev)\n{\n\tstruct i2c_client *client = i2c_verify_client(dev);\n\tstruct i2c_driver *driver;\n\n\tif (!client || !dev->driver)\n\t\treturn;\n\tdriver = to_i2c_driver(dev->driver);\n\tif (driver->shutdown)\n\t\tdriver->shutdown(client);\n\telse if (client->irq > 0)\n\t\tdisable_irq(client->irq);\n}\n'''
 
 i2c_new = '''static void i2c_device_shutdown(struct device *dev)\n{\n\tstruct i2c_client *client = i2c_verify_client(dev);\n\tstruct i2c_driver *driver;\n\textern bool kexec_in_progress;\n\n\tif (!client || !dev->driver)\n\t\treturn;\n\n\tif (kexec_in_progress && client->adapter &&\n\t    client->adapter->nr == 1 && client->addr == 0x20) {\n\t\tpr_emerg("TWKEXEC: BT541 I2C shutdown skipped\\n");\n\t\treturn;\n\t}\n\n\tdriver = to_i2c_driver(dev->driver);\n\tif (driver->shutdown)\n\t\tdriver->shutdown(client);\n\telse if (client->irq > 0)\n\t\tdisable_irq(client->irq);\n}\n'''
@@ -36,7 +35,6 @@ if 'TWKEXEC: BT541 I2C shutdown skipped' not in i2c:
             raise SystemExit('i2c_device_shutdown anchor mismatch')
         i2c = i2c.replace(i2c_old, i2c_new, 1)
 
-# 2) Exact GENI UART low-level shutdown skip, KEXEC only.
 serial_call = '\t\tuport->ops->shutdown(uport);\n'
 if 'TWKEXEC: GENI UART core shutdown skipped' not in serial:
     if 'TicWatch KEXEC: skipping GENI UART port shutdown' in serial:
@@ -48,7 +46,6 @@ if 'TWKEXEC: GENI UART core shutdown skipped' not in serial:
         serial_repl = '''\t\t{\n\t\t\textern bool kexec_in_progress;\n\n\t\t\tif (kexec_in_progress && uport->mapbase == 0x04a94000) {\n\t\t\t\tpr_emerg("TWKEXEC: GENI UART core shutdown skipped\\n");\n\t\t\t\tdisable_irq_nosync(uport->irq);\n\t\t\t} else {\n\t\t\t\tuport->ops->shutdown(uport);\n\t\t\t}\n\t\t}\n'''
         serial = serial.replace(serial_call, serial_repl, 1)
 
-# 3) Stage breadcrumbs around kernel_restart_prepare().
 reboot_old = '''void kernel_restart_prepare(char *cmd)\n{\n\tblocking_notifier_call_chain(&reboot_notifier_list, SYS_RESTART, cmd);\n\tsystem_state = SYSTEM_RESTART;\n\tusermodehelper_disable();\n\tdevice_shutdown();\n}\n'''
 reboot_new = '''void kernel_restart_prepare(char *cmd)\n{\n\textern bool kexec_in_progress;\n\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: restart_prepare ENTER cmd=%s\\n", cmd ?: "<null>");\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: reboot_notifier_chain BEFORE\\n");\n\tblocking_notifier_call_chain(&reboot_notifier_list, SYS_RESTART, cmd);\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: reboot_notifier_chain AFTER\\n");\n\tsystem_state = SYSTEM_RESTART;\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: usermodehelper_disable BEFORE\\n");\n\tusermodehelper_disable();\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: usermodehelper_disable AFTER\\n");\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: device_shutdown BEFORE\\n");\n\tdevice_shutdown();\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: device_shutdown AFTER\\n");\n}\n'''
 if 'TWKEXEC_DIAG: restart_prepare ENTER' not in reboot:
@@ -56,7 +53,6 @@ if 'TWKEXEC_DIAG: restart_prepare ENTER' not in reboot:
         raise SystemExit('kernel_restart_prepare anchor mismatch')
     reboot = reboot.replace(reboot_old, reboot_new, 1)
 
-# 4) Identify exact reboot-notifier callback progression.
 call = '\t\tret = nb->notifier_call(nb, val, v);\n'
 if 'TWKEXEC_DIAG: notifier BEFORE' not in notifier:
     if notifier.count(call) != 1:
@@ -101,3 +97,4 @@ echo 'TICWATCH_KEXEC_GENI_PLATFORM_LEGACY_QUIRK=NOT_APPLIED'
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 bash "$SCRIPT_DIR/ticwatch-kexec-geni-platform-skip.sh" "$K"
 bash "$SCRIPT_DIR/ticwatch-kexec-device-shutdown-diag.sh" "$K"
+bash "$SCRIPT_DIR/ticwatch-kexec-core-path-diag.sh" "$K"
