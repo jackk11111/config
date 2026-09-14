@@ -4,9 +4,13 @@ set -Eeuo pipefail
 K="${1:?usage: $0 <kernel-tree>}"
 MK="$K/arch/arm64/kernel/machine_kexec.c"
 CR="$K/arch/arm64/kernel/cpu-reset.h"
+RS="$K/arch/arm64/kernel/cpu-reset.S"
+RK="$K/arch/arm64/kernel/relocate_kernel.S"
+AK="$K/arch/arm64/include/asm/kexec.h"
 
-[ -f "$MK" ] || { echo "missing $MK" >&2; exit 2; }
-[ -f "$CR" ] || { echo "missing $CR" >&2; exit 2; }
+for f in "$MK" "$CR" "$RS" "$RK" "$AK"; do
+  [ -f "$f" ] || { echo "missing $f" >&2; exit 2; }
+done
 
 python3 - "$MK" "$CR" <<'PY'
 from pathlib import Path
@@ -23,7 +27,6 @@ def once(src, old, new, label):
         raise SystemExit(f'{label} anchor mismatch: {n}')
     return src.replace(old, new, 1)
 
-# Exact source shape was captured from run 34815337315 / job 103919254512.
 ms = once(ms,
 '''\tbool stuck_cpus = cpus_are_stuck_in_kernel();\n''',
 '''\tbool stuck_cpus = cpus_are_stuck_in_kernel();\n\n\tpr_emerg("TWKEXEC_ARM64: MACHINE_KEXEC ENTER crash=%d stuck=%d online=%u head=%lx start=%lx reloc=%lx dtb=%lx\\n",\n\t\t in_kexec_crash, stuck_cpus, num_online_cpus(), kimage->head,\n\t\t kimage->start, kimage->arch.kern_reloc, kimage->arch.dtb_mem);\n''',
@@ -49,15 +52,11 @@ ms = once(ms,
 '''\tpr_emerg("TWKEXEC_ARM64: CPU_SOFT_RESTART CALL BEFORE reloc=%lx head=%lx start=%lx dtb=%lx\\n",\n\t\t kimage->arch.kern_reloc, kimage->head, kimage->start, kimage->arch.dtb_mem);\n\tcpu_soft_restart(kimage->arch.kern_reloc, kimage->head, kimage->start,\n\t\t\t kimage->arch.dtb_mem);\n\tpr_emerg("TWKEXEC_ARM64: CPU_SOFT_RESTART RETURNED\\n");\n\n\tBUG(); /* Should never get here. */\n''',
 'soft-restart-call')
 
-# Instrument the exact inline transition helper. This reaches one layer deeper than
-# machine_kexec(): physical restart pointer setup, idmap install and final branch.
 cs = once(cs,
 '''\ttypeof(__cpu_soft_restart) *restart;\n''',
 '''\ttypeof(__cpu_soft_restart) *restart;\n\n\tpr_emerg("TWKEXEC_ARM64: CPU_RESET ENTER entry=%lx arg0=%lx arg1=%lx arg2=%lx\\n",\n\t\t entry, arg0, arg1, arg2);\n''',
 'cpu-reset-enter')
 
-# This tree may carry the el2_switch form; do not assume which physical-address helper
-# is used, only anchor on the unique restart assignment line discovered by introspection.
 needle = None
 for cand in (
     '\trestart = (void *)__pa_symbol(function_nocfi(__cpu_soft_restart));\n',
@@ -76,7 +75,6 @@ cs = once(cs,
 '''\tpr_emerg("TWKEXEC_ARM64: IDMAP BEFORE\\n");\n\tcpu_install_idmap();\n\tpr_emerg("TWKEXEC_ARM64: IDMAP AFTER\\n");\n''',
 'idmap')
 
-# Support both the el2_switch and fixed-zero variants without guessing the tree.
 if cs.count('\trestart(el2_switch, entry, arg0, arg1, arg2);\n') == 1:
     cs = cs.replace(
         '\trestart(el2_switch, entry, arg0, arg1, arg2);\n',
@@ -96,3 +94,16 @@ print('TICWATCH_KEXEC_ARM64_MACHINE_KEXEC=INSTRUMENTED')
 print('TICWATCH_KEXEC_ARM64_CPU_RESET=INSTRUMENTED')
 print('TICWATCH_KEXEC_ARM64_BEHAVIOR_CHANGE=NONE')
 PY
+
+echo '=== TWKEXEC EXACT CPU-RESET.S BEGIN ==='
+cat "$RS"
+echo '=== TWKEXEC EXACT CPU-RESET.S END ==='
+echo '=== TWKEXEC EXACT RELOCATE_KERNEL.S BEGIN ==='
+cat "$RK"
+echo '=== TWKEXEC EXACT RELOCATE_KERNEL.S END ==='
+echo '=== TWKEXEC EXACT ASM-KEXEC.H BEGIN ==='
+cat "$AK"
+echo '=== TWKEXEC EXACT ASM-KEXEC.H END ==='
+echo '=== TWKEXEC EXACT MACHINE_KEXEC RELEVANT BEGIN ==='
+sed -n '/int machine_kexec_prepare/,/void machine_crash_shutdown/p' "$MK"
+echo '=== TWKEXEC EXACT MACHINE_KEXEC RELEVANT END ==='
