@@ -25,4 +25,4 @@ jobs:
             --ref ticwatch-max-lts-220
           echo 'FINAL_KERNEL_WORKFLOW_DISPATCHED=YES'
 
-# Trigger revision: exact KEXEC-only GENI UART platform shutdown skip after DEVSHUT proof
+# Trigger revision: post-device_shutdown KEXEC core path diagnostics after GENI platform skip success
