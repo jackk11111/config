@@ -225,6 +225,48 @@ git -C "$K" add arch/arm64/kernel/machine_kexec.c
 grep -Fq 'void __nocfi machine_kexec(struct kimage *kimage)' "$MK"
 echo 'TICWATCH_ARM64_KEXEC_CFI_RELOC_FIX=APPLIED'
 
+# Runtime-only boundary diagnostics for the remaining silent failure after
+# MACHINE_KEXEC BEFORE. Persist each major boundary through kmsg_dump(OOPS)
+# so ramoops keeps the last completed step even if TTBR/relocation goes dark.
+# No ABI, exported symbol, page-table or relocation behavior is changed.
+python3 - "$MK" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); s=p.read_text()
+inc='#include <linux/kexec.h>\n'
+if '#include <linux/kmsg_dump.h>' not in s:
+    if s.count(inc) != 1:
+        raise SystemExit('machine_kexec kexec.h include anchor mismatch')
+    s=s.replace(inc, inc+'#include <linux/kmsg_dump.h>\n', 1)
+
+old='''\tpr_info("Bye!\\n");\n\n\tlocal_daif_mask();\n'''
+new='''\tpr_emerg("TWKEXEC_MMU: ENTER head=%lx start=%lx dtb=%pa reloc=%pa ttbr0=%pa t0sz=%lx ttbr1=%pa zero=%pa el2=%pa hyp_nvhe=%d\\n",\n\t\t kimage->head, kimage->start, &kimage->arch.dtb_mem,\n\t\t &kimage->arch.kern_reloc, &kimage->arch.ttbr0,\n\t\t kimage->arch.t0sz, &kimage->arch.ttbr1,\n\t\t &kimage->arch.zero_page, &kimage->arch.el2_vectors,\n\t\t is_hyp_nvhe());\n\tkmsg_dump(KMSG_DUMP_OOPS);\n\tpr_info("Bye!\\n");\n\n\tlocal_daif_mask();\n\tpr_emerg("TWKEXEC_MMU: DAIF MASKED\\n");\n\tkmsg_dump(KMSG_DUMP_OOPS);\n'''
+if 'TWKEXEC_MMU: ENTER' not in s:
+    if s.count(old) != 1:
+        raise SystemExit(f'machine_kexec entry anchor mismatch: {s.count(old)}')
+    s=s.replace(old,new,1)
+
+old2='''\t\tif (is_hyp_nvhe())\n\t\t\t__hyp_set_vectors(kimage->arch.el2_vectors);\n\t\tcpu_install_ttbr0(kimage->arch.ttbr0, kimage->arch.t0sz);\n\t\tkernel_reloc = (void *)kimage->arch.kern_reloc;\n\t\tkernel_reloc(kimage);\n'''
+new2='''\t\tif (is_hyp_nvhe()) {\n\t\t\tpr_emerg("TWKEXEC_MMU: EL2_VECTORS BEFORE pa=%pa\\n",\n\t\t\t\t &kimage->arch.el2_vectors);\n\t\t\tkmsg_dump(KMSG_DUMP_OOPS);\n\t\t\t__hyp_set_vectors(kimage->arch.el2_vectors);\n\t\t\tpr_emerg("TWKEXEC_MMU: EL2_VECTORS AFTER\\n");\n\t\t\tkmsg_dump(KMSG_DUMP_OOPS);\n\t\t}\n\t\tpr_emerg("TWKEXEC_MMU: TTBR0 BEFORE pa=%pa t0sz=%lx\\n",\n\t\t\t &kimage->arch.ttbr0, kimage->arch.t0sz);\n\t\tkmsg_dump(KMSG_DUMP_OOPS);\n\t\tcpu_install_ttbr0(kimage->arch.ttbr0, kimage->arch.t0sz);\n\t\tpr_emerg("TWKEXEC_MMU: TTBR0 AFTER\\n");\n\t\tkmsg_dump(KMSG_DUMP_OOPS);\n\t\tkernel_reloc = (void *)kimage->arch.kern_reloc;\n\t\tpr_emerg("TWKEXEC_MMU: KERNEL_RELOC BEFORE target=%px kimage=%px\\n",\n\t\t\t kernel_reloc, kimage);\n\t\tkmsg_dump(KMSG_DUMP_OOPS);\n\t\tkernel_reloc(kimage);\n\t\tpr_emerg("TWKEXEC_MMU: KERNEL_RELOC RETURNED\\n");\n\t\tkmsg_dump(KMSG_DUMP_OOPS);\n'''
+if 'TWKEXEC_MMU: TTBR0 BEFORE' not in s:
+    if s.count(old2) != 1:
+        raise SystemExit(f'machine_kexec MMU branch anchor mismatch: {s.count(old2)}')
+    s=s.replace(old2,new2,1)
+p.write_text(s)
+PY
+git -C "$K" add arch/arm64/kernel/machine_kexec.c
+for M in \
+  'TWKEXEC_MMU: ENTER' \
+  'TWKEXEC_MMU: DAIF MASKED' \
+  'TWKEXEC_MMU: TTBR0 BEFORE' \
+  'TWKEXEC_MMU: TTBR0 AFTER' \
+  'TWKEXEC_MMU: KERNEL_RELOC BEFORE' \
+  'TWKEXEC_MMU: KERNEL_RELOC RETURNED'; do
+  grep -Fq "$M" "$MK"
+done
+grep -Fq '#include <linux/kmsg_dump.h>' "$MK"
+echo 'TICWATCH_ARM64_KEXEC_MMU_BOUNDARY_DIAGNOSTICS=APPLIED'
+
 git -C "$K" diff --cached --check
 REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
 {
@@ -251,6 +293,7 @@ REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
   echo 'CFI_CLANG_COPIED_RELOC_TRAMPOLINE_FIX=MACHINE_KEXEC_NOCFI'
   echo 'CFI_FIX_RUNTIME_EVIDENCE=PSTORE_20260914_154007_MACHINE_KEXEC_PLUS_0X124'
   echo 'POST_CFI_RUNTIME_EVIDENCE=NO_FRESH_PANIC_RESCUE_NOT_REACHED_THROUGH_20260914_175316'
+  echo 'MMU_RUNTIME_BOUNDARY_DIAGNOSTICS=ENTER_DAIF_EL2_TTBR0_RELOC_WITH_PSTORE_DUMPS'
   echo 'BACKPORT_STRUCTURAL_GATES=PASS'
   echo
   git -C "$K" diff --cached --stat
