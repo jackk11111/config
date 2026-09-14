@@ -23,6 +23,7 @@ SERIES=(
   7a2512fa649397c68127a480ef8fdd9dcf323045
   6091dd9eaf8e77311548b616281c1a9c67e6ca40
 )
+FIRST_PARENT=5816b3e6577eaa676ceb00a848f0fd65fe2adc29
 
 # The verified precompile checkpoint intentionally contains tracked source
 # changes relative to its historical Git HEAD. Freeze that exact state in an
@@ -47,14 +48,14 @@ git -C "$K" diff --cached --quiet || { echo 'tracked staged changes remain after
 
 WORK="${GITHUB_WORKSPACE:-$PWD}/arm64-kexec-upstream-patches"
 rm -rf "$WORK"
-mkdir -p "$WORK"
+mkdir -p "$WORK/base-blobs"
 
 # Fetch patch payloads, not Linux git trees. This avoids repeatedly downloading
 # large upstream object graphs while preserving the exact commit deltas.
 for sha in "${SERIES[@]}"; do
   url="https://github.com/torvalds/linux/commit/${sha}.patch"
   echo "Downloading exact upstream patch $sha"
-  curl -fL --retry 3 --retry-delay 1 --connect-timeout 20 "$url" -o "$WORK/$sha.patch"
+  curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 20 "$url" -o "$WORK/$sha.patch"
   test -s "$WORK/$sha.patch"
   grep -Fq "From $sha " "$WORK/$sha.patch" || {
     echo "upstream patch identity mismatch: $sha" >&2
@@ -98,7 +99,6 @@ capture_conflict() {
     fi
   done < <(sed -n 's#^diff --git a/\(.*\) b/.*#\1#p' "$patch" | sort -u)
 
-  # Generate .rej hunks only after preserving the pristine vendor-side files.
   find "$K" -type f -name '*.rej' -delete 2>/dev/null || true
   git -C "$K" apply --reject --whitespace=nowarn "$patch" > "$root/reject-apply.txt" 2>&1 || true
   while IFS= read -r rej; do
@@ -113,13 +113,66 @@ capture_conflict() {
   cat "$root/reject-apply.txt" >&2 || true
 }
 
+# git apply --3way can merge an upstream delta with Qualcomm/vendor edits, but
+# only when the upstream preimage blobs named by the patch exist in the local
+# object database. Prime exactly those blobs from the commit's real parent.
+prime_preimage_blobs() {
+  local parent="$1" patch="$2" current='' line old path tmp full
+  while IFS= read -r line; do
+    case "$line" in
+      'diff --git a/'*)
+        current="${line#diff --git a/}"
+        current="${current%% b/*}"
+        ;;
+      'index '*)
+        [ -n "$current" ] || continue
+        old="${line#index }"
+        old="${old%%..*}"
+        if [[ "$old" =~ ^0+$ ]]; then
+          continue
+        fi
+        path="$current"
+        tmp="$WORK/base-blobs/${parent}-${old}"
+        if [ ! -s "$tmp" ]; then
+          curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 20 \
+            "https://raw.githubusercontent.com/torvalds/linux/${parent}/${path}" -o "$tmp"
+        fi
+        full="$(git -C "$K" hash-object -w "$tmp")"
+        case "$full" in
+          "$old"*) ;;
+          *)
+            echo "preimage blob identity mismatch: parent=$parent path=$path expected=$old got=$full" >&2
+            exit 18
+            ;;
+        esac
+        ;;
+    esac
+  done < "$patch"
+}
+
+THREEWAY_COMMITS=()
+parent="$FIRST_PARENT"
 for sha in "${SERIES[@]}"; do
   patch="$WORK/$sha.patch"
   echo "Applying upstream ARM64 kexec commit $sha"
-  if ! git -C "$K" apply --index --whitespace=nowarn "$patch"; then
-    capture_conflict "$sha" "$patch"
-    exit 20
+  if git -C "$K" apply --check --whitespace=nowarn "$patch"; then
+    git -C "$K" apply --index --whitespace=nowarn "$patch"
+  else
+    echo "Direct context mismatch for $sha; using exact-parent three-way adaptation"
+    prime_preimage_blobs "$parent" "$patch"
+    PRE_TREE="$(git -C "$K" write-tree)"
+    if git -C "$K" apply --3way --index --whitespace=nowarn "$patch"; then
+      THREEWAY_COMMITS+=("$sha")
+      echo "ARM64_KEXEC_THREEWAY_ADAPTED=$sha"
+    else
+      # Restore the exact state after prior successful commits before producing
+      # diagnostics. Never let a failed three-way merge contaminate the tree.
+      git -C "$K" read-tree --reset -u "$PRE_TREE"
+      capture_conflict "$sha" "$patch"
+      exit 20
+    fi
   fi
+  parent="$sha"
 done
 
 # Structural gates for the completed v5.16 relocation design.
@@ -158,6 +211,10 @@ REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
   echo "COMMIT_COUNT=${#SERIES[@]}"
   printf 'UPSTREAM_COMMIT=%s\n' "${SERIES[@]}"
   echo 'PATCH_SOURCE=EXACT_GITHUB_COMMIT_PATCH'
+  echo "THREEWAY_ADAPT_COUNT=${#THREEWAY_COMMITS[@]}"
+  if [ "${#THREEWAY_COMMITS[@]}" -gt 0 ]; then
+    printf 'THREEWAY_ADAPTED_COMMIT=%s\n' "${THREEWAY_COMMITS[@]}"
+  fi
   echo 'MMU_ENABLED_DURING_RELOCATION=YES'
   echo 'LEGACY_CPU_RESET_H_REMOVED=YES'
   echo 'BACKPORT_STRUCTURAL_GATES=PASS'
