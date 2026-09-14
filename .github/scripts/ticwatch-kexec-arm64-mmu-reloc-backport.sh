@@ -24,8 +24,10 @@ SERIES=(
 )
 FIRST_PARENT=5816b3e6577eaa676ceb00a848f0fd65fe2adc29
 
-# Critical post-v5.16 bugfix for the exact relocation design above.
-# Fixes 878fdbd70486, which is commit 7 in SERIES.
+# Critical post-series bugfixes for the exact relocation design above.
+# ZERO_PAGE_FIX fixes 3744b5280e67 (commit 11 in SERIES).
+# KIMAGE_CLOBBER_FIX fixes 878fdbd70486 (commit 7 in SERIES).
+ZERO_PAGE_FIX=2f2183243f52a8ee77eecba4796316606701d101
 KIMAGE_CLOBBER_FIX=eb3d8ea3e1f03f4b0b72d8f5ed9eb7c3165862e8
 
 ORIGINAL_HEAD="$(git -C "$K" rev-parse HEAD)"
@@ -48,7 +50,7 @@ WORK="${GITHUB_WORKSPACE:-$PWD}/arm64-kexec-upstream-patches"
 rm -rf "$WORK"
 mkdir -p "$WORK/base-blobs"
 
-for sha in "${SERIES[@]}" "$KIMAGE_CLOBBER_FIX"; do
+for sha in "${SERIES[@]}" "$ZERO_PAGE_FIX" "$KIMAGE_CLOBBER_FIX"; do
   patch="$WORK/$sha.patch"
   echo "Downloading exact upstream patch $sha"
   curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 20 \
@@ -127,6 +129,23 @@ KCFG="$K/arch/arm64/Kconfig"
 for f in "$MK" "$RK" "$MMU" "$TPH" "$TPC" "$KCFG"; do
   [ -s "$f" ] || { echo "missing expected backport file: $f" >&2; exit 21; }
 done
+
+# Upstream v5.16-rc fix: empty_zero_page is a kernel-image symbol, not a
+# linear-map address. __pa() is therefore incorrect; __pa_symbol() must be
+# used for the physical zero-page consumed by the relocation TTBR1 switch.
+# This directly fixes 3744b5280e67 from SERIES and matters with
+# CONFIG_RELOCATABLE=y / CONFIG_RANDOMIZE_BASE=y on this TicWatch build.
+patch="$WORK/$ZERO_PAGE_FIX.patch"
+echo "Applying upstream zero-page physical-address fix $ZERO_PAGE_FIX"
+if git -C "$K" apply --check --whitespace=nowarn "$patch"; then
+  git -C "$K" apply --index --whitespace=nowarn "$patch"
+else
+  capture_conflict "$ZERO_PAGE_FIX" "$patch"
+  exit 24
+fi
+grep -Fq 'kimage->arch.zero_page = __pa_symbol(empty_zero_page);' "$MK"
+! grep -Fq 'kimage->arch.zero_page = __pa(empty_zero_page);' "$MK"
+echo 'TICWATCH_ARM64_KEXEC_ZERO_PAGE_PA_SYMBOL_FIX=APPLIED'
 
 # Upstream post-v5.16 fix: load every kimage value before the relocation loop
 # can overwrite the kimage allocation itself. This is a direct upstream patch
@@ -220,6 +239,9 @@ REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
   if [ "${#THREEWAY_COMMITS[@]}" -gt 0 ]; then printf 'THREEWAY_ADAPTED_COMMIT=%s\n' "${THREEWAY_COMMITS[@]}"; fi
   echo 'MMU_ENABLED_DURING_RELOCATION=YES'
   echo 'LEGACY_CPU_RESET_H_REMOVED=YES'
+  echo "ZERO_PAGE_UPSTREAM_FIX=$ZERO_PAGE_FIX"
+  echo 'ZERO_PAGE_FIX_STATUS=APPLIED_EXACT_UPSTREAM_PATCH'
+  echo 'ZERO_PAGE_FIX_REASON=KERNEL_IMAGE_SYMBOL_REQUIRES_PA_SYMBOL_WITH_RELOCATABLE_RANDOMIZE_BASE'
   echo "KIMAGE_CLOBBER_UPSTREAM_FIX=$KIMAGE_CLOBBER_FIX"
   echo 'KIMAGE_CLOBBER_FIX_STATUS=APPLIED_EXACT_UPSTREAM_PATCH'
   echo 'TRANS_PGD_INVALID_PTE_UPSTREAM_REFERENCE=7eced90b202d63cdc1b9b11b1353adb1389830f9'
@@ -228,7 +250,7 @@ REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
   echo 'FUNCTION_ALIGNMENT_PADDING_FIX_NEEDED=NO_CURRENT_CONFIG_FUNCTION_ALIGNMENT_0'
   echo 'CFI_CLANG_COPIED_RELOC_TRAMPOLINE_FIX=MACHINE_KEXEC_NOCFI'
   echo 'CFI_FIX_RUNTIME_EVIDENCE=PSTORE_20260914_154007_MACHINE_KEXEC_PLUS_0X124'
-  echo 'POST_CFI_RUNTIME_EVIDENCE=NO_FRESH_PANIC_RESCUE_NOT_REACHED_20260914_165332'
+  echo 'POST_CFI_RUNTIME_EVIDENCE=NO_FRESH_PANIC_RESCUE_NOT_REACHED_THROUGH_20260914_175316'
   echo 'BACKPORT_STRUCTURAL_GATES=PASS'
   echo
   git -C "$K" diff --cached --stat
