@@ -131,10 +131,13 @@ once('\t\tdevice_unlock(dev);\n',
      '\t\tdevice_unlock(dev);\n',
      'device_unlock')
 
-once('\tspin_unlock(&devices_kset->list_lock);\n',
+# The function contains two list-lock spin_unlock calls: one inside the loop
+# and one after it. Anchor the final one together with the closing brace so
+# it cannot accidentally match the loop occurrence.
+once('\tspin_unlock(&devices_kset->list_lock);\n}',
      '\tspin_unlock(&devices_kset->list_lock);\n'
      '\tif (kexec_in_progress)\n'
-     '\t\tpr_emerg("TWKEXEC_DEV: END\\n");\n',
+     '\t\tpr_emerg("TWKEXEC_DEV: END\\n");\n}',
      'final spin_unlock')
 
 s = s[:start] + f + s[end:]
