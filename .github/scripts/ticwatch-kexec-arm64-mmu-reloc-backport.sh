@@ -52,8 +52,8 @@ if 'PTE_WRITE' not in body or 'pte_sw_dirty(pte)' not in body or 'PTE_RDONLY' no
 
 old1 = 'set_pte(dst_ptep, pte_mkwrite(pte));'
 new1 = 'set_pte(dst_ptep, pte_mkwrite(pte_mkdirty(pte)));'
-old2 = 'set_pte(dst_ptep, pte_mkvalid(pte_mkwrite(pte)));'
-new2 = 'set_pte(dst_ptep, pte_mkvalid(pte_mkwrite(pte_mkdirty(pte))));'
+old2 = 'set_pte(dst_ptep, pte_mkpresent(pte_mkwrite(pte)));'
+new2 = 'set_pte(dst_ptep, pte_mkpresent(pte_mkwrite(pte_mkdirty(pte))));'
 
 if s.count(new1) == 1 and s.count(new2) == 1 and old1 not in s and old2 not in s:
     pass
@@ -69,9 +69,9 @@ PY
 
 git -C "$K" add arch/arm64/mm/trans_pgd.c
 grep -Fq 'set_pte(dst_ptep, pte_mkwrite(pte_mkdirty(pte)));' "$TPC"
-grep -Fq 'set_pte(dst_ptep, pte_mkvalid(pte_mkwrite(pte_mkdirty(pte))));' "$TPC"
+grep -Fq 'set_pte(dst_ptep, pte_mkpresent(pte_mkwrite(pte_mkdirty(pte))));' "$TPC"
 ! grep -Fq 'set_pte(dst_ptep, pte_mkwrite(pte));' "$TPC"
-! grep -Fq 'set_pte(dst_ptep, pte_mkvalid(pte_mkwrite(pte)));' "$TPC"
+! grep -Fq 'set_pte(dst_ptep, pte_mkpresent(pte_mkwrite(pte)));' "$TPC"
 git -C "$K" diff --cached --check
 
 echo 'TICWATCH_ARM64_KEXEC_TRANS_PGD_FORCE_WRITABLE_FIX=APPLIED'
