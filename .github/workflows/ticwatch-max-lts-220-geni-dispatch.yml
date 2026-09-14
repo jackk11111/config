@@ -25,4 +25,4 @@ jobs:
             --ref ticwatch-max-lts-220
           echo 'FINAL_KERNEL_WORKFLOW_DISPATCHED=YES'
 
-# Trigger revision: KEXEC reboot-path diagnostic rebuild after stock reboot.c guard fix
+# Trigger revision: KEXEC device_shutdown per-device diagnostic build
