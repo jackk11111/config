@@ -48,10 +48,7 @@ if 'TWKEXEC: GENI UART core shutdown skipped' not in serial:
         serial_repl = '''\t\t{\n\t\t\textern bool kexec_in_progress;\n\n\t\t\tif (kexec_in_progress && uport->mapbase == 0x04a94000) {\n\t\t\t\tpr_emerg("TWKEXEC: GENI UART core shutdown skipped\\n");\n\t\t\t\tdisable_irq_nosync(uport->irq);\n\t\t\t} else {\n\t\t\t\tuport->ops->shutdown(uport);\n\t\t\t}\n\t\t}\n'''
         serial = serial.replace(serial_call, serial_repl, 1)
 
-# 3) Stage breadcrumbs around kernel_restart_prepare(). Starting new kernel is
-# printed only after this function returns in kernel_kexec(). The latest DUAL
-# retest never reached that line and had no new panic/abort, so localize the
-# stall to reboot notifier chain / usermodehelper_disable / device_shutdown.
+# 3) Stage breadcrumbs around kernel_restart_prepare().
 reboot_old = '''void kernel_restart_prepare(char *cmd)\n{\n\tblocking_notifier_call_chain(&reboot_notifier_list, SYS_RESTART, cmd);\n\tsystem_state = SYSTEM_RESTART;\n\tusermodehelper_disable();\n\tdevice_shutdown();\n}\n'''
 reboot_new = '''void kernel_restart_prepare(char *cmd)\n{\n\textern bool kexec_in_progress;\n\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: restart_prepare ENTER cmd=%s\\n", cmd ?: "<null>");\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: reboot_notifier_chain BEFORE\\n");\n\tblocking_notifier_call_chain(&reboot_notifier_list, SYS_RESTART, cmd);\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: reboot_notifier_chain AFTER\\n");\n\tsystem_state = SYSTEM_RESTART;\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: usermodehelper_disable BEFORE\\n");\n\tusermodehelper_disable();\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: usermodehelper_disable AFTER\\n");\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: device_shutdown BEFORE\\n");\n\tdevice_shutdown();\n\tif (kexec_in_progress)\n\t\tpr_emerg("TWKEXEC_DIAG: device_shutdown AFTER\\n");\n}\n'''
 if 'TWKEXEC_DIAG: restart_prepare ENTER' not in reboot:
@@ -59,9 +56,7 @@ if 'TWKEXEC_DIAG: restart_prepare ENTER' not in reboot:
         raise SystemExit('kernel_restart_prepare anchor mismatch')
     reboot = reboot.replace(reboot_old, reboot_new, 1)
 
-# 4) Identify the exact notifier callback that fails to return. The diagnostic
-# is active only while kexec_in_progress is true. Use %ps so pstore records the
-# callback symbol, not just a raw address.
+# 4) Identify exact reboot-notifier callback progression.
 call = '\t\tret = nb->notifier_call(nb, val, v);\n'
 if 'TWKEXEC_DIAG: notifier BEFORE' not in notifier:
     if notifier.count(call) != 1:
@@ -75,8 +70,6 @@ reboot_p.write_text(reboot)
 notifier_p.write_text(notifier)
 PY
 
-# Preserve genksyms preprocessor context only in units where kexec.h is not
-# already part of the stock source. kernel/reboot.c legitimately includes it.
 for F in "$I2C" "$SERIAL" "$NOTIFIER"; do
   if grep -Fq '#include <linux/kexec.h>' "$F"; then
     echo "unexpected linux/kexec.h include in $F" >&2
@@ -84,7 +77,6 @@ for F in "$I2C" "$SERIAL" "$NOTIFIER"; do
   fi
 done
 
-# Superseded platform-layer GENI workaround must remain absent.
 if grep -Fq 'TicWatch KEXEC: skipping GENI UART shutdown callback' "$PLATFORM"; then
   echo 'superseded platform-layer GENI quirk unexpectedly present' >&2
   exit 3
@@ -105,3 +97,6 @@ echo 'TICWATCH_KEXEC_GENI_UART_CORE_QUIRK=APPLIED'
 echo 'TICWATCH_KEXEC_REBOOT_PATH_DIAGNOSTICS=APPLIED'
 echo 'TICWATCH_KEXEC_KMI_DECL=FUNCTION_LOCAL_EXTERN'
 echo 'TICWATCH_KEXEC_GENI_PLATFORM_QUIRK=NOT_APPLIED'
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+bash "$SCRIPT_DIR/ticwatch-kexec-device-shutdown-diag.sh" "$K"
