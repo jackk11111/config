@@ -96,5 +96,6 @@ echo 'TICWATCH_KEXEC_GENI_PLATFORM_LEGACY_QUIRK=NOT_APPLIED'
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 bash "$SCRIPT_DIR/ticwatch-kexec-geni-platform-skip.sh" "$K"
+bash "$SCRIPT_DIR/ticwatch-kexec-mmc0-card-skip.sh" "$K"
 bash "$SCRIPT_DIR/ticwatch-kexec-device-shutdown-diag.sh" "$K"
 bash "$SCRIPT_DIR/ticwatch-kexec-core-path-diag.sh" "$K"
