@@ -55,4 +55,12 @@ done
 
 echo 'TICWATCH_KEXEC_CORE_PATH_DIAGNOSTICS=APPLIED'
 echo 'TICWATCH_KEXEC_CORE_PATH_BEHAVIOR_CHANGE=NONE'
-echo 'TICWATCH_KEXEC_LEGACY_ARM64_PATH_DIAGNOSTICS=NOT_APPLIED_MMU_RELOC_BACKPORT'
+
+# The original cpu_soft_restart()/cpu-reset.S path has already been localized
+# on real hardware through PHYS_RESTART BEFORE without reaching the rescue
+# kernel. Replace that legacy transition with the coherent upstream arm64
+# v5.16 MMU-enabled relocation series plus its known runtime fixes. This script
+# snapshots all TicWatch KEXEC-only quirks above before applying the series.
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+bash "$SCRIPT_DIR/ticwatch-kexec-arm64-mmu-reloc-backport.sh" "$K"
+echo 'TICWATCH_KEXEC_LEGACY_ARM64_PATH=SUPERSEDED_BY_MMU_RELOC_BACKPORT'
