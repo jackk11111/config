@@ -56,11 +56,25 @@ done
 echo 'TICWATCH_KEXEC_CORE_PATH_DIAGNOSTICS=APPLIED'
 echo 'TICWATCH_KEXEC_CORE_PATH_BEHAVIOR_CHANGE=NONE'
 
-# The original cpu_soft_restart()/cpu-reset.S path has already been localized
-# on real hardware through PHYS_RESTART BEFORE without reaching the rescue
-# kernel. Replace that legacy transition with the coherent upstream arm64
-# v5.16 MMU-enabled relocation series plus its known runtime fixes. This script
-# snapshots all TicWatch KEXEC-only quirks above before applying the series.
+# Historical compatibility: older workflows called only this script and relied
+# on it to install the ARM64 MMU-enabled relocation backport. Newer workflows
+# apply that backport explicitly before the TicWatch KEXEC-only quirks. Detect
+# the already-applied structural state so the upstream series is never applied
+# twice to the same tree, while preserving the old standalone behavior.
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-bash "$SCRIPT_DIR/ticwatch-kexec-arm64-mmu-reloc-backport.sh" "$K"
+MK="$K/arch/arm64/kernel/machine_kexec.c"
+MMU="$K/arch/arm64/include/asm/mmu_context.h"
+TPC="$K/arch/arm64/mm/trans_pgd.c"
+
+if [ -s "$MK" ] && [ -s "$MMU" ] && [ -s "$TPC" ] && \
+   [ ! -e "$K/arch/arm64/kernel/cpu-reset.h" ] && \
+   grep -Fq 'machine_kexec_post_load' "$MK" && \
+   grep -Fq 'trans_pgd_create_copy' "$MK" && \
+   grep -Fq 'cpu_install_ttbr0' "$MMU"; then
+  echo 'TICWATCH_KEXEC_MMU_RELOC_BACKPORT=ALREADY_APPLIED_SKIP_DUPLICATE'
+else
+  bash "$SCRIPT_DIR/ticwatch-kexec-arm64-mmu-reloc-backport.sh" "$K"
+  echo 'TICWATCH_KEXEC_MMU_RELOC_BACKPORT=APPLIED_BY_CORE_PATH_COMPAT'
+fi
+
 echo 'TICWATCH_KEXEC_LEGACY_ARM64_PATH=SUPERSEDED_BY_MMU_RELOC_BACKPORT'
