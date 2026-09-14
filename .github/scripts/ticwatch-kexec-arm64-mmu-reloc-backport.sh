@@ -24,6 +24,10 @@ SERIES=(
 )
 FIRST_PARENT=5816b3e6577eaa676ceb00a848f0fd65fe2adc29
 
+# Critical post-v5.16 bugfix for the exact relocation design above.
+# Fixes 878fdbd70486, which is commit 7 in SERIES.
+KIMAGE_CLOBBER_FIX=eb3d8ea3e1f03f4b0b72d8f5ed9eb7c3165862e8
+
 ORIGINAL_HEAD="$(git -C "$K" rev-parse HEAD)"
 BASELINE_TRACKED_DIRTY=NO
 if ! git -C "$K" diff --quiet || ! git -C "$K" diff --cached --quiet; then
@@ -44,7 +48,7 @@ WORK="${GITHUB_WORKSPACE:-$PWD}/arm64-kexec-upstream-patches"
 rm -rf "$WORK"
 mkdir -p "$WORK/base-blobs"
 
-for sha in "${SERIES[@]}"; do
+for sha in "${SERIES[@]}" "$KIMAGE_CLOBBER_FIX"; do
   patch="$WORK/$sha.patch"
   echo "Downloading exact upstream patch $sha"
   curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 20 \
@@ -124,6 +128,50 @@ for f in "$MK" "$RK" "$MMU" "$TPH" "$TPC" "$KCFG"; do
   [ -s "$f" ] || { echo "missing expected backport file: $f" >&2; exit 21; }
 done
 
+# Upstream post-v5.16 fix: load every kimage value before the relocation loop
+# can overwrite the kimage allocation itself. This is a direct upstream patch
+# specifically tested atop v5.16.
+patch="$WORK/$KIMAGE_CLOBBER_FIX.patch"
+echo "Applying upstream post-v5.16 kimage-clobber fix $KIMAGE_CLOBBER_FIX"
+if git -C "$K" apply --check --whitespace=nowarn "$patch"; then
+  git -C "$K" apply --index --whitespace=nowarn "$patch"
+else
+  capture_conflict "$KIMAGE_CLOBBER_FIX" "$patch"
+  exit 23
+fi
+
+grep -Fq $'ldr\tx28, [x0, #KIMAGE_START]' "$RK"
+grep -Fq $'ldr\tx27, [x0, #KIMAGE_ARCH_EL2_VECTORS]' "$RK"
+grep -Fq $'ldr\tx26, [x0, #KIMAGE_ARCH_DTB_MEM]' "$RK"
+grep -Fq $'br\tx28' "$RK"
+! grep -Fq $'ldr\tx4, [x0, #KIMAGE_START]' "$RK"
+echo 'TICWATCH_ARM64_KEXEC_KIMAGE_CLOBBER_FIX=APPLIED'
+
+# Upstream 2024 trans_pgd fix, adapted to the v5.16-era source context.
+# The final upstream rule is: every non-none invalid direct-map PTE must be
+# made valid/writable in the transitional copy. The v5.16 code only does this
+# when debug_pagealloc is enabled, missing KFENCE-invalidated mappings.
+# TicWatch final.config has CONFIG_KFENCE=y with active sampling.
+python3 - "$TPC" <<'PY'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); s=p.read_text()
+old='} else if (debug_pagealloc_enabled() && !pte_none(pte)) {'
+new='} else if (!pte_none(pte)) {'
+if s.count(new) == 1 and old not in s:
+    pass
+elif s.count(old) == 1:
+    s=s.replace(old,new,1)
+    p.write_text(s)
+else:
+    raise SystemExit('trans_pgd invalid-PTE compatibility anchor mismatch')
+PY
+git -C "$K" add arch/arm64/mm/trans_pgd.c
+grep -Fq '} else if (!pte_none(pte)) {' "$TPC"
+! grep -Fq 'debug_pagealloc_enabled() && !pte_none(pte)' "$TPC"
+echo 'TICWATCH_ARM64_KEXEC_TRANS_PGD_INVALID_PTE_FIX=APPLIED'
+
+# Structural gates for the completed v5.16 relocation design.
 grep -Fq 'machine_kexec_post_load' "$MK"
 grep -Fq 'trans_pgd_create_copy' "$MK"
 grep -Fq 'trans_pgd_copy_el2_vectors' "$MK"
@@ -161,7 +209,7 @@ echo 'TICWATCH_ARM64_KEXEC_CFI_RELOC_FIX=APPLIED'
 git -C "$K" diff --cached --check
 REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
 {
-  echo 'TICWATCH_ARM64_KEXEC_BACKPORT=LINUX_V5.16_COHERENT_SERIES'
+  echo 'TICWATCH_ARM64_KEXEC_BACKPORT=LINUX_V5.16_COHERENT_SERIES_PLUS_RUNTIME_FIXES'
   echo "ORIGINAL_HEAD=$ORIGINAL_HEAD"
   echo "BASE_HEAD=$BASE_HEAD"
   echo "BASELINE_TRACKED_DIRTY=$BASELINE_TRACKED_DIRTY"
@@ -172,8 +220,15 @@ REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
   if [ "${#THREEWAY_COMMITS[@]}" -gt 0 ]; then printf 'THREEWAY_ADAPTED_COMMIT=%s\n' "${THREEWAY_COMMITS[@]}"; fi
   echo 'MMU_ENABLED_DURING_RELOCATION=YES'
   echo 'LEGACY_CPU_RESET_H_REMOVED=YES'
+  echo "KIMAGE_CLOBBER_UPSTREAM_FIX=$KIMAGE_CLOBBER_FIX"
+  echo 'KIMAGE_CLOBBER_FIX_STATUS=APPLIED_EXACT_UPSTREAM_PATCH'
+  echo 'TRANS_PGD_INVALID_PTE_UPSTREAM_REFERENCE=7eced90b202d63cdc1b9b11b1353adb1389830f9'
+  echo 'TRANS_PGD_INVALID_PTE_FIX_STATUS=APPLIED_V5.16_CONTEXT_EQUIVALENT'
+  echo 'TRANS_PGD_FIX_REASON=TICWATCH_CONFIG_KFENCE_Y_ACTIVE_SAMPLE_500MS'
+  echo 'FUNCTION_ALIGNMENT_PADDING_FIX_NEEDED=NO_CURRENT_CONFIG_FUNCTION_ALIGNMENT_0'
   echo 'CFI_CLANG_COPIED_RELOC_TRAMPOLINE_FIX=MACHINE_KEXEC_NOCFI'
   echo 'CFI_FIX_RUNTIME_EVIDENCE=PSTORE_20260914_154007_MACHINE_KEXEC_PLUS_0X124'
+  echo 'POST_CFI_RUNTIME_EVIDENCE=NO_FRESH_PANIC_RESCUE_NOT_REACHED_20260914_165332'
   echo 'BACKPORT_STRUCTURAL_GATES=PASS'
   echo
   git -C "$K" diff --cached --stat
