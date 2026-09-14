@@ -6,6 +6,7 @@ on:
     branches: [ticwatch-max-lts-220]
     paths:
       - '.github/workflows/ticwatch-kexec-arm64-mmu-reloc-candidate.yml'
+      - '.github/scripts/ticwatch-kexec-arm64-mmu-reloc-backport.sh'
 
 permissions:
   contents: read
