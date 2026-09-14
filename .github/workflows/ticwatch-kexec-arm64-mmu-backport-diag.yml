@@ -1,0 +1,67 @@
+name: TicWatch KEXEC ARM64 MMU Backport Diagnostic
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-max-lts-220]
+    paths:
+      - '.github/workflows/ticwatch-kexec-arm64-mmu-backport-diag.yml'
+      - '.github/scripts/ticwatch-kexec-arm64-mmu-reloc-backport.sh'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ticwatch-kexec-arm64-mmu-backport-diagnostic
+  cancel-in-progress: true
+
+env:
+  CHECKPOINT_RUN_ID: '34757911119'
+  CHECKPOINT_NAME: 'TicWatch-5.15.220-precompile-checkpoint'
+  EXPECTED_FINAL_CONFIG_SHA: '9e63ad86d97fa6d6ce1914efeb8035dafb9043819796f0784a1bdf10a2557b54'
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-220
+          fetch-depth: 1
+
+      - name: Restore exact verified precompile checkpoint
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y --no-install-recommends zstd >/dev/null
+          mkdir checkpoint
+          gh run download "$CHECKPOINT_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_NAME" --dir checkpoint
+          cp checkpoint/precompile-checkpoint.tar.zst .
+          cp checkpoint/precompile-checkpoint.sha256 .
+          sha256sum -c precompile-checkpoint.sha256
+          tar --zstd -xf precompile-checkpoint.tar.zst
+          test -d .ticwatch-preflight/common/.git
+          test -s final.config
+          echo "$EXPECTED_FINAL_CONFIG_SHA  final.config" | sha256sum -c -
+
+      - name: Reproduce ARM64 MMU relocation backport
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash .github/scripts/ticwatch-kexec-arm64-mmu-reloc-backport.sh .ticwatch-preflight/common
+
+      - name: Upload exact conflict state
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-KEXEC-ARM64-MMU-BACKPORT-DIAGNOSTIC
+          path: |
+            backport-failure/
+            kexec-arm64-mmu-reloc-backport.txt
+          if-no-files-found: warn
+          retention-days: 7
