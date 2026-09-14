@@ -24,13 +24,28 @@ SERIES=(
   6091dd9eaf8e77311548b616281c1a9c67e6ca40
 )
 
-# This step intentionally runs before TicWatch local KEXEC quirks/diagnostics.
-# Starting from a dirty source tree would make conflict results ambiguous.
-git -C "$K" diff --quiet || { echo 'kernel source has unstaged changes before ARM64 backport' >&2; exit 3; }
-git -C "$K" diff --cached --quiet || { echo 'kernel source has staged changes before ARM64 backport' >&2; exit 3; }
+# The verified precompile checkpoint intentionally contains tracked source
+# changes relative to its historical Git HEAD. Preserve that exact state as
+# an ephemeral local commit in the CI runner instead of resetting or stashing
+# it. This makes subsequent upstream cherry-pick conflicts unambiguous while
+# keeping every checkpoint byte used by the known-good build.
+ORIGINAL_HEAD="$(git -C "$K" rev-parse HEAD)"
+BASELINE_TRACKED_DIRTY=NO
+if ! git -C "$K" diff --quiet || ! git -C "$K" diff --cached --quiet; then
+  BASELINE_TRACKED_DIRTY=YES
+  git -C "$K" config user.name 'TicWatch CI Baseline Snapshot'
+  git -C "$K" config user.email 'ticwatch-ci-baseline@invalid.local'
+  git -C "$K" add -u
+  git -C "$K" commit -m 'ci: snapshot verified TicWatch precompile source state'
+fi
 
 BASE_HEAD="$(git -C "$K" rev-parse HEAD)"
+echo "TICWATCH_ARM64_MMU_RELOC_ORIGINAL_HEAD=$ORIGINAL_HEAD"
 echo "TICWATCH_ARM64_MMU_RELOC_BASE_HEAD=$BASE_HEAD"
+echo "TICWATCH_ARM64_MMU_RELOC_BASELINE_TRACKED_DIRTY=$BASELINE_TRACKED_DIRTY"
+
+git -C "$K" diff --quiet || { echo 'tracked unstaged changes remain after baseline snapshot' >&2; exit 3; }
+git -C "$K" diff --cached --quiet || { echo 'tracked staged changes remain after baseline snapshot' >&2; exit 3; }
 
 for sha in "${SERIES[@]}"; do
   if ! git -C "$K" cat-file -e "$sha^{commit}" 2>/dev/null; then
@@ -80,7 +95,9 @@ git -C "$K" diff --cached --check
 REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
 {
   echo 'TICWATCH_ARM64_KEXEC_BACKPORT=LINUX_V5.16_COHERENT_SERIES'
+  echo "ORIGINAL_HEAD=$ORIGINAL_HEAD"
   echo "BASE_HEAD=$BASE_HEAD"
+  echo "BASELINE_TRACKED_DIRTY=$BASELINE_TRACKED_DIRTY"
   echo "COMMIT_COUNT=${#SERIES[@]}"
   printf 'UPSTREAM_COMMIT=%s\n' "${SERIES[@]}"
   echo 'MMU_ENABLED_DURING_RELOCATION=YES'
