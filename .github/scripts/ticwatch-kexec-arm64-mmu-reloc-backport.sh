@@ -5,7 +5,7 @@ K="${1:?usage: $0 <kernel-tree>}"
 [ -d "$K/.git" ] || { echo "missing kernel git tree: $K" >&2; exit 2; }
 
 # Linux v5.16 ARM64 kexec relocation series, Pasha/Pavel Tatashin.
-# Apply as one coherent series: do not select individual commits.
+# Apply the exact 15 upstream commits as one coherent ordered series.
 SERIES=(
   094a3684b9b67758ccedf0e6068d90f22f2942d9
   788bfdd97434982b6d575062581e8e72eea755af
@@ -25,10 +25,8 @@ SERIES=(
 )
 
 # The verified precompile checkpoint intentionally contains tracked source
-# changes relative to its historical Git HEAD. Preserve that exact state as
-# an ephemeral local commit in the CI runner instead of resetting or stashing
-# it. This makes subsequent upstream cherry-pick conflicts unambiguous while
-# keeping every checkpoint byte used by the known-good build.
+# changes relative to its historical Git HEAD. Freeze that exact state in an
+# ephemeral runner-only commit; never reset/stash/drop checkpoint content.
 ORIGINAL_HEAD="$(git -C "$K" rev-parse HEAD)"
 BASELINE_TRACKED_DIRTY=NO
 if ! git -C "$K" diff --quiet || ! git -C "$K" diff --cached --quiet; then
@@ -47,60 +45,79 @@ echo "TICWATCH_ARM64_MMU_RELOC_BASELINE_TRACKED_DIRTY=$BASELINE_TRACKED_DIRTY"
 git -C "$K" diff --quiet || { echo 'tracked unstaged changes remain after baseline snapshot' >&2; exit 3; }
 git -C "$K" diff --cached --quiet || { echo 'tracked staged changes remain after baseline snapshot' >&2; exit 3; }
 
+WORK="${GITHUB_WORKSPACE:-$PWD}/arm64-kexec-upstream-patches"
+rm -rf "$WORK"
+mkdir -p "$WORK"
+
+# Fetch patch payloads, not Linux git trees. This avoids repeatedly downloading
+# large upstream object graphs while preserving the exact commit deltas.
 for sha in "${SERIES[@]}"; do
-  if ! git -C "$K" cat-file -e "$sha^{commit}" 2>/dev/null; then
-    echo "Fetching upstream ARM64 kexec commit $sha"
-    git -C "$K" fetch --no-tags --depth=2 https://github.com/torvalds/linux.git "$sha"
-  fi
+  url="https://github.com/torvalds/linux/commit/${sha}.patch"
+  echo "Downloading exact upstream patch $sha"
+  curl -fL --retry 3 --retry-delay 1 --connect-timeout 20 "$url" -o "$WORK/$sha.patch"
+  test -s "$WORK/$sha.patch"
+  grep -Fq "From $sha " "$WORK/$sha.patch" || {
+    echo "upstream patch identity mismatch: $sha" >&2
+    exit 19
+  }
 done
 
 capture_conflict() {
-  local sha="$1"
+  local sha="$1" patch="$2"
   local root="${GITHUB_WORKSPACE:-$PWD}/backport-failure"
   local path safe
   rm -rf "$root"
   mkdir -p "$root/files"
 
+  cp "$patch" "$root/failed-upstream.patch"
   {
     echo "ARM64_KEXEC_BACKPORT_CONFLICT_SHA=$sha"
     echo "ORIGINAL_HEAD=$ORIGINAL_HEAD"
     echo "BASE_HEAD=$BASE_HEAD"
     echo "BASELINE_TRACKED_DIRTY=$BASELINE_TRACKED_DIRTY"
     echo
-    echo 'STATUS_SHORT:'
+    echo 'STATUS_SHORT_BEFORE_REJECT:'
     git -C "$K" status --short || true
     echo
-    echo 'UNMERGED_PATHS:'
-    git -C "$K" diff --name-only --diff-filter=U || true
+    echo 'FAILED_PATCH_FILES:'
+    grep '^diff --git a/' "$patch" || true
     echo
-    echo 'UNMERGED_INDEX:'
-    git -C "$K" ls-files -u || true
+    echo 'GIT_APPLY_CHECK_VERBOSE:'
+    git -C "$K" apply --check --verbose --whitespace=nowarn "$patch" || true
     echo
-    echo 'COMBINED_CONFLICT_DIFF:'
-    git -C "$K" diff --cc || true
+    echo 'ALREADY_APPLIED_SERIES_INDEX_DIFF_STAT:'
+    git -C "$K" diff --cached --stat || true
   } > "$root/summary.txt" 2>&1
-
-  git -C "$K" show --format=fuller --stat "$sha" > "$root/upstream-commit-stat.txt" 2>&1 || true
-  git -C "$K" show --format=fuller --binary "$sha" > "$root/upstream-commit.patch" 2>&1 || true
-  git -C "$K" diff --cached --binary > "$root/index-after-failure.patch" 2>&1 || true
 
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     safe="$(printf '%s' "$path" | sha256sum | awk '{print $1}')"
     printf '%s\n' "$path" > "$root/files/$safe.path"
-    git -C "$K" ls-files -u -- "$path" > "$root/files/$safe.index" 2>&1 || true
-    git -C "$K" show ":1:$path" > "$root/files/$safe.base" 2>/dev/null || true
-    git -C "$K" show ":2:$path" > "$root/files/$safe.ours" 2>/dev/null || true
-    git -C "$K" show ":3:$path" > "$root/files/$safe.theirs" 2>/dev/null || true
-  done < <(git -C "$K" diff --name-only --diff-filter=U)
+    if [ -e "$K/$path" ]; then
+      cp "$K/$path" "$root/files/$safe.vendor-before"
+    fi
+  done < <(sed -n 's#^diff --git a/\(.*\) b/.*#\1#p' "$patch" | sort -u)
+
+  # Generate .rej hunks only after preserving the pristine vendor-side files.
+  find "$K" -type f -name '*.rej' -delete 2>/dev/null || true
+  git -C "$K" apply --reject --whitespace=nowarn "$patch" > "$root/reject-apply.txt" 2>&1 || true
+  while IFS= read -r rej; do
+    [ -n "$rej" ] || continue
+    path="${rej#"$K"/}"
+    safe="$(printf '%s' "$path" | sha256sum | awk '{print $1}')"
+    printf '%s\n' "$path" > "$root/files/$safe.reject-path"
+    cp "$rej" "$root/files/$safe.rej"
+  done < <(find "$K" -type f -name '*.rej' -print | sort)
 
   cat "$root/summary.txt" >&2
+  cat "$root/reject-apply.txt" >&2 || true
 }
 
 for sha in "${SERIES[@]}"; do
+  patch="$WORK/$sha.patch"
   echo "Applying upstream ARM64 kexec commit $sha"
-  if ! git -C "$K" cherry-pick -n "$sha"; then
-    capture_conflict "$sha"
+  if ! git -C "$K" apply --index --whitespace=nowarn "$patch"; then
+    capture_conflict "$sha" "$patch"
     exit 20
   fi
 done
@@ -140,6 +157,7 @@ REPORT="${GITHUB_WORKSPACE:-$PWD}/kexec-arm64-mmu-reloc-backport.txt"
   echo "BASELINE_TRACKED_DIRTY=$BASELINE_TRACKED_DIRTY"
   echo "COMMIT_COUNT=${#SERIES[@]}"
   printf 'UPSTREAM_COMMIT=%s\n' "${SERIES[@]}"
+  echo 'PATCH_SOURCE=EXACT_GITHUB_COMMIT_PATCH'
   echo 'MMU_ENABLED_DURING_RELOCATION=YES'
   echo 'LEGACY_CPU_RESET_H_REMOVED=YES'
   echo 'BACKPORT_STRUCTURAL_GATES=PASS'
