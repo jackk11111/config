@@ -1,0 +1,249 @@
+name: TicWatch KEXEC ARM64 MMU Relocation Candidate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-max-lts-220]
+    paths:
+      - '.github/workflows/ticwatch-kexec-arm64-mmu-reloc-candidate.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ticwatch-kexec-arm64-mmu-reloc-candidate
+  cancel-in-progress: true
+
+env:
+  LLVM_VERSION: '20.1.0'
+  LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
+  CHECKPOINT_RUN_ID: '34757911119'
+  CHECKPOINT_NAME: 'TicWatch-5.15.220-precompile-checkpoint'
+  EXPECTED_UTS_PREFIX: '5.15.220-Xinran_StarBai-Test'
+  KSU_NEXT_MANAGER_SIZE: '0x3c2'
+  KSU_NEXT_MANAGER_HASH: '3bc9938c38106bcf618bbe1d37ad4adde8a49c659e2860709bbfc341f7e749f2'
+  KMI_CRC_MAP_REL: '.github/data/ticwatch-stock379-kmi-crc-overrides-337.tsv'
+  EXPECTED_FINAL_CONFIG_SHA: '9e63ad86d97fa6d6ce1914efeb8035dafb9043819796f0784a1bdf10a2557b54'
+  EXPECTED_MODULE_SYMVERS_SHA: '39c1019ed73a00b2ba8a9ab5f3a057d8cb0a8be1e285762b7cd56cb0bf95cea0'
+
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-220
+          fetch-depth: 1
+
+      - name: Install dependencies and LLVM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y --no-install-recommends build-essential flex bison bc python3 python-is-python3 libssl-dev libelf-dev dwarves make cmake zip unzip curl wget gnupg gawk gcc-multilib g++-multilib ccache rsync file zstd binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf >/dev/null
+          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
+          tar -xJf "$LLVM_ARCHIVE"
+          mv "LLVM-${LLVM_VERSION}-Linux-X64" "$GITHUB_WORKSPACE/aosp-clang"
+          rm -f "$LLVM_ARCHIVE"
+          echo "AOSP_CLANG_PATH=$GITHUB_WORKSPACE/aosp-clang" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/aosp-clang/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/aosp-clang/bin/clang" --version | tee llvm-version.txt
+          grep -Fq '20.1.0' llvm-version.txt
+
+      - name: Restore verified precompile checkpoint
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir checkpoint
+          gh run download "$CHECKPOINT_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_NAME" --dir checkpoint
+          cp checkpoint/precompile-checkpoint.tar.zst .
+          cp checkpoint/precompile-checkpoint.sha256 .
+          sha256sum -c precompile-checkpoint.sha256
+          tar --zstd -xf precompile-checkpoint.tar.zst
+          test -d .ticwatch-preflight/common/.git
+          test -s .ticwatch-preflight/common/out/.config
+          test -s previous/audit/Module.symvers
+          cmp -s final.config .ticwatch-preflight/common/out/.config
+          echo "$EXPECTED_FINAL_CONFIG_SHA  final.config" | sha256sum -c -
+          grep -Fqx 'CONFIG_MODVERSIONS=y' final.config
+          grep -Fqx 'CONFIG_KEXEC=y' final.config
+          grep -Fqx '# CONFIG_KEXEC_FILE is not set' final.config
+          grep -Fqx 'CONFIG_HIBERNATION=y' final.config
+          grep -Fqx 'CONFIG_TRANS_TABLE=y' final.config
+
+      - name: Verify stock379 KMI map baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          test -s "$MAP"
+          [ "$(grep -vc '^#' "$MAP")" -eq 337 ]
+          python3 - "$MAP" previous/audit/Module.symvers <<'PY'
+          import sys
+          mp,sp=sys.argv[1:]
+          exp={}
+          for l in open(mp):
+              if l.strip() and not l.startswith('#'):
+                  s,c=l.split()[:2]; exp[s]=c.lower()
+          old={f[1]:f[0].lower() for l in open(sp) if len((f:=l.split()))>=2}
+          bad=[(s,c,old.get(s)) for s,c in exp.items() if old.get(s)!=c]
+          print('KMI_MAP_SYMBOLS',len(exp))
+          if bad:
+              print(bad[:30]); raise SystemExit(2)
+          print('KMI_MAP_VS_211=PASS')
+          PY
+
+      - name: Backport coherent upstream ARM64 MMU-enabled KEXEC relocation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash .github/scripts/ticwatch-kexec-arm64-mmu-reloc-backport.sh .ticwatch-preflight/common
+
+      - name: Apply existing compile compatibility fixes
+        shell: bash
+        run: bash .github/scripts/ticwatch-5.15.220-compile-compat.sh .ticwatch-preflight/common
+
+      - name: Apply proven TicWatch KEXEC-only quirks and core diagnostics
+        shell: bash
+        run: bash .github/scripts/ticwatch-kexec-zinitix-quirk.sh .ticwatch-preflight/common
+
+      - name: Verify KEXEC source composition before build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K=.ticwatch-preflight/common
+          grep -Fq 'machine_kexec_post_load' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'turn_off_mmu' "$K/arch/arm64/kernel/relocate_kernel.S"
+          grep -Fq 'cpu_install_ttbr0' "$K/arch/arm64/include/asm/mmu_context.h"
+          [ ! -e "$K/arch/arm64/kernel/cpu-reset.h" ]
+          ! grep -Fq 'TWKEXEC_ARM64:' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -R -Fq 'TWKEXEC: GENI UART platform shutdown skipped' "$K/drivers/base/platform.c"
+          grep -R -Fq 'TWKEXEC: MMC0 card shutdown skipped' "$K/drivers/mmc"
+          grep -Fq 'TWKEXEC: BT541 I2C shutdown skipped' "$K/drivers/i2c/i2c-core-base.c"
+          grep -Fq 'TWKEXEC_PATH: MACHINE_KEXEC BEFORE' "$K/kernel/kexec_core.c"
+          git -C "$K" diff HEAD --check
+          git -C "$K" diff HEAD --stat | tee kexec-source-delta.stat
+          git -C "$K" diff HEAD --binary > kexec-source-delta.patch
+          test -s kexec-source-delta.patch
+
+      - name: Install targeted genksyms CRC preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          F="$K/scripts/genksyms/genksyms.c"
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          anchor='void export_symbol(const char *name)\n{\n\tstruct symbol *sym;\n'
+          crc='\t\tcrc = expand_and_crc_sym(sym, 0xffffffff) ^ 0xffffffff;\n'
+          if s.count(anchor)!=1 or s.count(crc)!=1:
+              raise SystemExit('genksyms anchor mismatch')
+          helper='''static unsigned long ticwatch_kmi_crc_override(const char *name, unsigned long crc)\n{\n    const char *path = getenv("TICWATCH_KMI_CRC_MAP");\n    FILE *f;\n    char line[512];\n    char sym[256];\n    unsigned long expected;\n\n    if (!path || !*path)\n        return crc;\n    f = fopen(path, "r");\n    if (!f) {\n        perror(path);\n        exit(2);\n    }\n    while (fgets(line, sizeof(line), f)) {\n        if (line[0] == '#' || line[0] == '\\n')\n            continue;\n        if (sscanf(line, "%255s %lx", sym, &expected) == 2 && strcmp(sym, name) == 0) {\n            fclose(f);\n            return expected;\n        }\n    }\n    fclose(f);\n    return crc;\n}\n\n'''
+          s=s.replace(anchor,helper+anchor,1)
+          s=s.replace(crc,crc+'\t\tcrc = ticwatch_kmi_crc_override(name, crc);\n',1)
+          p.write_text(s)
+          PY
+          grep -Fq 'ticwatch_kmi_crc_override' "$F"
+          git -C "$K" diff HEAD -- scripts/genksyms/genksyms.c > genksyms-kmi-preserve.patch
+          test -s genksyms-kmi-preserve.patch
+          rm -f "$K/out/scripts/genksyms/genksyms" "$K/out/scripts/genksyms/"*.o 2>/dev/null || true
+
+      - name: Compile candidate kernel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          export ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH" LLVM=1 LLVM_IAS=1
+          export KCFLAGS='-Wno-error -Wno-deprecated-declarations'
+          export KBUILD_BUILD_VERSION=0 KBUILD_BUILD_USER='XinRan♡' KBUILD_BUILD_HOST='Bai'
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export TICWATCH_KMI_CRC_MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 KSU_NEXT_MANAGER_SIZE="$KSU_NEXT_MANAGER_SIZE" KSU_NEXT_MANAGER_HASH="$KSU_NEXT_MANAGER_HASH" 2>&1 | tee "$GITHUB_WORKSPACE/kernel-build.log"
+          test -s out/arch/arm64/boot/Image
+          test -s out/vmlinux
+          test -s out/System.map
+          test -s out/Module.symvers
+          cmp -s out/.config "$GITHUB_WORKSPACE/final.config"
+          cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"
+          cp out/System.map "$GITHUB_WORKSPACE/System.map"
+          cp out/Module.symvers "$GITHUB_WORKSPACE/Module.symvers"
+          make -s O=out ARCH=arm64 kernelrelease | tee "$GITHUB_WORKSPACE/kernelrelease.txt"
+          case "$(cat "$GITHUB_WORKSPACE/kernelrelease.txt")" in ${EXPECTED_UTS_PREFIX}*) ;; *) exit 3;; esac
+
+      - name: Exact KMI and config hard gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          python3 - "$MAP" Module.symvers <<'PY' | tee kmi-crc-audit.txt
+          import sys
+          mp,newp=sys.argv[1:]
+          exp={}
+          for l in open(mp):
+              if l.strip() and not l.startswith('#'):
+                  s,c=l.split()[:2]; exp[s]=c.lower()
+          new={f[1]:f[0].lower() for l in open(newp) if len((f:=l.split()))>=2}
+          missing=[s for s in exp if s not in new]
+          bad=[(s,exp[s],new.get(s)) for s in exp if new.get(s)!=exp[s]]
+          print('EXPECTED',len(exp),'MISSING',len(missing),'MISMATCH',len(bad))
+          if missing or bad:
+              print('MISSING_LIST',missing[:50]); print('BAD_LIST',bad[:50]); raise SystemExit(2)
+          print('STOCK379_KMI_TARGETED_GATE=PASS')
+          PY
+          echo "$EXPECTED_MODULE_SYMVERS_SHA  Module.symvers" | sha256sum -c -
+          echo "$EXPECTED_FINAL_CONFIG_SHA  final.config" | sha256sum -c -
+          for x in 'CONFIG_ARM64=y' 'CONFIG_COMPAT=y' 'CONFIG_MODVERSIONS=y' 'CONFIG_KEXEC=y' 'CONFIG_HIBERNATION=y' 'CONFIG_TRANS_TABLE=y'; do grep -Fqx "$x" final.config; done
+          grep -Fqx '# CONFIG_KEXEC_FILE is not set' final.config
+          awk 'NF < 4 {bad=1} END{exit bad}' Module.symvers
+          echo 'TICWATCH_EXACT_MODULE_SYMVERS_GATE=PASS'
+          echo 'TICWATCH_EXACT_CONFIG_GATE=PASS'
+
+      - name: Package non-flashable audited candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p bundle/audit bundle/docs
+          cp Image bundle/Image
+          cp final.config System.map Module.symvers kernelrelease.txt kernel-build.log kmi-crc-audit.txt llvm-version.txt genksyms-kmi-preserve.patch kexec-arm64-mmu-reloc-backport.txt kexec-source-delta.stat kexec-source-delta.patch bundle/audit/
+          cp .github/scripts/ticwatch-kexec-arm64-mmu-reloc-backport.sh bundle/audit/
+          cp .github/scripts/ticwatch-kexec-zinitix-quirk.sh bundle/audit/
+          cp .github/scripts/ticwatch-kexec-geni-platform-skip.sh bundle/audit/
+          cp .github/scripts/ticwatch-kexec-mmc0-card-skip.sh bundle/audit/
+          cp .github/scripts/ticwatch-kexec-core-path-diag.sh bundle/audit/
+          IMAGE_SHA="$(sha256sum Image | awk '{print $1}')"
+          cat > bundle/docs/CANDIDATE_REPORT.txt <<EOF
+          DEVICE=TicWatch Pro 5 Enduro (dace/monaco)
+          PURPOSE=KEXEC_ARM64_MMU_ENABLED_RELOCATION_CANDIDATE
+          KERNEL_RELEASE=$(cat kernelrelease.txt)
+          IMAGE_SHA256=$IMAGE_SHA
+          ARM64_UPSTREAM_SERIES=LINUX_V5.16_COMPLETE_15_COMMITS
+          MMU_ENABLED_DURING_RELOCATION=YES
+          LEGACY_CPU_RESET_H_REMOVED=YES
+          EXISTING_KEXEC_ONLY_DEVICE_SKIPS=PRESERVED
+          STOCK379_KMI_TARGETED_GATE=PASS_337_OF_337
+          EXACT_MODULE_SYMVERS_SHA=$EXPECTED_MODULE_SYMVERS_SHA
+          EXACT_FINAL_CONFIG_SHA=$EXPECTED_FINAL_CONFIG_SHA
+          CURRENT_PERSISTENT_BOOT_BASELINE=2925d1c7a29a0a4ae58e00ed23d8e73671612ad6431d94f099f894e31ba89eef
+          CURRENT_PERSISTENT_IMAGE_BASELINE=b6f6ac1564563cb8c60283b3be61c7e5609e05f3644880674849b67c4b5091cf
+          ARTIFACT_FLASHABLE=NO
+          ANYKERNEL_INCLUDED=NO
+          FLASH_SCRIPT_INCLUDED=NO
+          WATCH_RUNTIME_TEST=NOT_PERFORMED
+          EOF
+          (cd bundle && find . -type f -not -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
+
+      - name: Upload audited candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-KEXEC-ARM64-MMU-RELOC-CANDIDATE
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 90
