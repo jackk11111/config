@@ -3,11 +3,12 @@
 
 This is not a replacement for Google's checkvintf binary. It validates the exact
 hard HIDL requirements already extracted from stock379 plus the deliberate
-DisplayOffload/WristOrientation first-bringup policy on the staged trees.
+DisplayOffload/WristOrientation policy for the ACTIVE Wear FCM level 7.
 """
 from __future__ import annotations
 
 import argparse
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -19,6 +20,7 @@ REQUIRED = {
     ("android.hidl.token", "1.0", "ITokenManager", "default"),
     ("android.system.wifi.keystore", "1.0", "IKeystore", "default"),
 }
+FQ = re.compile(r"^@(\d+)\.(\d+)::([^/]+)/(.+)$")
 
 
 def lname(tag: str) -> str:
@@ -42,12 +44,21 @@ def manifest_instances(paths: list[Path]) -> set[tuple[str, str, str, str]]:
         if lname(root.tag) != "manifest":
             continue
         for hal in root.iter():
-            if lname(hal.tag) != "hal":
+            if lname(hal.tag) != "hal" or hal.attrib.get("format", "hidl") != "hidl":
                 continue
             name = next(((n.text or "").strip() for n in hal if lname(n.tag) == "name"), "")
+
+            # Modern framework manifests normally use <fqname>@1.x::I/instance</fqname>.
+            for node in hal:
+                if lname(node.tag) != "fqname":
+                    continue
+                m = FQ.match((node.text or "").strip())
+                if m:
+                    major, minor, iface, instance = m.groups()
+                    got.add((name, f"{major}.{minor}", iface, instance))
+
+            # Keep support for the older structured <version>/<interface> encoding.
             versions = [(n.text or "").strip() for n in hal if lname(n.tag) == "version"]
-            if not versions:
-                versions = [""]
             for iface in hal:
                 if lname(iface.tag) != "interface":
                     continue
@@ -59,19 +70,33 @@ def manifest_instances(paths: list[Path]) -> set[tuple[str, str, str, str]]:
     return got
 
 
-def matrix_hal_names(paths: list[Path]) -> list[tuple[Path, str, list[str]]]:
+def version_satisfies(provided: str, required: str) -> bool:
+    try:
+        pmaj, pmin = map(int, provided.split(".", 1))
+        rmaj, rmin = map(int, required.split(".", 1))
+    except ValueError:
+        return provided == required
+    return pmaj == rmaj and pmin >= rmin
+
+
+def contract_present(instances: set[tuple[str, str, str, str]], req: tuple[str, str, str, str]) -> bool:
+    rn, rv, ri, rx = req
+    return any(n == rn and i == ri and x == rx and version_satisfies(v, rv)
+               for n, v, i, x in instances)
+
+
+def matrix_hal_names(path: Path) -> list[tuple[str, list[str]]]:
+    root = ET.parse(path).getroot()
+    if lname(root.tag) != "compatibility-matrix":
+        raise RuntimeError(f"not a compatibility matrix: {path}")
     rows = []
-    for p in paths:
-        root = ET.parse(p).getroot()
-        if lname(root.tag) != "compatibility-matrix":
+    for hal in root.iter():
+        if lname(hal.tag) != "hal":
             continue
-        for hal in root.iter():
-            if lname(hal.tag) != "hal":
-                continue
-            names = [(n.text or "").strip() for n in hal if lname(n.tag) == "name"]
-            instances = [(n.text or "").strip() for n in hal.iter() if lname(n.tag) == "instance"]
-            for name in names:
-                rows.append((p, name, instances))
+        names = [(n.text or "").strip() for n in hal if lname(n.tag) == "name"]
+        instances = [(n.text or "").strip() for n in hal.iter() if lname(n.tag) == "instance"]
+        for name in names:
+            rows.append((name, instances))
     return rows
 
 
@@ -89,22 +114,23 @@ def main() -> int:
         xml_files(prod, "etc/vintf")
     )
     instances = manifest_instances(framework_manifests)
-    missing = sorted(REQUIRED - instances)
+    missing = sorted(req for req in REQUIRED if not contract_present(instances, req))
     if missing:
         raise RuntimeError("missing frozen vendor HIDL contracts: " + repr(missing))
 
-    framework_matrices = (
-        xml_files(s, "system/etc/vintf") +
-        xml_files(sx, "etc/vintf") +
-        xml_files(prod, "etc/vintf")
-    )
-    rows = matrix_hal_names(framework_matrices)
-    display = [(str(p), inst) for p, name, inst in rows if name == "vendor.google_clockwork.displayoffload"]
+    # Stock dace advertises target-level 7. Only the deliberately selected Wear
+    # FCM7 file is patched for first bringup; later FCM8/yearly matrices are kept
+    # intact and are not treated as the active target contract.
+    fcm7 = s / "system/etc/vintf/wear_compatibility_matrix.7.xml"
+    if not fcm7.is_file():
+        raise RuntimeError("active Wear FCM7 matrix missing")
+    rows = matrix_hal_names(fcm7)
+    display = [inst for name, inst in rows if name == "vendor.google_clockwork.displayoffload"]
     if display:
-        raise RuntimeError(f"Pixel DisplayOffload requirement remains: {display}")
-    wrist = [(str(p), inst) for p, name, inst in rows if name == "vendor.google_clockwork.wristorientation"]
-    if not wrist or not any("default" in inst for _, inst in wrist):
-        raise RuntimeError("wristorientation/default requirement is not retained")
+        raise RuntimeError(f"Pixel DisplayOffload remains in active Wear FCM7: {display}")
+    wrist = [inst for name, inst in rows if name == "vendor.google_clockwork.wristorientation"]
+    if not wrist or not any("default" in inst for inst in wrist):
+        raise RuntimeError("wristorientation/default is not retained in active Wear FCM7")
 
     forbidden = [
         sx / "etc/permissions/display_offload_feature.xml",
@@ -138,12 +164,14 @@ def main() -> int:
         "VINTF_STATIC_EXACT_CONTRACT=PASS",
         "OFFICIAL_CHECKVINTF_HOST=UNAVAILABLE_IN_PINNED_TOOLSET",
         "FROZEN_VENDOR_HIDL=6/6",
-        "PIXEL_DISPLAYOFFLOAD_REQUIREMENT=ABSENT",
-        "WRISTORIENTATION_DEFAULT=RETAINED",
+        "ACTIVE_WEAR_FCM=7",
+        "PIXEL_DISPLAYOFFLOAD_REQUIREMENT_ACTIVE_FCM7=ABSENT",
+        "WRISTORIENTATION_DEFAULT_ACTIVE_FCM7=RETAINED",
         "STOCK_FSTAB_DACE=PASS",
     ]
-    for x in sorted(REQUIRED):
-        lines.append("HIDL " + "@".join((x[0], x[1])) + f"::{x[2]}/{x[3]} PASS")
+    for req in sorted(REQUIRED):
+        candidates = sorted(x for x in instances if x[0] == req[0] and x[2:] == req[2:] and version_satisfies(x[1], req[1]))
+        lines.append(f"HIDL_REQUIRED {req[0]}@{req[1]}::{req[2]}/{req[3]} PROVIDED={candidates} PASS")
     for p, level in vendor_levels:
         lines.append(f"VENDOR_TARGET_LEVEL {p}={level}")
     if a.report:
