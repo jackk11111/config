@@ -25,8 +25,12 @@ def main() -> int:
     root = os.path.abspath(root)
     rows = []
 
+    # AOSP canned_fs_config represents the filesystem root as '/'.
+    # The loader strips that leading slash, producing the empty lookup key
+    # requested by e2fsdroid for the root inode. Non-root entries retain the
+    # logical partition prefix used with e2fsdroid -a (for example system_ext/...).
     root_st = os.lstat(root)
-    rows.append((prefix, root_st, capmask(root)))
+    rows.append(("/", root_st, capmask(root)))
 
     for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
         for name in dirs + files:
