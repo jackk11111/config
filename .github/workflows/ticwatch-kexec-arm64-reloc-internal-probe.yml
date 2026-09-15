@@ -136,7 +136,7 @@ jobs:
             exit 32
           fi
           check_marker 'TWKEXEC: GENI UART platform shutdown skipped' "$K/drivers/base/platform.c"
-          check_marker 'TWKEXEC: MMC0 card shutdown skipped' "$K/drivers/mmc/core/core.c"
+          check_marker 'TWKEXEC: MMC0 card shutdown skipped' "$K/drivers/mmc/core/bus.c"
           check_marker 'TWKEXEC: BT541 I2C shutdown skipped' "$K/drivers/i2c/i2c-core-base.c"
           check_marker 'TWKEXEC_PATH: MACHINE_KEXEC BEFORE' "$K/kernel/kexec_core.c"
 
