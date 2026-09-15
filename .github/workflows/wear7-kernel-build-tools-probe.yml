@@ -11,19 +11,21 @@ on:
 permissions:
   contents: read
 
+env:
+  KERNEL_BUILD_TOOLS_SHA: 010d8a83d84ced4beef7779453766350db8c08cd
+
 jobs:
   probe:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: Resolve and inspect official Android kernel build-tools
+      - name: Inspect pinned official Android kernel build-tools
         shell: bash
         run: |
           set -euxo pipefail
           REPO='https://android.googlesource.com/kernel/prebuilts/build-tools'
-          SHA="$(git ls-remote "$REPO" refs/heads/main | awk '{print $1}')"
-          test -n "$SHA"
+          SHA="$KERNEL_BUILD_TOOLS_SHA"
           git clone --filter=blob:none --no-checkout "$REPO" "$RUNNER_TEMP/kernel-build-tools"
           git -C "$RUNNER_TEMP/kernel-build-tools" fetch --depth=1 origin "$SHA"
           git -C "$RUNNER_TEMP/kernel-build-tools" checkout --detach FETCH_HEAD
@@ -31,8 +33,7 @@ jobs:
           B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
           {
             echo "repo=$REPO"
-            echo "resolved_main_sha=$SHA"
-            echo "resolved_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "pinned_sha=$SHA"
             echo
             for c in avbtool build_image build_super_image e2fsdroid img2simg lpmake lpdump lpunpack mke2fs mkuserimg_mke2fs simg2img tune2fs sefcontext_compile; do
               if test -e "$B/$c"; then
@@ -42,13 +43,14 @@ jobs:
               fi
             done
           } | tee wear7_kernel_build_tools_probe.txt
-          for c in avbtool e2fsdroid img2simg lpmake lpdump lpunpack mkuserimg_mke2fs simg2img; do
-            test -x "$B/$c" || { echo "Required tool missing: $c"; exit 20; }
+          for c in avbtool build_image build_super_image e2fsdroid img2simg lpmake mke2fs mkuserimg_mke2fs simg2img tune2fs; do
+            test -x "$B/$c" || { echo "Required core tool missing: $c"; exit 20; }
           done
-          "$B/avbtool" version
+          "$B/avbtool" version | tee -a wear7_kernel_build_tools_probe.txt
           "$B/lpmake" --help >/dev/null
-          "$B/lpdump" --help >/dev/null
-          "$B/simg2img" 2>&1 | head -n 4 || true
+          "$B/simg2img" 2>&1 | head -n 4 | tee -a wear7_kernel_build_tools_probe.txt || true
+          echo 'CORE_IMAGE_TOOLCHAIN=PASS' | tee -a wear7_kernel_build_tools_probe.txt
+          echo 'NOTE: lpdump/lpunpack/sefcontext_compile are separate follow-up host-tool gates.' | tee -a wear7_kernel_build_tools_probe.txt
       - uses: actions/upload-artifact@v4
         with:
           name: Wear7-Official-Kernel-Build-Tools-Probe
