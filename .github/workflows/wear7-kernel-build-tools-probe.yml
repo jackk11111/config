@@ -1,0 +1,56 @@
+name: Wear7 official kernel build-tools probe
+
+on:
+  push:
+    branches: [wear7-rom-staging]
+    paths:
+      - '.github/workflows/wear7-kernel-build-tools-probe.yml'
+      - 'wear7/TRIGGER_KERNEL_BUILD_TOOLS_PROBE'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve and inspect official Android kernel build-tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          REPO='https://android.googlesource.com/kernel/prebuilts/build-tools'
+          SHA="$(git ls-remote "$REPO" refs/heads/main | awk '{print $1}')"
+          test -n "$SHA"
+          git clone --filter=blob:none --no-checkout "$REPO" "$RUNNER_TEMP/kernel-build-tools"
+          git -C "$RUNNER_TEMP/kernel-build-tools" fetch --depth=1 origin "$SHA"
+          git -C "$RUNNER_TEMP/kernel-build-tools" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/kernel-build-tools" rev-parse HEAD)" = "$SHA"
+          B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
+          {
+            echo "repo=$REPO"
+            echo "resolved_main_sha=$SHA"
+            echo "resolved_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            for c in avbtool build_image build_super_image e2fsdroid img2simg lpmake lpdump lpunpack mke2fs mkuserimg_mke2fs simg2img tune2fs sefcontext_compile; do
+              if test -e "$B/$c"; then
+                printf '%-24s PRESENT sha256=%s\n' "$c" "$(sha256sum "$B/$c" | awk '{print $1}')"
+              else
+                printf '%-24s MISSING\n' "$c"
+              fi
+            done
+          } | tee wear7_kernel_build_tools_probe.txt
+          for c in avbtool e2fsdroid img2simg lpmake lpdump lpunpack mkuserimg_mke2fs simg2img; do
+            test -x "$B/$c" || { echo "Required tool missing: $c"; exit 20; }
+          done
+          "$B/avbtool" version
+          "$B/lpmake" --help >/dev/null
+          "$B/lpdump" --help >/dev/null
+          "$B/simg2img" 2>&1 | head -n 4 || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-Official-Kernel-Build-Tools-Probe
+          path: wear7_kernel_build_tools_probe.txt
+          retention-days: 30
