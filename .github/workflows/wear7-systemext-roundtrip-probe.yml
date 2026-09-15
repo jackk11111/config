@@ -1,0 +1,210 @@
+name: Wear7 system_ext metadata-safe rebuild probe
+
+on:
+  push:
+    branches: [wear7-rom-staging]
+    paths:
+      - '.github/workflows/wear7-systemext-roundtrip-probe.yml'
+      - 'wear7/TRIGGER_SYSTEMEXT_ROUNDTRIP'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PIXEL_FILE: solios-cp2a.260603.001.s1-factory-d203665c.zip
+  PIXEL_SHA256: d203665c90bc06bf175dbb3cbd7fcc9d212c056a030f9c51b541129e8651fb7d
+  KERNEL_BUILD_TOOLS_SHA: 010d8a83d84ced4beef7779453766350db8c08cd
+
+jobs:
+  roundtrip:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install host helpers
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y curl unzip e2fsprogs android-sdk-libsparse-utils attr libcap2-bin
+
+      - name: Pin official Android filesystem tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          REPO='https://android.googlesource.com/kernel/prebuilts/build-tools'
+          git clone --filter=blob:none --no-checkout "$REPO" "$RUNNER_TEMP/kernel-build-tools"
+          git -C "$RUNNER_TEMP/kernel-build-tools" fetch --depth=1 origin "$KERNEL_BUILD_TOOLS_SHA"
+          git -C "$RUNNER_TEMP/kernel-build-tools" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/kernel-build-tools" rev-parse HEAD)" = "$KERNEL_BUILD_TOOLS_SHA"
+          B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
+          for c in mkuserimg_mke2fs mke2fs e2fsdroid simg2img tune2fs; do
+            test -x "$B/$c" || { echo "missing pinned tool: $c"; exit 20; }
+          done
+          echo "$B" >> "$GITHUB_PATH"
+
+      - name: Download exact donor and extract system_ext
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/src" "$RUNNER_TEMP/work" wear7-systemext-roundtrip-report
+          cd "$RUNNER_TEMP/src"
+          curl -fL --retry 3 --retry-delay 3 -o "$PIXEL_FILE" "https://dl.google.com/dl/android/aosp/$PIXEL_FILE"
+          echo "$PIXEL_SHA256  $PIXEL_FILE" | sha256sum -c -
+          FACTORY="$RUNNER_TEMP/src/$PIXEL_FILE"
+          nested=$(unzip -Z1 "$FACTORY" | grep -E '(^|/)image-[^/]+\.zip$' | head -n1)
+          test -n "$nested"
+          unzip -p "$FACTORY" "$nested" > "$RUNNER_TEMP/work/inner.zip"
+          unzip -p "$RUNNER_TEMP/work/inner.zip" system_ext.img > "$RUNNER_TEMP/work/system_ext.input"
+          magic=$(od -An -tx4 -N4 "$RUNNER_TEMP/work/system_ext.input" | tr -d ' \n')
+          if test "$magic" = ed26ff3a; then
+            simg2img "$RUNNER_TEMP/work/system_ext.input" "$RUNNER_TEMP/work/system_ext.donor.raw"
+            rm -f "$RUNNER_TEMP/work/system_ext.input"
+          else
+            mv "$RUNNER_TEMP/work/system_ext.input" "$RUNNER_TEMP/work/system_ext.donor.raw"
+          fi
+          avbtool erase_footer --image "$RUNNER_TEMP/work/system_ext.donor.raw"
+          test "$(stat -c %s "$RUNNER_TEMP/work/system_ext.donor.raw")" = 233267200
+          e2fsck -fn "$RUNNER_TEMP/work/system_ext.donor.raw" > wear7-systemext-roundtrip-report/donor_e2fsck.txt 2>&1 || rc=$?
+          rc=${rc:-0}; test "$rc" -lt 8; unset rc
+
+      - name: Mount donor read-only and create exact fs_config
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          OUT="$GITHUB_WORKSPACE/wear7-systemext-roundtrip-report"
+          sudo mkdir -p "$WORK/donor-mnt" "$WORK/stage"
+          sudo mount -o loop,ro "$WORK/system_ext.donor.raw" "$WORK/donor-mnt"
+          sudo cp -a "$WORK/donor-mnt/." "$WORK/stage/"
+          sudo chown -R "$(id -u):$(id -g)" "$WORK/stage"
+
+          sudo python3 - "$WORK/donor-mnt" "$WORK/system_ext.fs_config" <<'PY'
+import os, stat, struct, sys
+root, out = sys.argv[1:]
+
+def capmask(path):
+    try:
+        b=os.getxattr(path,'security.capability',follow_symlinks=False)
+    except OSError:
+        return 0
+    if len(b) < 12:
+        return 0
+    p0=struct.unpack_from('<I',b,4)[0]
+    p1=struct.unpack_from('<I',b,12)[0] if len(b) >= 20 else 0
+    return p0 | (p1 << 32)
+rows=[]
+for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
+    names=['.'] if base == root else []
+    names += dirs + files
+    for name in names:
+        path = base if name=='.' else os.path.join(base,name)
+        rel=os.path.relpath(path,root)
+        logical='system_ext' if rel=='.' else 'system_ext/'+rel
+        st=os.lstat(path)
+        mode=stat.S_IMODE(st.st_mode)
+        cap=capmask(path)
+        extra=f' capabilities=0x{cap:x}' if cap else ''
+        rows.append((logical,f'{logical} {st.st_uid} {st.st_gid} {mode:04o}{extra}'))
+with open(out,'w') as f:
+    for _,line in sorted(rows): f.write(line+'\n')
+PY
+          sudo cp "$WORK/donor-mnt/etc/selinux/system_ext_file_contexts" "$WORK/system_ext_file_contexts"
+          sudo chmod 0644 "$WORK/system_ext.fs_config" "$WORK/system_ext_file_contexts"
+          sudo umount "$WORK/donor-mnt"
+          sha256sum "$WORK/system_ext.fs_config" "$WORK/system_ext_file_contexts" | tee "$OUT/rebuild_inputs_sha256.txt"
+
+      - name: Rebuild unmodified system_ext with Android tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          OUT="$GITHUB_WORKSPACE/wear7-systemext-roundtrip-report"
+          UUID='b929aaa8-0d20-509e-a9c9-aea96b9f297e'
+          HASHSEED='f53efb2c-9e4d-5005-9a00-622fedc36d54'
+          SIZE=233267200
+          mkuserimg_mke2fs \
+            "$WORK/stage" "$WORK/system_ext.rebuilt.raw" ext4 /system_ext "$SIZE" \
+            -j 0 -T 1230768000 -C "$WORK/system_ext.fs_config" -L system_ext \
+            -i 640 -I 256 -M 0 -U "$UUID" -S "$HASHSEED" -c \
+            "$WORK/system_ext_file_contexts" \
+            | tee "$OUT/mkuserimg_mke2fs.log"
+          test "$(stat -c %s "$WORK/system_ext.rebuilt.raw")" = "$SIZE"
+          e2fsck -fn "$WORK/system_ext.rebuilt.raw" > "$OUT/rebuilt_e2fsck.txt" 2>&1 || rc=$?
+          rc=${rc:-0}; test "$rc" -lt 8; unset rc
+          tune2fs -l "$WORK/system_ext.rebuilt.raw" > "$OUT/rebuilt_tune2fs.txt"
+          debugfs -R stats "$WORK/system_ext.rebuilt.raw" > "$OUT/rebuilt_debugfs_stats.txt" 2>&1
+
+      - name: Compare complete content and Android-relevant metadata semantically
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          OUT="$GITHUB_WORKSPACE/wear7-systemext-roundtrip-report"
+          sudo mkdir -p "$WORK/donor-mnt" "$WORK/rebuilt-mnt"
+          sudo mount -o loop,ro "$WORK/system_ext.donor.raw" "$WORK/donor-mnt"
+          sudo mount -o loop,ro "$WORK/system_ext.rebuilt.raw" "$WORK/rebuilt-mnt"
+
+          sudo python3 - "$WORK/donor-mnt" "$OUT/donor_manifest.tsv" <<'PY'
+import hashlib, os, stat, sys
+root,out=sys.argv[1:]
+def hxattr(path,name):
+    try:return os.getxattr(path,name,follow_symlinks=False).hex()
+    except OSError:return '-'
+rows=[]
+for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
+    for name in dirs+files:
+        p=os.path.join(base,name); rel=os.path.relpath(p,root); s=os.lstat(p)
+        if stat.S_ISREG(s.st_mode):
+            typ='f'; h=hashlib.sha256(open(p,'rb').read()).hexdigest(); target='-'
+        elif stat.S_ISLNK(s.st_mode):
+            typ='l'; h='-'; target=os.readlink(p)
+        elif stat.S_ISDIR(s.st_mode): typ='d'; h='-'; target='-'
+        else: typ='o'; h='-'; target='-'
+        rows.append((rel,typ,s.st_uid,s.st_gid,f'{stat.S_IMODE(s.st_mode):04o}',h,target,hxattr(p,'security.selinux'),hxattr(p,'security.capability')))
+with open(out,'w') as f:
+    f.write('path\ttype\tuid\tgid\tmode\tsha256\ttarget\tselinux_hex\tcapability_hex\n')
+    for r in sorted(rows): f.write('\t'.join(map(str,r))+'\n')
+PY
+          sudo python3 - "$WORK/rebuilt-mnt" "$OUT/rebuilt_manifest.tsv" <<'PY'
+import hashlib, os, stat, sys
+root,out=sys.argv[1:]
+def hxattr(path,name):
+    try:return os.getxattr(path,name,follow_symlinks=False).hex()
+    except OSError:return '-'
+rows=[]
+for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
+    for name in dirs+files:
+        p=os.path.join(base,name); rel=os.path.relpath(p,root); s=os.lstat(p)
+        if stat.S_ISREG(s.st_mode):
+            typ='f'; h=hashlib.sha256(open(p,'rb').read()).hexdigest(); target='-'
+        elif stat.S_ISLNK(s.st_mode):
+            typ='l'; h='-'; target=os.readlink(p)
+        elif stat.S_ISDIR(s.st_mode): typ='d'; h='-'; target='-'
+        else: typ='o'; h='-'; target='-'
+        rows.append((rel,typ,s.st_uid,s.st_gid,f'{stat.S_IMODE(s.st_mode):04o}',h,target,hxattr(p,'security.selinux'),hxattr(p,'security.capability')))
+with open(out,'w') as f:
+    f.write('path\ttype\tuid\tgid\tmode\tsha256\ttarget\tselinux_hex\tcapability_hex\n')
+    for r in sorted(rows): f.write('\t'.join(map(str,r))+'\n')
+PY
+          sudo umount "$WORK/donor-mnt" "$WORK/rebuilt-mnt"
+          sudo chown "$(id -u):$(id -g)" "$OUT/donor_manifest.tsv" "$OUT/rebuilt_manifest.tsv"
+
+          if diff -u "$OUT/donor_manifest.tsv" "$OUT/rebuilt_manifest.tsv" > "$OUT/manifest.diff"; then
+            echo 'SYSTEM_EXT_SEMANTIC_ROUNDTRIP=PASS' | tee "$OUT/VERDICT.txt"
+          else
+            echo 'SYSTEM_EXT_SEMANTIC_ROUNDTRIP=FAIL' | tee "$OUT/VERDICT.txt"
+            sed -n '1,240p' "$OUT/manifest.diff"
+            exit 30
+          fi
+          sha256sum "$WORK/system_ext.donor.raw" "$WORK/system_ext.rebuilt.raw" > "$OUT/image_sha256.txt"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Wear7-SystemExt-Roundtrip-Probe-Reports
+          path: wear7-systemext-roundtrip-report/
+          retention-days: 30
+          compression-level: 9
