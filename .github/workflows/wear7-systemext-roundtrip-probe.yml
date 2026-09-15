@@ -47,7 +47,7 @@ jobs:
           done
           echo "$B" >> "$GITHUB_PATH"
 
-      - name: Download exact donor and extract system_ext
+      - name: Download exact donor and extract system plus system_ext
         shell: bash
         run: |
           set -euxo pipefail
@@ -59,34 +59,56 @@ jobs:
           nested=$(unzip -Z1 "$FACTORY" | grep -E '(^|/)image-[^/]+\.zip$' | head -n1)
           test -n "$nested"
           unzip -p "$FACTORY" "$nested" > "$RUNNER_TEMP/work/inner.zip"
-          unzip -p "$RUNNER_TEMP/work/inner.zip" system_ext.img > "$RUNNER_TEMP/work/system_ext.input"
-          magic=$(od -An -tx4 -N4 "$RUNNER_TEMP/work/system_ext.input" | tr -d ' \n')
-          if test "$magic" = ed26ff3a; then
-            simg2img "$RUNNER_TEMP/work/system_ext.input" "$RUNNER_TEMP/work/system_ext.donor.raw"
-            rm -f "$RUNNER_TEMP/work/system_ext.input"
-          else
-            mv "$RUNNER_TEMP/work/system_ext.input" "$RUNNER_TEMP/work/system_ext.donor.raw"
-          fi
-          avbtool erase_footer --image "$RUNNER_TEMP/work/system_ext.donor.raw"
-          test "$(stat -c %s "$RUNNER_TEMP/work/system_ext.donor.raw")" = 233267200
-          e2fsck -fn "$RUNNER_TEMP/work/system_ext.donor.raw" > "$GITHUB_WORKSPACE/wear7-systemext-roundtrip-report/donor_e2fsck.txt" 2>&1 || rc=$?
-          rc=${rc:-0}; test "$rc" -lt 8; unset rc
 
-      - name: Mount donor read-only and create exact fs_config
+          for p in system system_ext; do
+            unzip -p "$RUNNER_TEMP/work/inner.zip" "$p.img" > "$RUNNER_TEMP/work/$p.input"
+            magic=$(od -An -tx4 -N4 "$RUNNER_TEMP/work/$p.input" | tr -d ' \n')
+            if test "$magic" = ed26ff3a; then
+              simg2img "$RUNNER_TEMP/work/$p.input" "$RUNNER_TEMP/work/$p.donor.raw"
+              rm -f "$RUNNER_TEMP/work/$p.input"
+            else
+              mv "$RUNNER_TEMP/work/$p.input" "$RUNNER_TEMP/work/$p.donor.raw"
+            fi
+            avbtool erase_footer --image "$RUNNER_TEMP/work/$p.donor.raw"
+            e2fsck -fn "$RUNNER_TEMP/work/$p.donor.raw" > "$GITHUB_WORKSPACE/wear7-systemext-roundtrip-report/${p}_donor_e2fsck.txt" 2>&1 || rc=$?
+            rc=${rc:-0}; test "$rc" -lt 8; unset rc
+          done
+          test "$(stat -c %s "$RUNNER_TEMP/work/system_ext.donor.raw")" = 233267200
+
+      - name: Build exact fs_config and combined donor file_contexts
         shell: bash
         run: |
           set -euxo pipefail
           WORK="$RUNNER_TEMP/work"
           OUT="$GITHUB_WORKSPACE/wear7-systemext-roundtrip-report"
-          sudo mkdir -p "$WORK/donor-mnt" "$WORK/stage"
-          sudo mount -o loop,ro "$WORK/system_ext.donor.raw" "$WORK/donor-mnt"
-          sudo cp -a "$WORK/donor-mnt/." "$WORK/stage/"
-          sudo python3 wear7/scripts/generate_exact_fs_config.py "$WORK/donor-mnt" system_ext "$WORK/system_ext.fs_config"
-          sudo cp "$WORK/donor-mnt/etc/selinux/system_ext_file_contexts" "$WORK/system_ext_file_contexts"
-          sudo umount "$WORK/donor-mnt"
-          sudo chown -R "$(id -u):$(id -g)" "$WORK/stage" "$WORK/system_ext.fs_config" "$WORK/system_ext_file_contexts"
-          chmod 0644 "$WORK/system_ext.fs_config" "$WORK/system_ext_file_contexts"
-          sha256sum "$WORK/system_ext.fs_config" "$WORK/system_ext_file_contexts" | tee "$OUT/rebuild_inputs_sha256.txt"
+          sudo mkdir -p "$WORK/system-mnt" "$WORK/systemext-mnt" "$WORK/stage"
+          sudo mount -o loop,ro "$WORK/system.donor.raw" "$WORK/system-mnt"
+          sudo mount -o loop,ro "$WORK/system_ext.donor.raw" "$WORK/systemext-mnt"
+
+          sudo cp -a "$WORK/systemext-mnt/." "$WORK/stage/"
+          sudo python3 wear7/scripts/generate_exact_fs_config.py \
+            "$WORK/systemext-mnt" system_ext "$WORK/system_ext.fs_config"
+
+          sudo cp "$WORK/system-mnt/system/etc/selinux/plat_file_contexts" "$WORK/plat_file_contexts"
+          sudo cp "$WORK/systemext-mnt/etc/selinux/system_ext_file_contexts" "$WORK/system_ext_file_contexts"
+          sudo sh -c "cat '$WORK/plat_file_contexts' '$WORK/system_ext_file_contexts' > '$WORK/system_ext_combined_file_contexts'"
+
+          {
+            echo '===== /system_ext rules from exact donor contexts ====='
+            grep -n '/system_ext' "$WORK/system_ext_combined_file_contexts" || true
+          } | tee "$OUT/system_ext_context_rules.txt"
+          grep -q '/system_ext' "$WORK/system_ext_combined_file_contexts"
+
+          sudo umount "$WORK/system-mnt" "$WORK/systemext-mnt"
+          sudo chown -R "$(id -u):$(id -g)" \
+            "$WORK/stage" "$WORK/system_ext.fs_config" \
+            "$WORK/plat_file_contexts" "$WORK/system_ext_file_contexts" \
+            "$WORK/system_ext_combined_file_contexts"
+          chmod 0644 "$WORK/system_ext.fs_config" "$WORK/plat_file_contexts" \
+            "$WORK/system_ext_file_contexts" "$WORK/system_ext_combined_file_contexts"
+          sha256sum "$WORK/system_ext.fs_config" "$WORK/plat_file_contexts" \
+            "$WORK/system_ext_file_contexts" "$WORK/system_ext_combined_file_contexts" \
+            | tee "$OUT/rebuild_inputs_sha256.txt"
 
       - name: Rebuild unmodified system_ext with Android tools
         shell: bash
@@ -101,7 +123,7 @@ jobs:
             "$WORK/stage" "$WORK/system_ext.rebuilt.raw" ext4 /system_ext "$SIZE" \
             -j 0 -T 1230768000 -C "$WORK/system_ext.fs_config" -L system_ext \
             -i 640 -I 256 -M 0 -U "$UUID" -S "$HASHSEED" -c \
-            "$WORK/system_ext_file_contexts" \
+            "$WORK/system_ext_combined_file_contexts" \
             | tee "$OUT/mkuserimg_mke2fs.log"
           test "$(stat -c %s "$WORK/system_ext.rebuilt.raw")" = "$SIZE"
           e2fsck -fn "$WORK/system_ext.rebuilt.raw" > "$OUT/rebuilt_e2fsck.txt" 2>&1 || rc=$?
