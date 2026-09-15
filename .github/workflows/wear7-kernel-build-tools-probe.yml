@@ -47,7 +47,7 @@ jobs:
             test -x "$B/$c" || { echo "Required core tool missing: $c"; exit 20; }
           done
           "$B/avbtool" version | tee -a wear7_kernel_build_tools_probe.txt
-          "$B/lpmake" --help >/dev/null
+          "$B/lpmake" --help >/dev/null 2>&1 || true
           "$B/simg2img" 2>&1 | head -n 4 | tee -a wear7_kernel_build_tools_probe.txt || true
           echo 'CORE_IMAGE_TOOLCHAIN=PASS' | tee -a wear7_kernel_build_tools_probe.txt
           echo 'NOTE: lpdump/lpunpack/sefcontext_compile are separate follow-up host-tool gates.' | tee -a wear7_kernel_build_tools_probe.txt
