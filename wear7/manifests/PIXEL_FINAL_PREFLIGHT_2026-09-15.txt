@@ -1,0 +1,102 @@
+TICWATCH PRO 5 ENDURO / DACE — WEAR OS 7
+PIXEL WATCH 3 FINAL SOFTWARE PREFLIGHT
+Date: 2026-09-15
+
+VERDICT
+PIXEL SOFTWARE PREFLIGHT STATIC = PASS
+No new structural blocker found.
+This is NOT a flash-ready or image-build-complete verdict.
+
+INPUT VERIFIED
+- Capture: Wear7_Pixel3_FINAL_PREFLIGHT_INPUTS_20260915_084456.tar.gz
+- Capture SHA-256: 1a17b1b55d589c26767fb101794667ee8819a7ce1f5f9af6a65c729505891ad2
+- Pixel Watch 3 factory: solios / CP2A.260603.001.S1 / Android 17 / Wear OS 7
+- Factory SHA-256: d203665c90bc06bf175dbb3cbd7fcc9d212c056a030f9c51b541129e8651fb7d
+- GMS Wear APEX SHA-256: 2356048e1acdafdad6494a1b8d108575747c29cfc2db420f24512512ce795b83
+
+PASS — STOCK VENDOR -> ANDROID 17 FRAMEWORK HARD CONTRACTS
+All six mandatory framework-side HIDL contracts checked for the retained TicWatch stock vendor are present:
+1. android.frameworks.sensorservice@1.0::ISensorManager/default
+2. android.hidl.allocator@1.0::IAllocator/ashmem
+3. android.hidl.manager@1.0::IServiceManager/default (provided @1.2)
+4. android.hidl.memory@1.0::IMapper/ashmem
+5. android.hidl.token@1.0::ITokenManager/default
+6. android.system.wifi.keystore@1.0::IKeystore/default
+
+PASS — PAIRING / WEAR FRAMEWORK
+- /system/etc/permissions/com.google.android.wearable.xml retains the shared library declaration for /system/framework/com.google.android.wearable.jar.
+- Pixel Wear7 ClockworkSetupWizard still contains google_fast_pair_service_model_id.
+- Therefore the frozen Enduro FastPair overlay still has a valid static resource target.
+- Keep TicCompanionWear.apk, Enduro overlay and stock Mobvoi vendor pairing properties as already frozen in Stage0.
+
+PASS — GMS / GEMINI BASE
+- Pixel GMS Wear APEX matches the previously frozen hash.
+- Required Chimera modules are all present: CronetDynamite, DynamiteLoader, DynamiteModulesA, DynamiteModulesC, GoogleCertificates, MapsDynamite.
+- allowed_apex_com.google.android.gmssystem.xml allows com.android.vending to update com.google.android.gmssystem.
+- wear-initial-package-stopped-states.xml sets com.google.android.wearable.assistant stopped=false.
+- AssistantWearPrebuilt remains covered by the Pixel Wear7 privapp policy, including CAPTURE_AUDIO_HOTWORD, MANAGE_SOUND_TRIGGER, MANAGE_VOICE_KEYPHRASES, MODIFY_AUDIO_ROUTING and WRITE_SECURE_SETTINGS.
+- First Wear7 build keeps native donor Gemini/system integration; old Wear4 V21 bind-mount hacks remain fallback only.
+
+PASS — SELINUX COMPANION PROPERTY CONTRACT
+Pixel Android 17 already defines oem_companion_prop in system_ext policy.
+Observed rules include read access for gmscore_app and priv_app_all plus vendor_init set/read access.
+Pixel system_ext property contexts already map:
+- ro.oem.companion_package -> oem_companion_prop
+- ro.oem.companion_digest -> oem_companion_prop
+- ro.oem.ios_companion_app_ids -> oem_companion_prop
+The stock TicWatch vendor context for ro.oem.home_package_names can therefore reuse the same type.
+Decision: DO NOT transplant Android 13 SELinux wholesale and DO NOT add a duplicate oem_companion_prop type. A minimal Android17 policy fragment is needed only if the final compiled staged policy proves a concrete gap.
+
+DONOR ITEMS TO SANITIZE — CONFIRMED
+Remove from the dace staged software tree:
+- system/etc/vintf/compatibility_matrix.device.xml (Pixel/SW5100-specific)
+- system_ext/etc/vintf/compatibility_matrix_google_battery.xml
+- system_ext/etc/vintf/compatibility_matrix_wac_management.xml
+- system_ext/etc/vintf/compatibility_matrix_watch_charger.xml
+- system_ext/etc/permissions/display_offload_feature.xml
+
+FCM7 / DISPLAY OFFLOAD
+Pixel wear_compatibility_matrix.7.xml requires:
+- vendor.google_clockwork.displayoffload
+- vendor.google_clockwork.wristorientation/default
+For dace first bring-up:
+- remove only the DisplayOffload requirement from the level-7 Wear matrix;
+- retain vendor.google_clockwork.wristorientation/default;
+- do not elevate target-level to 8/202404/202504/202604.
+
+PROPERTY OVERRIDES — CONFIRMED NECESSARY
+Pixel donor values advertise Pixel home packages and display/comms offload.
+Apply the already frozen dace values:
+- ro.oem.home_package_names=com.mobvoi.companion.aw
+- ro.oem.key1=TicWatchPro5Enduro
+- config.enable_wristorientation=1
+- config.use_aidl_api_for_display_offload=0
+- ro.wear.comms.offload.enabled=false
+Retain the generic Pixel ro.cw.home_package_names Wear7 value.
+Do not automatically alter persist.vendor.touch_offload.
+
+CORE PIXEL HASHES RECAPTURED
+- ClockworkSetupWizard.apk: 05280cd284cf409512f5a58d84fe639951337c16f95537a85fd9d20ab6efe0c7
+- WearServicesGoogle.apk: 12f8568683995f485e104100f57f8891d8e7ca0af905ee5180d2139a08b8ce52
+- WearHealthServicesPrebuilt.apk: 55aa712ddbb6b34b85570cc400a04827fa6cd81bf2c076a092c1309e31ab28c1
+- AssistantWearPrebuilt.apk: 3434942e08ba875f53783ed4fbd2a2510bdcbc988430177df20247d23eeefecd
+- com.google.android.wearable.jar: cd50a687046811a21c867a5e8ed56cd958d747e04a5b5ac50643009b1a497c3e
+- wear-service.jar: d912001d9f9c8b89f619db2454b4f9267dbe7831c4d36d3d7cb68b89d41c68fb
+- ClockworkSystemUI.apk: ac321527db628b6146471eae25952f191f554e0803a6a9abc59b10691f9a0233
+- com.android.hotwordenrollment.common.util.jar: 5a638fda14097a113840eb5b9143f47021151a959aa1b9e75e762d8c5bb561e9
+
+NEXT SOFTWARE EXECUTION GATES
+No additional generic audit is required. The next software phase is real image staging from the full Pixel software partitions plus frozen TicWatch Stage0/stock hardware material. Before any image can be accepted:
+1. apply Stage0 overlay to full Pixel system/system_ext/product trees;
+2. validate Enduro RRO with idmap2/overlayable data;
+3. compile/validate the complete Android17 + stock-vendor SELinux policy;
+4. run checkvintf against retained TicWatch FCM7 vendor contracts;
+5. rebuild system/system_ext/product with correct ownership, modes, capabilities, xattrs and SELinux labels;
+6. validate filesystems, AVB/vbmeta_system and stock dynamic-partition topology/sizing;
+7. integrate final TicWatch boot-side/kernel handoff;
+8. keep first persistent Wear7 flash blocked until dedicated custom recovery/rollback has physically passed.
+
+FINAL STATUS
+The Pixel donor-side static preflight requested before image staging is CLOSED and PASS.
+The project remains GO-W7 STATICO FORTE.
+Remaining uncertainty is now execution/runtime, not a newly discovered static Pixel/Android17 framework blocker.
