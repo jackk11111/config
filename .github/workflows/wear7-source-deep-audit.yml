@@ -74,22 +74,31 @@ jobs:
           [ -n "$nested" ]
           unzip -p "$FACTORY" "$nested" > "$WORK/pixel-inner.zip"
           unzip -tq "$WORK/pixel-inner.zip"
-          unzip -p "$WORK/pixel-inner.zip" system.img > "$WORK/pixel-system.sparse"
-          unzip -p "$WORK/pixel-inner.zip" system_ext.img > "$WORK/pixel-system_ext.sparse"
-          unzip -p "$WORK/pixel-inner.zip" product.img > "$WORK/pixel-product.sparse"
+          unzip -p "$WORK/pixel-inner.zip" system.img > "$WORK/pixel-system.input"
+          unzip -p "$WORK/pixel-inner.zip" system_ext.img > "$WORK/pixel-system_ext.input"
+          unzip -p "$WORK/pixel-inner.zip" product.img > "$WORK/pixel-product.input"
           rm -f "$WORK/pixel-inner.zip" "$FACTORY"
 
           for p in system system_ext product; do
-            simg2img "$WORK/pixel-$p.sparse" "$WORK/pixel-$p.raw"
-            rm -f "$WORK/pixel-$p.sparse"
-            sha256sum "$WORK/pixel-$p.raw" >> "$GITHUB_WORKSPACE/wear7-audit-report/pixel_raw_image_hashes.txt"
-            stat -c "$p raw_bytes=%s" "$WORK/pixel-$p.raw" >> "$GITHUB_WORKSPACE/wear7-audit-report/pixel_raw_image_sizes.txt"
-            debugfs -R stats "$WORK/pixel-$p.raw" > "$GITHUB_WORKSPACE/wear7-audit-report/pixel_${p}_ext4_stats.txt" 2>&1
-            e2fsck -fn "$WORK/pixel-$p.raw" > "$GITHUB_WORKSPACE/wear7-audit-report/pixel_${p}_e2fsck_readonly.txt" 2>&1 || rc=$?
+            src="$WORK/pixel-$p.input"
+            dst="$WORK/pixel-$p.raw"
+            magic=$(od -An -tx4 -N4 "$src" | tr -d ' \n')
+            if [ "$magic" = ed26ff3a ]; then
+              echo "$p: Android sparse input"
+              simg2img "$src" "$dst"
+              rm -f "$src"
+            else
+              echo "$p: raw/non-sparse input (magic=$magic)"
+              mv "$src" "$dst"
+            fi
+            sha256sum "$dst" >> "$GITHUB_WORKSPACE/wear7-audit-report/pixel_raw_image_hashes.txt"
+            stat -c "$p raw_bytes=%s" "$dst" >> "$GITHUB_WORKSPACE/wear7-audit-report/pixel_raw_image_sizes.txt"
+            debugfs -R stats "$dst" > "$GITHUB_WORKSPACE/wear7-audit-report/pixel_${p}_ext4_stats.txt" 2>&1
+            e2fsck -fn "$dst" > "$GITHUB_WORKSPACE/wear7-audit-report/pixel_${p}_e2fsck_readonly.txt" 2>&1 || rc=$?
             rc=${rc:-0}; if [ "$rc" -ge 8 ]; then exit "$rc"; fi; unset rc
             {
               printf '%s tail64_hex=' "$p"
-              tail -c 64 "$WORK/pixel-$p.raw" | od -An -tx1 | tr -d ' \n'
+              tail -c 64 "$dst" | od -An -tx1 | tr -d ' \n'
               echo
             } >> "$GITHUB_WORKSPACE/wear7-audit-report/pixel_image_tail64.txt"
           done
