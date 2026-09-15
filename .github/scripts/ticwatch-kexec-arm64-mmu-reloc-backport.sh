@@ -20,8 +20,10 @@ bash "$TMP" "$K"
 
 TPC="$K/arch/arm64/mm/trans_pgd.c"
 PGT="$K/arch/arm64/include/asm/pgtable.h"
+PGP="$K/arch/arm64/include/asm/pgtable-prot.h"
 [ -s "$TPC" ] || { echo "missing trans_pgd.c: $TPC" >&2; exit 31; }
 [ -s "$PGT" ] || { echo "missing pgtable.h: $PGT" >&2; exit 31; }
+[ -s "$PGP" ] || { echo "missing pgtable-prot.h: $PGP" >&2; exit 31; }
 
 # Android 5.15 compatibility fix for the temporary linear-map copy.
 #
@@ -102,7 +104,10 @@ PY
 
 grep -Fq 'prev_level_entry = pte_val(pfn_pte(pfn, PAGE_KERNEL_ROX));' "$TPC"
 ! grep -Fq 'prev_level_entry = pte_val(pfn_pte(pfn, PAGE_KERNEL_EXEC));' "$TPC"
-grep -Eq 'PAGE_KERNEL_ROX' "$PGT"
+grep -Fq '#define PAGE_KERNEL_ROX' "$PGP" || {
+  echo 'PAGE_KERNEL_ROX is not defined in arch/arm64/include/asm/pgtable-prot.h' >&2
+  exit 32
+}
 
 git -C "$K" add arch/arm64/mm/trans_pgd.c
 git -C "$K" diff --cached --check
