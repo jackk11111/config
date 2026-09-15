@@ -255,22 +255,22 @@ jobs:
           for p in system system_ext product; do sudo mkdir -p "$WORK/rebuilt-$p-mnt"; sudo mount -o loop,ro "$WORK/$p.stage0.raw" "$WORK/rebuilt-$p-mnt"; done
           SYS="$WORK/rebuilt-system-mnt"; SX="$WORK/rebuilt-system_ext-mnt"; PROD="$WORK/rebuilt-product-mnt"
 
-          test ! -e "$SYS/system/etc/vintf/compatibility_matrix.device.xml"
-          test ! -e "$SX/etc/permissions/display_offload_feature.xml"
-          test ! -e "$SX/etc/vintf/compatibility_matrix_google_battery.xml"
-          test ! -e "$SX/etc/vintf/compatibility_matrix_wac_management.xml"
-          test ! -e "$SX/etc/vintf/compatibility_matrix_watch_charger.xml"
-          ! grep -q 'vendor.google_clockwork.displayoffload' "$SYS/system/etc/vintf/wear_compatibility_matrix.7.xml"
-          grep -q 'vendor.google_clockwork.wristorientation' "$SYS/system/etc/vintf/wear_compatibility_matrix.7.xml"
+          sudo test ! -e "$SYS/system/etc/vintf/compatibility_matrix.device.xml"
+          sudo test ! -e "$SX/etc/permissions/display_offload_feature.xml"
+          sudo test ! -e "$SX/etc/vintf/compatibility_matrix_google_battery.xml"
+          sudo test ! -e "$SX/etc/vintf/compatibility_matrix_wac_management.xml"
+          sudo test ! -e "$SX/etc/vintf/compatibility_matrix_watch_charger.xml"
+          ! sudo grep -q 'vendor.google_clockwork.displayoffload' "$SYS/system/etc/vintf/wear_compatibility_matrix.7.xml"
+          sudo grep -q 'vendor.google_clockwork.wristorientation' "$SYS/system/etc/vintf/wear_compatibility_matrix.7.xml"
 
           for kv in \
             'ro.oem.home_package_names=com.mobvoi.companion.aw' \
             'ro.oem.key1=TicWatchPro5Enduro' \
             'config.enable_wristorientation=1' \
             'config.use_aidl_api_for_display_offload=0' \
-            'ro.wear.comms.offload.enabled=false'; do grep -qxF "$kv" "$SYS/system/build.prop"; done
+            'ro.wear.comms.offload.enabled=false'; do sudo grep -qxF "$kv" "$SYS/system/build.prop"; done
 
-          python3 - <<'PY'
+          sudo -E python3 - <<'PY'
           import csv, hashlib, os, pathlib
           work=pathlib.Path(os.environ['RUNNER_TEMP'])/'work'
           rows=list(csv.DictReader(pathlib.Path('wear7/manifests/STAGE0_SOURCE_HASHES.tsv').open(), delimiter='\t'))
@@ -287,7 +287,7 @@ jobs:
           print('STAGE0_REBUILT_8_OF_8=PASS')
           PY
 
-          file "$SX"/lib/libdisplayconfig.system.qti.so \
+          sudo file "$SX"/lib/libdisplayconfig.system.qti.so \
                "$SX"/lib/libgralloc.system.qti.so \
                "$SX"/lib/vendor.display.config@2.0.so \
                "$SX"/lib/android.hardware.radio@1.5.so \
@@ -296,9 +296,9 @@ jobs:
                | tee "$OUT/REBUILT_BRIDGE_FILE.txt"
           test "$(grep -c 'ELF 32-bit' "$OUT/REBUILT_BRIDGE_FILE.txt")" = 6
 
-          getfattr -n security.selinux -e text "$SYS/system/priv-app/TicCompanionWear/TicCompanionWear.apk" | tee "$OUT/NEW_PATH_SELINUX.txt"
-          getfattr -n security.selinux -e text "$PROD/overlay/DaceEnduroFastPairOverlay/DaceEnduroFastPairOverlay.apk" | tee -a "$OUT/NEW_PATH_SELINUX.txt"
-          for f in "$SX"/lib/libdisplayconfig.system.qti.so "$SX"/lib/libgralloc.system.qti.so "$SX"/lib/vendor.display.config@2.0.so "$SX"/lib/android.hardware.radio@1.5.so "$SX"/lib/android.hardware.radio@1.6.so "$SX"/lib/vendor.google_clockwork.wristorientation@1.0.so; do getfattr -n security.selinux -e text "$f" >> "$OUT/NEW_PATH_SELINUX.txt"; done
+          sudo getfattr -n security.selinux -e text "$SYS/system/priv-app/TicCompanionWear/TicCompanionWear.apk" | tee "$OUT/NEW_PATH_SELINUX.txt"
+          sudo getfattr -n security.selinux -e text "$PROD/overlay/DaceEnduroFastPairOverlay/DaceEnduroFastPairOverlay.apk" | tee -a "$OUT/NEW_PATH_SELINUX.txt"
+          for f in "$SX"/lib/libdisplayconfig.system.qti.so "$SX"/lib/libgralloc.system.qti.so "$SX"/lib/vendor.display.config@2.0.so "$SX"/lib/android.hardware.radio@1.5.so "$SX"/lib/android.hardware.radio@1.6.so "$SX"/lib/vendor.google_clockwork.wristorientation@1.0.so; do sudo getfattr -n security.selinux -e text "$f" >> "$OUT/NEW_PATH_SELINUX.txt"; done
           test "$(grep -c 'security.selinux=' "$OUT/NEW_PATH_SELINUX.txt")" -ge 8
 
           sudo python3 wear7/scripts/fs_semantic_manifest.py "$SYS" "$OUT/system_stage0_manifest.tsv"
