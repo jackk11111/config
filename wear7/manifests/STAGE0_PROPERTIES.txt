@@ -1,0 +1,5 @@
+ro.oem.home_package_names=com.mobvoi.companion.aw
+ro.oem.key1=TicWatchPro5Enduro
+config.enable_wristorientation=1
+config.use_aidl_api_for_display_offload=0
+ro.wear.comms.offload.enabled=false
