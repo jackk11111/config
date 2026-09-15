@@ -26,3 +26,22 @@ Source archive regenerated from the authoritative TicWatch 379 full BLOCK OTA on
 - `TicCompanionWear.apk` and `DaceEnduroFastPairOverlay.apk` match the hashes frozen in the V9 handoff.
 
 The binary payload itself is not committed here. It is reproducibly extracted from stock OTA 379 and tracked by hashes.
+
+## Pixel final static preflight — 2026-09-15
+
+`Wear7_Pixel3_FINAL_PREFLIGHT_INPUTS_20260915_084456.tar.gz` was analyzed against the frozen Stage0/V9 architecture.
+
+Result: **PASS — Pixel software donor-side static preflight closed.**
+
+Confirmed:
+- all six retained-stock-vendor -> Android17 framework HIDL contracts are satisfied;
+- Enduro FastPair resource target still exists in Wear7 SetupWizard;
+- GMS Wear APEX hash and required Chimera modules are intact;
+- Gemini/Assistant remains wired as a Wear7 system/privileged component;
+- Android17 already defines the `oem_companion_prop` SELinux type/rules needed by the Mobvoi companion property contract;
+- Pixel SW5100/GoogleBattery/WAC/WatchCharger/DisplayOffload-specific requirements must be sanitized as frozen in Stage0;
+- FCM7 remains the target and `wristorientation/default` is retained.
+
+Full findings and remaining image-build gates are in `manifests/PIXEL_FINAL_PREFLIGHT_2026-09-15.txt`.
+
+This does **not** authorize a Wear7 flash. Real image staging, idmap2, SELinux compile, checkvintf, AVB/super validation and the dedicated recovery physical PASS remain mandatory.
