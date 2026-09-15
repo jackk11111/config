@@ -1,0 +1,191 @@
+name: Wear7 exact donor AVB and filesystem metadata probe
+
+on:
+  push:
+    branches: [wear7-rom-staging]
+    paths:
+      - '.github/workflows/wear7-avb-fs-metadata-probe.yml'
+      - 'wear7/TRIGGER_AVB_FS_METADATA_PROBE'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PIXEL_FILE: solios-cp2a.260603.001.s1-factory-d203665c.zip
+  PIXEL_SHA256: d203665c90bc06bf175dbb3cbd7fcc9d212c056a030f9c51b541129e8651fb7d
+  KERNEL_BUILD_TOOLS_SHA: 010d8a83d84ced4beef7779453766350db8c08cd
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install read-only filesystem helpers
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y curl unzip e2fsprogs android-sdk-libsparse-utils
+
+      - name: Pin official Android image tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          REPO='https://android.googlesource.com/kernel/prebuilts/build-tools'
+          git clone --filter=blob:none --no-checkout "$REPO" "$RUNNER_TEMP/kernel-build-tools"
+          git -C "$RUNNER_TEMP/kernel-build-tools" fetch --depth=1 origin "$KERNEL_BUILD_TOOLS_SHA"
+          git -C "$RUNNER_TEMP/kernel-build-tools" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/kernel-build-tools" rev-parse HEAD)" = "$KERNEL_BUILD_TOOLS_SHA"
+          B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
+          for c in avbtool simg2img e2fsdroid mkuserimg_mke2fs lpmake; do
+            test -x "$B/$c" || { echo "missing pinned tool: $c"; exit 20; }
+          done
+          echo "$B" >> "$GITHUB_PATH"
+
+      - name: Download and verify exact Pixel Watch 3 Wear7 donor
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$RUNNER_TEMP/src" "$RUNNER_TEMP/work" wear7-avb-fs-report
+          cd "$RUNNER_TEMP/src"
+          curl -fL --retry 3 --retry-delay 3 -o "$PIXEL_FILE" "https://dl.google.com/dl/android/aosp/$PIXEL_FILE"
+          echo "$PIXEL_SHA256  $PIXEL_FILE" | sha256sum -c -
+          printf 'pixel_factory=%s\npixel_sha256=%s\ntoolchain_sha=%s\n' \
+            "$PIXEL_FILE" "$PIXEL_SHA256" "$KERNEL_BUILD_TOOLS_SHA" \
+            > "$GITHUB_WORKSPACE/wear7-avb-fs-report/INPUTS.txt"
+
+      - name: Extract exact software images and record AVB/ext4 metadata
+        shell: bash
+        run: |
+          set -euxo pipefail
+          FACTORY="$RUNNER_TEMP/src/$PIXEL_FILE"
+          WORK="$RUNNER_TEMP/work"
+          OUT="$GITHUB_WORKSPACE/wear7-avb-fs-report"
+          nested=$(unzip -Z1 "$FACTORY" | grep -E '(^|/)image-[^/]+\.zip$' | head -n1)
+          test -n "$nested"
+          unzip -p "$FACTORY" "$nested" > "$WORK/inner.zip"
+          unzip -tq "$WORK/inner.zip"
+
+          printf 'partition\traw_bytes\tfs_block_size\tfs_block_count\tfs_bytes\tavb_overhead_bytes\tshared_blocks\n' > "$OUT/IMAGE_GEOMETRY.tsv"
+
+          for p in system system_ext product; do
+            unzip -p "$WORK/inner.zip" "$p.img" > "$WORK/$p.input"
+            magic=$(od -An -tx4 -N4 "$WORK/$p.input" | tr -d ' \n')
+            if test "$magic" = ed26ff3a; then
+              simg2img "$WORK/$p.input" "$WORK/$p.raw"
+            else
+              mv "$WORK/$p.input" "$WORK/$p.raw"
+            fi
+            rm -f "$WORK/$p.input"
+
+            sha256sum "$WORK/$p.raw" >> "$OUT/RAW_IMAGE_SHA256.txt"
+            avbtool info_image --image "$WORK/$p.raw" > "$OUT/${p}_avb_info.txt"
+            tune2fs -l "$WORK/$p.raw" > "$OUT/${p}_tune2fs.txt"
+            debugfs -R stats "$WORK/$p.raw" > "$OUT/${p}_debugfs_stats.txt" 2>&1
+            e2fsck -fn "$WORK/$p.raw" > "$OUT/${p}_e2fsck_readonly.txt" 2>&1 || rc=$?
+            rc=${rc:-0}; test "$rc" -lt 8; unset rc
+
+            raw=$(stat -c %s "$WORK/$p.raw")
+            bs=$(tune2fs -l "$WORK/$p.raw" | awk -F: '/Block size:/ {gsub(/ /,"",$2); print $2; exit}')
+            bc=$(tune2fs -l "$WORK/$p.raw" | awk -F: '/Block count:/ {gsub(/ /,"",$2); print $2; exit}')
+            fs=$((bs*bc))
+            overhead=$((raw-fs))
+            features=$(tune2fs -l "$WORK/$p.raw" | sed -n 's/^Filesystem features:[[:space:]]*//p')
+            shared=no; printf '%s\n' "$features" | grep -qw shared_blocks && shared=yes || true
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$p" "$raw" "$bs" "$bc" "$fs" "$overhead" "$shared" >> "$OUT/IMAGE_GEOMETRY.tsv"
+          done
+
+      - name: Prove AVB footer removal is reversible on disposable copies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          OUT="$GITHUB_WORKSPACE/wear7-avb-fs-report"
+          printf 'partition\tbefore_bytes\tafter_erase_footer_bytes\treadonly_fsck\n' > "$OUT/AVB_ERASE_FOOTER_COPY_TEST.tsv"
+          for p in system system_ext product; do
+            cp --reflink=auto "$WORK/$p.raw" "$WORK/$p.noavb.img"
+            before=$(stat -c %s "$WORK/$p.noavb.img")
+            avbtool erase_footer --image "$WORK/$p.noavb.img"
+            after=$(stat -c %s "$WORK/$p.noavb.img")
+            rc=0
+            e2fsck -fn "$WORK/$p.noavb.img" > "$OUT/${p}_noavb_e2fsck_readonly.txt" 2>&1 || rc=$?
+            verdict=PASS; test "$rc" -lt 8 || verdict=FAIL
+            printf '%s\t%s\t%s\t%s\n' "$p" "$before" "$after" "$verdict" >> "$OUT/AVB_ERASE_FOOTER_COPY_TEST.tsv"
+            test "$rc" -lt 8
+            rm -f "$WORK/$p.noavb.img"
+          done
+
+      - name: Inventory donor SELinux metadata sources and target inode contexts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          OUT="$GITHUB_WORKSPACE/wear7-avb-fs-report"
+          : > "$OUT/SELINUX_INVENTORY.txt"
+          : > "$OUT/PATCH_TARGET_METADATA.txt"
+
+          list_dir() {
+            img=$1; path=$2; label=$3
+            echo "===== $label :: $path =====" >> "$OUT/SELINUX_INVENTORY.txt"
+            debugfs -R "ls -l $path" "$img" >> "$OUT/SELINUX_INVENTORY.txt" 2>&1 || true
+          }
+          stat_ea() {
+            img=$1; path=$2; label=$3
+            echo "===== $label :: $path =====" >> "$OUT/PATCH_TARGET_METADATA.txt"
+            debugfs -R "stat $path" "$img" >> "$OUT/PATCH_TARGET_METADATA.txt" 2>&1 || true
+            debugfs -R "ea_list $path" "$img" >> "$OUT/PATCH_TARGET_METADATA.txt" 2>&1 || true
+          }
+
+          list_dir "$WORK/system.raw" /system/etc/selinux system_selinux
+          list_dir "$WORK/system_ext.raw" /etc/selinux system_ext_selinux
+          list_dir "$WORK/product.raw" /etc/selinux product_selinux
+
+          stat_ea "$WORK/system.raw" /system/build.prop system_build_prop
+          stat_ea "$WORK/system.raw" /system/priv-app system_priv_app_dir
+          stat_ea "$WORK/system_ext.raw" /lib system_ext_lib_dir
+          stat_ea "$WORK/system_ext.raw" /etc/permissions system_ext_permissions_dir
+          stat_ea "$WORK/product.raw" /overlay product_overlay_dir
+          stat_ea "$WORK/product.raw" /priv-app product_priv_app_dir
+
+          for p in system system_ext product; do
+            root="$WORK/selinux-$p"
+            mkdir -p "$root"
+            case "$p" in
+              system) src=/system/etc/selinux ;;
+              *) src=/etc/selinux ;;
+            esac
+            debugfs -R "rdump $src $root" "$WORK/$p.raw" >/dev/null 2>&1 || true
+            if find "$root" -type f -print -quit | grep -q .; then
+              find "$root" -type f -print0 | sort -z | xargs -0 sha256sum \
+                | sed "s#$root/##" >> "$OUT/SELINUX_FILE_SHA256.txt"
+            fi
+          done
+
+      - name: Final probe verdict
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OUT=wear7-avb-fs-report
+          grep -q $'^system_ext\t' "$OUT/IMAGE_GEOMETRY.tsv"
+          awk -F '\t' 'NR>1 && $7!="yes" {bad=1} END{exit bad}' "$OUT/IMAGE_GEOMETRY.tsv"
+          awk -F '\t' 'NR>1 && $4!="PASS" {bad=1} END{exit bad}' "$OUT/AVB_ERASE_FOOTER_COPY_TEST.tsv"
+          {
+            echo 'WEAR7_DONOR_AVB_FS_METADATA_PROBE=PASS'
+            echo
+            cat "$OUT/IMAGE_GEOMETRY.tsv"
+            echo
+            cat "$OUT/AVB_ERASE_FOOTER_COPY_TEST.tsv"
+            echo
+            echo 'Interpretation: all three donor filesystems use shared_blocks; final ROM remains on the controlled Android rebuild path, not naive in-place/debugfs repacking.'
+          } | tee "$OUT/SUMMARY.txt"
+          find "$OUT" -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > "$OUT/REPORT_SHA256SUMS.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-AVB-FS-Metadata-Probe-Reports
+          path: wear7-avb-fs-report/
+          retention-days: 30
+          compression-level: 9
