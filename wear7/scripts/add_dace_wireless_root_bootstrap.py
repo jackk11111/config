@@ -107,7 +107,10 @@ def set_props(path: Path) -> list[str]:
         if key not in seen:
             out.append(f"{key}={value}")
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
-    os.chmod(path, 0o600)
+    # Android build.prop is a root-owned, world-readable configuration file.
+    # The staging script runs as root in CI, so explicitly restore the normal
+    # 0644 mode instead of inheriting Python's create/write umask semantics.
+    os.chmod(path, 0o644)
     return [f"{k}={v}" for k, v in ADB_PROPS.items()]
 
 
