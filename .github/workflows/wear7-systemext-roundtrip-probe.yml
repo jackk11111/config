@@ -116,15 +116,20 @@ jobs:
           set -euxo pipefail
           WORK="$RUNNER_TEMP/work"
           OUT="$GITHUB_WORKSPACE/wear7-systemext-roundtrip-report"
+          B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
           UUID='b929aaa8-0d20-509e-a9c9-aea96b9f297e'
           HASHSEED='f53efb2c-9e4d-5005-9a00-622fedc36d54'
           SIZE=233267200
-          mkuserimg_mke2fs \
+          # Run the filesystem creator as root so the mke2fs-created lost+found
+          # matches the donor's uid/gid 0:0. All staged Android metadata still
+          # comes from the exact canned fs_config and donor SELinux contexts.
+          sudo env PATH="$B:$PATH" "$B/mkuserimg_mke2fs" \
             "$WORK/stage" "$WORK/system_ext.rebuilt.raw" ext4 /system_ext "$SIZE" \
             -j 0 -T 1230768000 -C "$WORK/system_ext.fs_config" -L system_ext \
             -i 640 -I 256 -M 0 -U "$UUID" -S "$HASHSEED" -c \
             "$WORK/system_ext_combined_file_contexts" \
             | tee "$OUT/mkuserimg_mke2fs.log"
+          sudo chown "$(id -u):$(id -g)" "$WORK/system_ext.rebuilt.raw"
           test "$(stat -c %s "$WORK/system_ext.rebuilt.raw")" = "$SIZE"
           e2fsck -fn "$WORK/system_ext.rebuilt.raw" > "$OUT/rebuilt_e2fsck.txt" 2>&1 || rc=$?
           rc=${rc:-0}; test "$rc" -lt 8; unset rc
