@@ -1,0 +1,53 @@
+TICWATCH PRO 5 ENDURO WEAR7 - FIRST BOOT RUNTIME GATES
+Date: 2026-09-15
+
+These are mandatory runtime acceptance gates for the first real Wear OS 7 bring-up.
+They do not authorize flashing; recovery/rollback must independently be READY first.
+
+PAIRING / PHONE
+- PHONE_DISCOVERY=PASS
+- BLUETOOTH_PAIRING=PASS
+- SETUP_WIZARD_COMPLETE=PASS
+- GOOGLE_ACCOUNT_TRANSFER=PASS
+- NOTIFICATION_BRIDGE=PASS
+- PHONE_WATCH_RECONNECT_AFTER_REBOOT=PASS
+- PAIRING_PATH may be MOBVOI, GOOGLE_PIXEL_WATCH, or another working companion.
+- Mobvoi is not a final requirement. A reliable phone association path is.
+
+CABLELESS DEVELOPMENT ACCESS
+- WEAR7_WIFI=PASS
+- WEAR7_ADB_TCP_PORT=5555
+- WEAR7_ADB_TCP_AUTOSTART=PASS
+- WEAR7_ADB_TCP_PERSIST_AFTER_REBOOT=PASS
+- WEAR7_ROOT_FROM_ADB_WIFI=PASS
+- NO_USB_REQUIRED_FOR_NORMAL_DEVELOPMENT=PASS
+
+Expected normal workflow:
+watch booted -> persistent Wi-Fi -> adbd TCP/5555 -> Termux phone -> adb connect WATCH_IP:5555 -> adb shell -> root through the approved kernel/KSU path.
+
+RECOVERY ACCESS (separate branch, required before first Wear7 flash)
+- RECOVERY_WIFI=PASS
+- RECOVERY_ADB_TCP=PASS
+- RECOVERY_ADB_ROOT_UID0=PASS
+- RECOVERY_ROLLBACK_READY_FOR_FIRST_WEAR7_FLASH=YES
+
+HARDWARE RUNTIME GATES
+- DISPLAY_GPU_DRM=PASS
+- TOUCH=PASS
+- WIFI=PASS
+- BLUETOOTH_SLATE=PASS
+- AUDIO_MIC=PASS
+- NFC=PASS
+- SENSORS=PASS
+- GNSS=PASS
+- POWER_BATTERY_HEALTH=PASS
+- STORAGE=PASS
+- USB_FALLBACK=PASS
+- HAPTICS=PASS
+- ROTARY_BUTTONS=PASS
+
+FIRST FLASH POLICY
+FIRST_WEAR7_FLASH=FORBIDDEN until RECOVERY_ROLLBACK_READY_FOR_FIRST_WEAR7_FLASH=YES.
+
+ROM completion policy:
+A build that boots but cannot pair to a phone or cannot provide persistent Wi-Fi ADB/root access is NOT considered complete.
