@@ -111,36 +111,24 @@ jobs:
         run: |
           set -Eeuo pipefail
           K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
-          python3 - "$K" <<'PY'
+          F="$K/KernelSU-Next/kernel/core/init.c"
+          test -f "$F"
+          python3 - "$F" <<'PY'
           from pathlib import Path
           import sys
-          root=Path(sys.argv[1])
+          p=Path(sys.argv[1])
+          s=p.read_text()
           needle='''#ifdef CONFIG_KSU_DEBUG\nbool allow_shell = true;\n#else\nbool allow_shell = false;\n#endif'''
           replacement='''/* TicWatch Wear7 maintenance contract: ADB remains authenticated,\n * but uid 2000 may invoke KernelSU su without a post-wipe Manager prompt. */\nbool allow_shell = true;'''
-          hits=[]
-          for p in root.rglob('init.c'):
-              try: s=p.read_text()
-              except Exception: continue
-              if needle in s and 'KernelSU' in str(p):
-                  hits.append((p,s))
-          if not hits:
-              # Integrated source directory name can vary; anchor itself is unique.
-              for p in root.rglob('init.c'):
-                  try: s=p.read_text()
-                  except Exception: continue
-                  if needle in s:
-                      hits.append((p,s))
-          if len(hits)!=1:
-              raise SystemExit(f'expected one KernelSU allow_shell anchor, found {[str(p) for p,_ in hits]}')
-          p,s=hits[0]
+          if s.count(needle) != 1:
+              raise SystemExit(f'KernelSU allow_shell anchor count={s.count(needle)}')
           p.write_text(s.replace(needle,replacement,1))
           print('KSU_ALLOW_SHELL_PATCHED',p)
           PY
-          F=$(grep -RIl --include=init.c 'TicWatch Wear7 maintenance contract' "$K" | head -n1)
-          test -n "$F"
+          grep -Fq 'TicWatch Wear7 maintenance contract' "$F"
           grep -Fq 'bool allow_shell = true;' "$F"
           if grep -Fq 'bool allow_shell = false;' "$F"; then echo 'stale allow_shell=false remains' >&2; exit 21; fi
-          git -C "$K" diff HEAD -- "$F" | tee wear7-allow-shell.patch
+          git -C "$K" diff HEAD -- KernelSU-Next/kernel/core/init.c | tee wear7-allow-shell.patch
           test -s wear7-allow-shell.patch
           echo 'KSU_AUTHENTICATED_ADB_SHELL_ROOT_SOURCE=PASS'
 
@@ -243,7 +231,7 @@ jobs:
           cat bundle/docs/CANDIDATE_REPORT.txt
 
       - name: Upload Wear7 integration kernel
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: TicWatch-Wear7-Integration-Kernel-ADBRoot
           path: bundle/
