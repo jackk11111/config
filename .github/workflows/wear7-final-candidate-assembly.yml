@@ -1,0 +1,524 @@
+name: Wear7 full offline first-bringup candidate
+
+on:
+  push:
+    branches: [wear7-rom-staging]
+    paths:
+      - '.github/workflows/wear7-final-candidate-assembly.yml'
+      - 'wear7/scripts/apply_stage0_overlay_v8.py'
+      - 'wear7/scripts/add_dace_wireless_root_bootstrap.py'
+      - 'wear7/scripts/validate_vintf_static_contract.py'
+      - 'wear7/scripts/reconstruct_block_ota.py'
+      - 'wear7/scripts/generate_exact_fs_config.py'
+      - 'wear7/scripts/fs_semantic_manifest.py'
+      - 'wear7/manifests/STAGE0_SOURCE_HASHES.tsv'
+      - 'wear7/TRIGGER_FINAL_CANDIDATE*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PIXEL_FILE: solios-cp2a.260603.001.s1-factory-d203665c.zip
+  PIXEL_SHA256: d203665c90bc06bf175dbb3cbd7fcc9d212c056a030f9c51b541129e8651fb7d
+  TIC_URL: https://android.googleapis.com/packages/data/ota-api/package/2269bd24a774cae37adc720d3d97bd1b76846e2b.zip
+  TIC_SHA256: ffa61d822a5c667c230ce2ba9426ce4eb282adcaa0891279ef002f65ca15a08d
+  KERNEL_BUILD_TOOLS_SHA: 010d8a83d84ced4beef7779453766350db8c08cd
+  KERNEL_RUN_ID: '34957108624'
+  KERNEL_ARTIFACT: TicWatch-KEXEC-ARM64-RELOC-INTERNAL-PROBE-CANDIDATE
+  KERNEL_IMAGE_SHA256: 976c4b7a27679bf7afb1c62ed3937f5f8f494d09860ff2d8d04b6132889aed18
+  SUPER_DEVICE_SIZE: '4294967296'
+  DYNAMIC_GROUP_SIZE: '4284481536'
+  AVB_SALT: 29ee420fe79a48929c62ab7091d79c9575998f66d7f5e856987e7bbe578d5459
+  BOOT_AVB_SALT: 8078f56b41ac2e6ebea1f428d5b574f02f57d480d916879b2b28628caed0e616
+
+jobs:
+  assemble:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free runner space and install host helpers
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk || true
+          sudo apt-get update
+          sudo apt-get install -y curl unzip zip e2fsprogs android-sdk-libsparse-utils attr libcap2-bin file python3 binutils
+          mkdir -p "$RUNNER_TEMP/src" "$RUNNER_TEMP/work" wear7-final-report wear7-final-bootchain wear7-final-candidate
+          df -h
+
+      - name: Pin exact proven Android filesystem AVB and super tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --filter=blob:none --no-checkout https://android.googlesource.com/kernel/prebuilts/build-tools "$RUNNER_TEMP/kernel-build-tools"
+          git -C "$RUNNER_TEMP/kernel-build-tools" fetch --depth=1 origin "$KERNEL_BUILD_TOOLS_SHA"
+          git -C "$RUNNER_TEMP/kernel-build-tools" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/kernel-build-tools" rev-parse HEAD)" = "$KERNEL_BUILD_TOOLS_SHA"
+          B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
+          for c in mkuserimg_mke2fs mke2fs e2fsdroid simg2img img2simg tune2fs avbtool lpmake; do
+            test -x "$B/$c" || { echo "missing pinned tool: $c"; exit 20; }
+          done
+          echo "$B" >> "$GITHUB_PATH"
+          {
+            echo "KERNEL_BUILD_TOOLS_SHA=$KERNEL_BUILD_TOOLS_SHA"
+            for c in mkuserimg_mke2fs mke2fs e2fsdroid simg2img img2simg tune2fs avbtool lpmake; do sha256sum "$B/$c"; done
+          } > wear7-final-report/PINNED_TOOL_HASHES.txt
+
+      - name: Locate Google aapt2 on hosted Android SDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          AAPT2=$(find "$SDK/build-tools" -type f -name aapt2 -perm -111 -print 2>/dev/null | sort -V | tail -n1)
+          test -n "$AAPT2"
+          "$AAPT2" version | tee wear7-final-report/AAPT2_VERSION.txt
+          sha256sum "$AAPT2" >> wear7-final-report/AAPT2_VERSION.txt
+          echo "AAPT2=$AAPT2" >> "$GITHUB_ENV"
+
+      - name: Download and hash-lock Pixel17 and TicWatch379 exact sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$RUNNER_TEMP/src"
+          curl -fL --retry 3 --retry-delay 3 -o "$PIXEL_FILE" "https://dl.google.com/dl/android/aosp/$PIXEL_FILE"
+          echo "$PIXEL_SHA256  $PIXEL_FILE" | sha256sum -c -
+          curl -fL --retry 3 --retry-delay 3 -o ticwatch379.zip "$TIC_URL"
+          echo "$TIC_SHA256  ticwatch379.zip" | sha256sum -c -
+          {
+            echo "PIXEL_FACTORY_SHA256=$PIXEL_SHA256"
+            echo "TICWATCH379_OTA_SHA256=$TIC_SHA256"
+            echo "KERNEL_IMAGE_EXPECTED_SHA256=$KERNEL_IMAGE_SHA256"
+          } > "$GITHUB_WORKSPACE/wear7-final-report/INPUT_LOCK.txt"
+
+      - name: Download proven Wear7 integration kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.KERNEL_ARTIFACT }}
+          path: ${{ runner.temp }}/kernel-artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.KERNEL_RUN_ID }}
+
+      - name: Hard-gate kernel bytes and KMI audit provenance
+        shell: bash
+        run: |
+          set -euxo pipefail
+          K="$RUNNER_TEMP/kernel-artifact"
+          test -s "$K/Image"
+          echo "$KERNEL_IMAGE_SHA256  $K/Image" | sha256sum -c -
+          grep -q '^STOCK379_KMI_TARGETED_GATE=PASS_337_OF_337$' "$K/docs/CANDIDATE_REPORT.txt"
+          grep -q '^KERNEL_RELEASE=5.15.220-Xinran_StarBai-Test+' "$K/docs/CANDIDATE_REPORT.txt"
+          cp "$K/docs/CANDIDATE_REPORT.txt" wear7-final-report/KERNEL_SOURCE_REPORT.txt
+          sha256sum "$K/Image" "$K/audit/final.config" "$K/audit/Module.symvers" > wear7-final-report/KERNEL_INPUT_SHA256.txt
+
+      - name: Extract Pixel system system_ext product and remove donor AVB footers
+        shell: bash
+        run: |
+          set -euxo pipefail
+          FACTORY="$RUNNER_TEMP/src/$PIXEL_FILE"
+          WORK="$RUNNER_TEMP/work"
+          nested=$(unzip -Z1 "$FACTORY" | grep -E '(^|/)image-[^/]+\.zip$' | head -n1)
+          test -n "$nested"
+          unzip -p "$FACTORY" "$nested" > "$WORK/pixel-inner.zip"
+          for p in system system_ext product; do
+            unzip -p "$WORK/pixel-inner.zip" "$p.img" > "$WORK/$p.input"
+            magic=$(od -An -tx4 -N4 "$WORK/$p.input" | tr -d ' \n')
+            if test "$magic" = ed26ff3a; then simg2img "$WORK/$p.input" "$WORK/$p.pixel.raw"; else mv "$WORK/$p.input" "$WORK/$p.pixel.raw"; fi
+            avbtool info_image --image "$WORK/$p.pixel.raw" > "wear7-final-report/${p}_pixel_avb_before.txt"
+            avbtool erase_footer --image "$WORK/$p.pixel.raw"
+            e2fsck -fn "$WORK/$p.pixel.raw" > "wear7-final-report/${p}_pixel_noavb_fsck.txt" 2>&1 || rc=$?
+            rc=${rc:-0}; test "$rc" -lt 8; unset rc
+          done
+
+      - name: Reconstruct all six exact stock379 dynamic partitions
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OTA="$RUNNER_TEMP/src/ticwatch379.zip"
+          WORK="$RUNNER_TEMP/work"
+          : > wear7-final-report/TICWATCH_DYNAMIC_SHA256.tsv
+          for p in system system_ext product vendor vendor_dlkm system_dlkm; do
+            python3 wear7/scripts/reconstruct_block_ota.py "$OTA" "$p" "$WORK/tic-$p.raw"
+            printf '%s\t%s\t%s\n' "$p" "$(stat -c %s "$WORK/tic-$p.raw")" "$(sha256sum "$WORK/tic-$p.raw" | awk '{print $1}')" >> wear7-final-report/TICWATCH_DYNAMIC_SHA256.tsv
+            e2fsck -fn "$WORK/tic-$p.raw" > "wear7-final-report/tic_${p}_fsck.txt" 2>&1 || rc=$?
+            rc=${rc:-0}; test "$rc" -lt 8; unset rc
+          done
+          grep -qx $'vendor\t297361408\t150238505037c881b079b7c9de1adc231f2c4a94b64f8dd3a7694ebc7408371e' wear7-final-report/TICWATCH_DYNAMIC_SHA256.tsv
+          grep -qx $'vendor_dlkm\t63889408\te9b865fc3eeb54cf1519cda55efbd30b2921e31765f5d98a3060575f95892ab6' wear7-final-report/TICWATCH_DYNAMIC_SHA256.tsv
+          grep -qx $'system_dlkm\t348160\tfdd73e1603333b926424fa5526f015701e453b54349efd012f35c714b202d8de' wear7-final-report/TICWATCH_DYNAMIC_SHA256.tsv
+
+      - name: Extract and hard-gate authoritative stock379 bootchain
+        shell: bash
+        run: |
+          set -euxo pipefail
+          OTA="$RUNNER_TEMP/src/ticwatch379.zip"
+          WORK="$RUNNER_TEMP/work"
+          : > wear7-final-report/STOCK_BOOTCHAIN_SHA256.tsv
+          extract_gate() {
+            f=$1 expected=$2 bytes=$3
+            unzip -p "$OTA" "$f" > "$WORK/$f"
+            test "$(stat -c %s "$WORK/$f")" = "$bytes"
+            echo "$expected  $WORK/$f" | sha256sum -c -
+            printf '%s\t%s\t%s\n' "$f" "$bytes" "$expected" >> wear7-final-report/STOCK_BOOTCHAIN_SHA256.tsv
+          }
+          extract_gate boot.img 251412139ac66fa20d6d93f0a65f95239f9f888b35dae20c866e92acc7daecac 100663296
+          extract_gate init_boot.img c128f41b1e1fe4a2062b1b8464bf8e01650419f158ab7d412a3bf1f0099c9884 8388608
+          extract_gate vendor_boot.img 9d7cd2a5f7a21e9554552e94aaf89c2fdc6d036f59c8e8abe355456f8a5f18cf 100663296
+          extract_gate dtbo.img eb2a8d0028b6e22898b26e4bc71419190a4ea3431a2b66c6c57d9e280ade4c96 8388608
+          extract_gate vbmeta.img 5354ece08d0c8fbc6ff51cf9e535970b0416c80132ead172a803e6b34dbf2118 8192
+          extract_gate vbmeta_system.img 201e993b7a2c4979c94fece32de02e83d91e3ae1dc23258640473fbca69c9f5a 4096
+          avbtool info_image --image "$WORK/vbmeta.img" > wear7-final-report/STOCK_ROOT_VBMETA.txt
+          avbtool info_image --image "$WORK/vbmeta_system.img" > wear7-final-report/STOCK_SYSTEM_VBMETA.txt
+
+      - name: Recreate exact frozen Stage0 payload from stock379
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"; BUNDLE="$WORK/stage0-bundle"
+          for p in system system_ext product; do sudo mkdir -p "$WORK/tic-$p-mnt"; sudo mount -o loop,ro "$WORK/tic-$p.raw" "$WORK/tic-$p-mnt"; done
+          mkdir -p "$BUNDLE/manifests" "$BUNDLE/payload/system/priv-app/TicCompanionWear" "$BUNDLE/payload/product/overlay/DaceEnduroFastPairOverlay" "$BUNDLE/payload/system_ext/lib"
+          cp wear7/manifests/STAGE0_SOURCE_HASHES.tsv "$BUNDLE/manifests/SOURCE_HASHES.tsv"
+          one_match() { root=$1; name=$2; mapfile -t a < <(sudo find "$root" -type f -name "$name" -print); test "${#a[@]}" = 1; printf '%s\n' "${a[0]}"; }
+          sudo cp "$(one_match "$WORK/tic-system-mnt" TicCompanionWear.apk)" "$BUNDLE/payload/system/priv-app/TicCompanionWear/TicCompanionWear.apk"
+          sudo cp "$(one_match "$WORK/tic-product-mnt" DaceEnduroFastPairOverlay.apk)" "$BUNDLE/payload/product/overlay/DaceEnduroFastPairOverlay/DaceEnduroFastPairOverlay.apk"
+          for f in libdisplayconfig.system.qti.so libgralloc.system.qti.so vendor.display.config@2.0.so android.hardware.radio@1.5.so android.hardware.radio@1.6.so vendor.google_clockwork.wristorientation@1.0.so; do
+            sudo cp "$(one_match "$WORK/tic-system_ext-mnt" "$f")" "$BUNDLE/payload/system_ext/lib/$f"
+          done
+          for p in system system_ext product; do sudo umount "$WORK/tic-$p-mnt"; done
+          sudo chown -R "$(id -u):$(id -g)" "$BUNDLE"
+          python3 - <<'PY'
+          import csv,hashlib,os,pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'work/stage0-bundle'
+          rows=list(csv.DictReader((root/'manifests/SOURCE_HASHES.tsv').open(),delimiter='\t'))
+          assert len(rows)==8
+          for r in rows:
+              p=root/r['bundle_path']; h=hashlib.sha256(p.read_bytes()).hexdigest()
+              if h!=r['sha256']: raise SystemExit(f'{p}: {h} != {r["sha256"]}')
+          print('STAGE0_8_OF_8=PASS')
+          PY
+          file "$BUNDLE"/payload/system_ext/lib/*.so | tee wear7-final-report/STAGE0_BRIDGES_FILE.txt
+          test "$(grep -c 'ELF 32-bit' wear7-final-report/STAGE0_BRIDGES_FILE.txt)" = 6
+
+      - name: Stage exact Pixel trees and apply Stage0 plus wireless root contract
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          for p in system system_ext product; do sudo mkdir -p "$WORK/pixel-$p-mnt" "$WORK/stage-$p"; sudo mount -o loop,ro "$WORK/$p.pixel.raw" "$WORK/pixel-$p-mnt"; sudo cp -a "$WORK/pixel-$p-mnt/." "$WORK/stage-$p/"; sudo umount "$WORK/pixel-$p-mnt"; done
+          sudo python3 wear7/scripts/apply_stage0_overlay_v8.py --system-root "$WORK/stage-system" --system-ext-root "$WORK/stage-system_ext" --product-root "$WORK/stage-product" --stage0-bundle "$WORK/stage0-bundle" --report wear7-final-report/STAGE0_APPLY.txt
+          sudo python3 wear7/scripts/add_dace_wireless_root_bootstrap.py --system-root "$WORK/stage-system" --system-ext-root "$WORK/stage-system_ext" --report wear7-final-report/WIRELESS_ROOT_BOOTSTRAP.txt
+          grep -q '^WEAR7_STAGE0_APPLY=PASS$' wear7-final-report/STAGE0_APPLY.txt
+          grep -q '^WEAR7_DACE_WIRELESS_BOOTSTRAP=PASS$' wear7-final-report/WIRELESS_ROOT_BOOTSTRAP.txt
+          grep -qx 'persist.adb.tcp.port=5555' "$WORK/stage-system/system/build.prop"
+          grep -qx 'persist.adb.tls_server.enable=1' "$WORK/stage-system/system/build.prop"
+          test -x "$WORK/stage-system_ext/etc/wear7/96-wifi-adb-persistent.sh"
+          test -f "$WORK/stage-system_ext/etc/init/wear7-dace-wireless-bootstrap.rc"
+
+      - name: Generate metadata exact fs_config and Android17 file contexts
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          sudo python3 wear7/scripts/generate_exact_fs_config.py "$WORK/stage-system" '' "$WORK/system.fs_config"
+          sudo python3 wear7/scripts/generate_exact_fs_config.py "$WORK/stage-system_ext" system_ext "$WORK/system_ext.fs_config"
+          sudo python3 wear7/scripts/generate_exact_fs_config.py "$WORK/stage-product" product "$WORK/product.fs_config"
+          sudo cp "$WORK/stage-system/system/etc/selinux/plat_file_contexts" "$WORK/plat_file_contexts"
+          sudo cp "$WORK/stage-system_ext/etc/selinux/system_ext_file_contexts" "$WORK/system_ext_file_contexts"
+          sudo cp "$WORK/stage-product/etc/selinux/product_file_contexts" "$WORK/product_file_contexts"
+          sudo sh -c "cat '$WORK/plat_file_contexts' '$WORK/system_ext_file_contexts' > '$WORK/system_ext_combined_file_contexts'"
+          sudo sh -c "cat '$WORK/plat_file_contexts' '$WORK/product_file_contexts' > '$WORK/product_combined_file_contexts'"
+          sudo chown "$(id -u):$(id -g)" "$WORK"/*.fs_config "$WORK"/*file_contexts
+
+      - name: Rebuild modified Android17 software filesystems metadata-safe
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"; B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
+          build_one() {
+            p=$1; mountp=$2; extra=$3; contexts=$4
+            donor="$WORK/$p.pixel.raw"; stage="$WORK/stage-$p"; cfg="$WORK/$p.fs_config"; rebuilt="$WORK/$p.w7.raw"
+            old=$(stat -c %s "$donor"); new=$(( (old + extra + 4095) / 4096 * 4096 ))
+            uuid=$(tune2fs -l "$donor" | awk -F: '/Filesystem UUID:/ {gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}')
+            hashseed=$(debugfs -R stats "$donor" 2>/dev/null | awk -F: '/Directory Hash Seed:/ {gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}')
+            inode=$(tune2fs -l "$donor" | awk -F: '/Inode count:/ {gsub(/ /,"",$2); print $2; exit}'); inode=$((inode+160))
+            args=("$stage" "$rebuilt" ext4 "$mountp" "$new" "$contexts" --journal_size 0 --timestamp 1230768000 --fs_config "$cfg" --label "$p" --inodes "$inode" --inode_size 256 --reserved_percent 0 --mke2fs_uuid "$uuid" --share_dup_blocks)
+            if test -n "$hashseed"; then args+=(--mke2fs_hash_seed "$hashseed"); fi
+            sudo env PATH="$B:$PATH" "$B/mkuserimg_mke2fs" "${args[@]}" | tee "wear7-final-report/${p}_mkuserimg.log"
+            sudo chown "$(id -u):$(id -g)" "$rebuilt"
+            e2fsck -fn "$rebuilt" > "wear7-final-report/${p}_w7_fsck.txt" 2>&1 || rc=$?; rc=${rc:-0}; test "$rc" -lt 8; unset rc
+            printf '%s\t%s\n' "$p" "$(stat -c %s "$rebuilt")" >> wear7-final-report/W7_FILESYSTEM_SIZES.tsv
+          }
+          build_one system / $((32*1024*1024)) "$WORK/plat_file_contexts"
+          build_one system_ext /system_ext $((16*1024*1024)) "$WORK/system_ext_combined_file_contexts"
+          build_one product /product $((8*1024*1024)) "$WORK/product_combined_file_contexts"
+
+      - name: Mount final filesystem payloads and run exact static gates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          for p in system system_ext product; do sudo mkdir -p "$WORK/final-$p"; sudo mount -o loop,ro "$WORK/$p.w7.raw" "$WORK/final-$p"; done
+          sudo mkdir -p "$WORK/final-vendor"; sudo mount -o loop,ro "$WORK/tic-vendor.raw" "$WORK/final-vendor"
+          SYS="$WORK/final-system"; SX="$WORK/final-system_ext"; PROD="$WORK/final-product"; VEN="$WORK/final-vendor"
+
+          sudo python3 wear7/scripts/validate_vintf_static_contract.py --system-root "$SYS" --system-ext-root "$SX" --product-root "$PROD" --vendor-root "$VEN" --report wear7-final-report/VINTF_STATIC_CONTRACT.txt
+          grep -q '^VINTF_STATIC_EXACT_CONTRACT=PASS$' wear7-final-report/VINTF_STATIC_CONTRACT.txt
+
+          sudo getfattr -n security.selinux -e text "$SX/etc/init/wear7-dace-wireless-bootstrap.rc" "$SX/etc/wear7/96-wifi-adb-persistent.sh" | tee wear7-final-report/WIRELESS_BOOTSTRAP_SELINUX.txt
+          test "$(grep -c 'security.selinux=' wear7-final-report/WIRELESS_BOOTSTRAP_SELINUX.txt)" -eq 2
+          sudo grep -q 'setprop service.adb.tcp.port 5555' "$SX/etc/init/wear7-dace-wireless-bootstrap.rc"
+          sudo grep -q 'config_wifiSuspendOptimizationsEnabled' "$SX/etc/wear7/96-wifi-adb-persistent.sh"
+
+          OVER="$PROD/overlay/DaceEnduroFastPairOverlay/DaceEnduroFastPairOverlay.apk"
+          "$AAPT2" dump xmltree "$OVER" --file AndroidManifest.xml > wear7-final-report/FASTPAIR_OVERLAY_MANIFEST.txt
+          grep -q 'com.google.android.wearable.setupwizard' wear7-final-report/FASTPAIR_OVERLAY_MANIFEST.txt
+          grep -q 'DaceEnduroFastPairOverlay' wear7-final-report/FASTPAIR_OVERLAY_MANIFEST.txt || true
+          TARGET=''
+          while IFS= read -r apk; do
+            if "$AAPT2" dump resources "$apk" 2>/dev/null | grep -q 'google_fast_pair_service_model_id'; then TARGET="$apk"; break; fi
+          done < <(sudo find "$PROD" -type f \( -iname '*setup*wizard*.apk' -o -iname '*setupwizard*.apk' \) -print)
+          test -n "$TARGET"
+          "$AAPT2" dump badging "$TARGET" > wear7-final-report/FASTPAIR_TARGET_BADGING.txt
+          "$AAPT2" dump resources "$TARGET" > wear7-final-report/FASTPAIR_TARGET_RESOURCES.txt
+          grep -q "package: name='com.google.android.wearable.setupwizard'" wear7-final-report/FASTPAIR_TARGET_BADGING.txt
+          grep -q 'google_fast_pair_service_model_id' wear7-final-report/FASTPAIR_TARGET_RESOURCES.txt
+          echo "FASTPAIR_STATIC_TARGET=$TARGET" | tee wear7-final-report/FASTPAIR_STATIC_VERDICT.txt
+          echo 'FASTPAIR_STATIC_RESOURCE_CONTRACT=PASS' >> wear7-final-report/FASTPAIR_STATIC_VERDICT.txt
+
+          for p in system system_ext product; do sudo python3 wear7/scripts/fs_semantic_manifest.py "$WORK/final-$p" "wear7-final-report/${p}_final_manifest.tsv"; done
+          sudo umount "$WORK/final-system" "$WORK/final-system_ext" "$WORK/final-product" "$WORK/final-vendor"
+          sudo chown -R "$(id -u):$(id -g)" wear7-final-report
+
+      - name: Add bringup AVB hashtrees to W7 software images
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          SYS_SIZE=$((1741303808)); SX_SIZE=$((283598848)); PROD_SIZE=$((1613258752))
+          : > wear7-final-report/AVB_LOGICAL_SIZES.tsv
+          add_tree() {
+            p=$1; psz=$2
+            img="$WORK/$p.w7.raw"
+            max=$(avbtool add_hashtree_footer --partition_size "$psz" --calc_max_image_size)
+            raw=$(stat -c %s "$img")
+            test "$raw" -le "$max"
+            avbtool add_hashtree_footer --image "$img" --partition_name "$p" --partition_size "$psz" --algorithm NONE --salt "$AVB_SALT"
+            test "$(stat -c %s "$img")" = "$psz"
+            avbtool info_image --image "$img" > "wear7-final-report/${p}_bringup_avb.txt"
+            printf '%s\traw_before_avb=%s\tmax_payload=%s\tpartition=%s\n' "$p" "$raw" "$max" "$psz" >> wear7-final-report/AVB_LOGICAL_SIZES.tsv
+          }
+          add_tree system "$SYS_SIZE"
+          add_tree system_ext "$SX_SIZE"
+          add_tree product "$PROD_SIZE"
+
+      - name: Repack authoritative stock379 boot header with proven 5.15.220 kernel
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"; K="$RUNNER_TEMP/kernel-artifact/Image"
+          cp "$WORK/boot.img" "$WORK/boot.payload.img"
+          avbtool erase_footer --image "$WORK/boot.payload.img"
+          python3 - "$WORK/boot.payload.img" "$K" "$WORK/boot.w7.img" <<'PY'
+          import pathlib,struct,sys
+          src,kernel,out=map(pathlib.Path,sys.argv[1:])
+          b=src.read_bytes(); k=kernel.read_bytes()
+          if b[:8] != b'ANDROID!': raise SystemExit('bad stock boot magic')
+          old=struct.unpack_from('<I',b,8)[0]
+          ramdisk=struct.unpack_from('<I',b,12)[0]
+          hsize=struct.unpack_from('<I',b,20)[0]
+          hver=struct.unpack_from('<I',b,40)[0]
+          if old != 46959104 or ramdisk != 0 or hsize != 1584 or hver != 4:
+              raise SystemExit(f'unexpected stock boot header old={old} ramdisk={ramdisk} hsize={hsize} hver={hver}')
+          hdr=bytearray(b[:4096]); struct.pack_into('<I',hdr,8,len(k))
+          raw=bytes(hdr)+k
+          raw += b'\0' * ((4096-len(raw)%4096)%4096)
+          out.write_bytes(raw)
+          print(f'BOOT_V4_REPACK old_kernel={old} new_kernel={len(k)} payload={len(raw)}')
+          PY
+          avbtool add_hash_footer --image "$WORK/boot.w7.img" --partition_name boot --partition_size 100663296 --algorithm NONE --salt "$BOOT_AVB_SALT"
+          test "$(stat -c %s "$WORK/boot.w7.img")" = 100663296
+          avbtool info_image --image "$WORK/boot.w7.img" > wear7-final-report/BOOT_W7_AVB.txt
+          grep -q 'Partition Name:        boot' wear7-final-report/BOOT_W7_AVB.txt
+          cp "$WORK/boot.w7.img" wear7-final-bootchain/boot.img
+          cp "$WORK/init_boot.img" "$WORK/vendor_boot.img" "$WORK/dtbo.img" wear7-final-bootchain/
+          sha256sum wear7-final-bootchain/*.img > wear7-final-report/BOOTCHAIN_PRE_VBMETA_SHA256.txt
+
+      - name: Generate explicit unlocked-first-bringup vbmeta pair
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          # OEM private keys are unavailable. For the FIRST BRINGUP ONLY use AVB
+          # flags 3 (hashtree + verification disabled) while keeping the bootloader
+          # unlocked. Descriptors are still included and audited. This is not a
+          # production/lockable AVB configuration.
+          avbtool make_vbmeta_image --output "$WORK/vbmeta_system.w7.img" --padding_size 4096 --algorithm NONE --flags 3 --rollback_index 1730419200 \
+            --include_descriptors_from_image "$WORK/system.w7.raw" \
+            --include_descriptors_from_image "$WORK/system_ext.w7.raw" \
+            --include_descriptors_from_image "$WORK/product.w7.raw"
+          avbtool make_vbmeta_image --output "$WORK/vbmeta.w7.img" --padding_size 8192 --algorithm NONE --flags 3 --rollback_index 0 \
+            --include_descriptors_from_image "$WORK/boot.w7.img" \
+            --include_descriptors_from_image "$WORK/init_boot.img" \
+            --include_descriptors_from_image "$WORK/vendor_boot.img" \
+            --include_descriptors_from_image "$WORK/dtbo.img" \
+            --include_descriptors_from_image "$WORK/tic-system_dlkm.raw" \
+            --include_descriptors_from_image "$WORK/tic-vendor.raw" \
+            --include_descriptors_from_image "$WORK/tic-vendor_dlkm.raw"
+          avbtool info_image --image "$WORK/vbmeta_system.w7.img" > wear7-final-report/VBMETA_SYSTEM_W7.txt
+          avbtool info_image --image "$WORK/vbmeta.w7.img" > wear7-final-report/VBMETA_ROOT_W7.txt
+          grep -q 'Flags:                    3' wear7-final-report/VBMETA_SYSTEM_W7.txt
+          grep -q 'Flags:                    3' wear7-final-report/VBMETA_ROOT_W7.txt
+          grep -q 'Partition Name:        system' wear7-final-report/VBMETA_SYSTEM_W7.txt
+          grep -q 'Partition Name:        system_ext' wear7-final-report/VBMETA_SYSTEM_W7.txt
+          grep -q 'Partition Name:        product' wear7-final-report/VBMETA_SYSTEM_W7.txt
+          grep -q 'Partition Name:        boot' wear7-final-report/VBMETA_ROOT_W7.txt
+          grep -q 'Partition Name:        vendor' wear7-final-report/VBMETA_ROOT_W7.txt
+          cp "$WORK/vbmeta.w7.img" wear7-final-bootchain/vbmeta.img
+          cp "$WORK/vbmeta_system.w7.img" wear7-final-bootchain/vbmeta_system.img
+          cat > wear7-final-report/AVB_MODE.txt <<'EOF'
+          AVB_MODE=UNLOCKED_FIRST_BRINGUP_FLAGS_3
+          AVB_HASHTREE_DISABLED=YES
+          AVB_VERIFICATION_DISABLED=YES
+          OEM_PRIVATE_KEYS_USED=NO
+          BOOTLOADER_MUST_REMAIN_UNLOCKED=YES
+          PRODUCTION_LOCKABLE_AVB=NO
+          EOF
+
+      - name: Build full sparse super with exact TicWatch group geometry
+        shell: bash
+        run: |
+          set -euxo pipefail
+          WORK="$RUNNER_TEMP/work"
+          SYS_SIZE=$(stat -c %s "$WORK/system.w7.raw")
+          SX_SIZE=$(stat -c %s "$WORK/system_ext.w7.raw")
+          PROD_SIZE=$(stat -c %s "$WORK/product.w7.raw")
+          VEN_SIZE=$(stat -c %s "$WORK/tic-vendor.raw")
+          VDLKM_SIZE=$(stat -c %s "$WORK/tic-vendor_dlkm.raw")
+          SDLKM_SIZE=$(stat -c %s "$WORK/tic-system_dlkm.raw")
+          TOTAL=$((SYS_SIZE+SX_SIZE+PROD_SIZE+VEN_SIZE+VDLKM_SIZE+SDLKM_SIZE))
+          test "$TOTAL" -le "$DYNAMIC_GROUP_SIZE"
+          HEADROOM=$((DYNAMIC_GROUP_SIZE-TOTAL))
+          {
+            echo "super_device_size=$SUPER_DEVICE_SIZE"
+            echo "qti_dynamic_partitions_max=$DYNAMIC_GROUP_SIZE"
+            echo "allocated=$TOTAL"
+            echo "headroom=$HEADROOM"
+            printf 'system=%s\nsystem_ext=%s\nproduct=%s\nvendor=%s\nvendor_dlkm=%s\nsystem_dlkm=%s\n' "$SYS_SIZE" "$SX_SIZE" "$PROD_SIZE" "$VEN_SIZE" "$VDLKM_SIZE" "$SDLKM_SIZE"
+          } | tee wear7-final-report/SUPER_GEOMETRY.txt
+          lpmake --metadata-size 65536 --super-name super --metadata-slots 2 \
+            --device "super:$SUPER_DEVICE_SIZE" \
+            --group "qti_dynamic_partitions:$DYNAMIC_GROUP_SIZE" \
+            --partition "system:readonly:$SYS_SIZE:qti_dynamic_partitions" --image "system=$WORK/system.w7.raw" \
+            --partition "system_ext:readonly:$SX_SIZE:qti_dynamic_partitions" --image "system_ext=$WORK/system_ext.w7.raw" \
+            --partition "product:readonly:$PROD_SIZE:qti_dynamic_partitions" --image "product=$WORK/product.w7.raw" \
+            --partition "vendor:readonly:$VEN_SIZE:qti_dynamic_partitions" --image "vendor=$WORK/tic-vendor.raw" \
+            --partition "vendor_dlkm:readonly:$VDLKM_SIZE:qti_dynamic_partitions" --image "vendor_dlkm=$WORK/tic-vendor_dlkm.raw" \
+            --partition "system_dlkm:readonly:$SDLKM_SIZE:qti_dynamic_partitions" --image "system_dlkm=$WORK/tic-system_dlkm.raw" \
+            --sparse --output wear7-final-candidate/super.img
+          test -s wear7-final-candidate/super.img
+          simg2img wear7-final-candidate/super.img "$WORK/super.raw"
+          test "$(stat -c %s "$WORK/super.raw")" = "$SUPER_DEVICE_SIZE"
+          python3 - "$WORK/super.raw" <<'PY' | tee wear7-final-report/SUPER_METADATA_MAGIC.txt
+          import pathlib,struct,sys
+          p=pathlib.Path(sys.argv[1]); data=p.open('rb').read(2*1024*1024)
+          geom=struct.pack('<I',0x616c4467); hdr=struct.pack('<I',0x414c5030)
+          g=[i for i in range(len(data)) if data.startswith(geom,i)]
+          h=[i for i in range(len(data)) if data.startswith(hdr,i)]
+          print('geometry_magic_offsets',g[:8])
+          print('metadata_header_offsets',h[:8])
+          if not g or not h: raise SystemExit('liblp geometry/header magic missing')
+          for s in [b'system\0',b'system_ext\0',b'product\0',b'vendor\0',b'vendor_dlkm\0',b'system_dlkm\0',b'qti_dynamic_partitions\0']:
+              if s not in data: raise SystemExit('missing LP metadata name '+repr(s))
+          print('SUPER_LIBLP_STATIC=PASS')
+          PY
+          rm -f "$WORK/super.raw"
+          sha256sum wear7-final-candidate/super.img > wear7-final-report/SUPER_SHA256.txt
+          stat -c 'super_sparse_bytes=%s' wear7-final-candidate/super.img >> wear7-final-report/SUPER_SHA256.txt
+
+      - name: Package small bootchain and candidate manifest
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cp wear7-final-bootchain/* wear7-final-candidate/
+          {
+            echo 'DEVICE=TicWatch Pro 5 Enduro'
+            echo 'CODENAME=dace'
+            echo 'TARGET=Wear OS 7 / Android 17 / API37'
+            echo 'DONOR=Pixel Watch 3 solios CP2A.260603.001.S1'
+            echo "PIXEL_FACTORY_SHA256=$PIXEL_SHA256"
+            echo "TICWATCH379_OTA_SHA256=$TIC_SHA256"
+            echo "KERNEL_IMAGE_SHA256=$KERNEL_IMAGE_SHA256"
+            echo 'KERNEL_READY_FOR_WEAR7_INTEGRATION=YES'
+            echo 'SYSTEM_SYSTEM_EXT_PRODUCT_STAGE0=PASS'
+            echo 'WIRELESS_ADB_TCP_5555_STATIC=PASS'
+            echo 'ROOT_BACKEND=KernelSU_Next_builtin'
+            echo 'ROOT_PATH=adb_shell_then_su_c'
+            echo 'VINTF_STATIC_EXACT_CONTRACT=PASS'
+            echo 'FASTPAIR_STATIC_RESOURCE_CONTRACT=PASS'
+            echo 'AVB_MODE=UNLOCKED_FIRST_BRINGUP_FLAGS_3'
+            echo 'BOOTLOADER_MUST_REMAIN_UNLOCKED=YES'
+            echo 'RECOVERY_ROLLBACK_READY_FOR_FIRST_WEAR7_FLASH=NO'
+            echo 'FIRST_WEAR7_FLASH=FORBIDDEN_UNTIL_RECOVERY_READY'
+            echo 'PAIRING_RUNTIME=UNTESTED_UNTIL_FIRST_BOOT'
+            echo 'WIRELESS_ROOT_RUNTIME=UNTESTED_UNTIL_FIRST_BOOT'
+          } > wear7-final-candidate/CANDIDATE_MANIFEST.txt
+          (cd wear7-final-candidate && sha256sum boot.img init_boot.img vendor_boot.img dtbo.img vbmeta.img vbmeta_system.img super.img > SHA256SUMS.txt)
+          cp wear7-final-candidate/CANDIDATE_MANIFEST.txt wear7-final-report/
+          cp wear7-final-candidate/SHA256SUMS.txt wear7-final-report/CANDIDATE_SHA256SUMS.txt
+          cat > wear7-final-report/FINAL_OFFLINE_VERDICT.txt <<'EOF'
+          ROM_WEAR7_OFFLINE_CANDIDATE=PASS
+          SOFTWARE_IMAGES=PASS
+          TICWATCH_HARDWARE_PARTITIONS=STOCK379_EXACT
+          BOOT_KERNEL_INTEGRATION=PASS_STATIC
+          SUPER_ASSEMBLY=PASS
+          AVB_UNLOCKED_BRINGUP=PASS_STATIC
+          WIFI_ADB_5555_BOOTSTRAP=PASS_STATIC
+          KERNELSU_ROOT_PRESENT_IN_KERNEL=YES
+          PAIRING_PATH_PREPARED=MOBVOI_FASTPAIR_PLUS_PIXEL_SETUPWIZARD
+          OFFICIAL_CHECKVINTF_HOST=UNAVAILABLE_IN_PINNED_TOOLSET
+          EXACT_VINTF_HARD_CONTRACT_6_OF_6=PASS
+          RECOVERY_ROLLBACK_READY_FOR_FIRST_WEAR7_FLASH=NO
+          FIRST_FLASH_AUTHORIZED=NO
+          EOF
+          find wear7-final-report -maxdepth 1 -type f -print0 | sort -z | xargs -0 sha256sum > wear7-final-report/REPORT_SHA256SUMS.txt
+          df -h
+          du -h wear7-final-candidate/* | sort -h
+
+      - name: Upload final audit reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Wear7-Final-Offline-Candidate-Reports
+          path: wear7-final-report/
+          retention-days: 30
+          compression-level: 9
+
+      - name: Upload first-bringup bootchain candidate
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: Wear7-First-Bringup-Bootchain
+          path: |
+            wear7-final-candidate/boot.img
+            wear7-final-candidate/init_boot.img
+            wear7-final-candidate/vendor_boot.img
+            wear7-final-candidate/dtbo.img
+            wear7-final-candidate/vbmeta.img
+            wear7-final-candidate/vbmeta_system.img
+            wear7-final-candidate/CANDIDATE_MANIFEST.txt
+            wear7-final-candidate/SHA256SUMS.txt
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload first-bringup super candidate
+        uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: Wear7-First-Bringup-Super
+          path: wear7-final-candidate/super.img
+          retention-days: 14
+          compression-level: 0
