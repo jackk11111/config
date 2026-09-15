@@ -85,6 +85,8 @@ jobs:
           sudo mount -o loop,ro "$WORK/system.donor.raw" "$WORK/system-mnt"
           sudo mount -o loop,ro "$WORK/system_ext.donor.raw" "$WORK/systemext-mnt"
 
+          # Keep the copied donor tree ownership intact. In particular, donor
+          # lost+found is 0:0 and e2fsdroid preserves that entry from source.
           sudo cp -a "$WORK/systemext-mnt/." "$WORK/stage/"
           sudo python3 wear7/scripts/generate_exact_fs_config.py \
             "$WORK/systemext-mnt" system_ext "$WORK/system_ext.fs_config"
@@ -100,10 +102,9 @@ jobs:
           grep -q '/system_ext' "$WORK/system_ext_combined_file_contexts"
 
           sudo umount "$WORK/system-mnt" "$WORK/systemext-mnt"
-          sudo chown -R "$(id -u):$(id -g)" \
-            "$WORK/stage" "$WORK/system_ext.fs_config" \
-            "$WORK/plat_file_contexts" "$WORK/system_ext_file_contexts" \
-            "$WORK/system_ext_combined_file_contexts"
+          sudo chown "$(id -u):$(id -g)" \
+            "$WORK/system_ext.fs_config" "$WORK/plat_file_contexts" \
+            "$WORK/system_ext_file_contexts" "$WORK/system_ext_combined_file_contexts"
           chmod 0644 "$WORK/system_ext.fs_config" "$WORK/plat_file_contexts" \
             "$WORK/system_ext_file_contexts" "$WORK/system_ext_combined_file_contexts"
           sha256sum "$WORK/system_ext.fs_config" "$WORK/plat_file_contexts" \
@@ -120,9 +121,6 @@ jobs:
           UUID='b929aaa8-0d20-509e-a9c9-aea96b9f297e'
           HASHSEED='f53efb2c-9e4d-5005-9a00-622fedc36d54'
           SIZE=233267200
-          # Run the filesystem creator as root so the mke2fs-created lost+found
-          # matches the donor's uid/gid 0:0. All staged Android metadata still
-          # comes from the exact canned fs_config and donor SELinux contexts.
           sudo env PATH="$B:$PATH" "$B/mkuserimg_mke2fs" \
             "$WORK/stage" "$WORK/system_ext.rebuilt.raw" ext4 /system_ext "$SIZE" \
             -j 0 -T 1230768000 -C "$WORK/system_ext.fs_config" -L system_ext \
