@@ -1,0 +1,19 @@
+FIRST BUILD / WEAR OS 7
+
+- Pixel Watch 3 Wear7/Android17 remains SYSTEM/SYSTEM_EXT/PRODUCT software base.
+- Retain Pixel versions for same-path system_ext libraries and framework JARs.
+- Add only the eight frozen stock payload items tracked by STAGE0_SOURCE_HASHES.tsv.
+- Remove system_ext/etc/permissions/display_offload_feature.xml.
+- Do not require or advertise Pixel DisplayOffload on dace.
+- Retain vendor.google_clockwork.wristorientation/default in the Wear level-7 matrix.
+- Remove Pixel SW5100-specific device compatibility requirements, including GoogleBattery/WAC/WatchCharger fragments where present.
+- Do not change persist.vendor.touch_offload automatically.
+- Keep Pixel GMS Wear APEX, Play Store and Chimera tree byte-identical.
+- Keep TicWatch 379 vendor/vendor_dlkm/system_dlkm unchanged.
+- Do not import Android13 oat/odex/vdex.
+- Do not import stock libseccam.so in the first build.
+- Do not wholesale-copy Android13 SELinux policy; only a minimal Android17 fragment is allowed if the targeted probe proves it necessary.
+- Do not use Pixel/Xiaomi boot, vendor_boot or firmware.
+- Do not re-sign Pixel Wear core binaries unless a proven blocker requires it.
+- First bring-up uses clean userdata/factory reset; no-wipe Wear4->Wear7 migration is deferred.
+- No Wear7 persistent flash until dedicated recovery/rollback is physically validated.
