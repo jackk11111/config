@@ -5,6 +5,8 @@ on:
     branches: [wear7-rom-staging]
     paths:
       - '.github/workflows/wear7-systemext-roundtrip-probe.yml'
+      - 'wear7/scripts/generate_exact_fs_config.py'
+      - 'wear7/scripts/fs_semantic_manifest.py'
       - 'wear7/TRIGGER_SYSTEMEXT_ROUNDTRIP'
   workflow_dispatch:
 
@@ -40,7 +42,7 @@ jobs:
           git -C "$RUNNER_TEMP/kernel-build-tools" checkout --detach FETCH_HEAD
           test "$(git -C "$RUNNER_TEMP/kernel-build-tools" rev-parse HEAD)" = "$KERNEL_BUILD_TOOLS_SHA"
           B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
-          for c in mkuserimg_mke2fs mke2fs e2fsdroid simg2img tune2fs; do
+          for c in mkuserimg_mke2fs mke2fs e2fsdroid simg2img tune2fs avbtool; do
             test -x "$B/$c" || { echo "missing pinned tool: $c"; exit 20; }
           done
           echo "$B" >> "$GITHUB_PATH"
@@ -67,7 +69,7 @@ jobs:
           fi
           avbtool erase_footer --image "$RUNNER_TEMP/work/system_ext.donor.raw"
           test "$(stat -c %s "$RUNNER_TEMP/work/system_ext.donor.raw")" = 233267200
-          e2fsck -fn "$RUNNER_TEMP/work/system_ext.donor.raw" > wear7-systemext-roundtrip-report/donor_e2fsck.txt 2>&1 || rc=$?
+          e2fsck -fn "$RUNNER_TEMP/work/system_ext.donor.raw" > "$GITHUB_WORKSPACE/wear7-systemext-roundtrip-report/donor_e2fsck.txt" 2>&1 || rc=$?
           rc=${rc:-0}; test "$rc" -lt 8; unset rc
 
       - name: Mount donor read-only and create exact fs_config
@@ -79,41 +81,11 @@ jobs:
           sudo mkdir -p "$WORK/donor-mnt" "$WORK/stage"
           sudo mount -o loop,ro "$WORK/system_ext.donor.raw" "$WORK/donor-mnt"
           sudo cp -a "$WORK/donor-mnt/." "$WORK/stage/"
-          sudo chown -R "$(id -u):$(id -g)" "$WORK/stage"
-
-          sudo python3 - "$WORK/donor-mnt" "$WORK/system_ext.fs_config" <<'PY'
-import os, stat, struct, sys
-root, out = sys.argv[1:]
-
-def capmask(path):
-    try:
-        b=os.getxattr(path,'security.capability',follow_symlinks=False)
-    except OSError:
-        return 0
-    if len(b) < 12:
-        return 0
-    p0=struct.unpack_from('<I',b,4)[0]
-    p1=struct.unpack_from('<I',b,12)[0] if len(b) >= 20 else 0
-    return p0 | (p1 << 32)
-rows=[]
-for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
-    names=['.'] if base == root else []
-    names += dirs + files
-    for name in names:
-        path = base if name=='.' else os.path.join(base,name)
-        rel=os.path.relpath(path,root)
-        logical='system_ext' if rel=='.' else 'system_ext/'+rel
-        st=os.lstat(path)
-        mode=stat.S_IMODE(st.st_mode)
-        cap=capmask(path)
-        extra=f' capabilities=0x{cap:x}' if cap else ''
-        rows.append((logical,f'{logical} {st.st_uid} {st.st_gid} {mode:04o}{extra}'))
-with open(out,'w') as f:
-    for _,line in sorted(rows): f.write(line+'\n')
-PY
+          sudo python3 wear7/scripts/generate_exact_fs_config.py "$WORK/donor-mnt" system_ext "$WORK/system_ext.fs_config"
           sudo cp "$WORK/donor-mnt/etc/selinux/system_ext_file_contexts" "$WORK/system_ext_file_contexts"
-          sudo chmod 0644 "$WORK/system_ext.fs_config" "$WORK/system_ext_file_contexts"
           sudo umount "$WORK/donor-mnt"
+          sudo chown -R "$(id -u):$(id -g)" "$WORK/stage" "$WORK/system_ext.fs_config" "$WORK/system_ext_file_contexts"
+          chmod 0644 "$WORK/system_ext.fs_config" "$WORK/system_ext_file_contexts"
           sha256sum "$WORK/system_ext.fs_config" "$WORK/system_ext_file_contexts" | tee "$OUT/rebuild_inputs_sha256.txt"
 
       - name: Rebuild unmodified system_ext with Android tools
@@ -146,52 +118,10 @@ PY
           sudo mkdir -p "$WORK/donor-mnt" "$WORK/rebuilt-mnt"
           sudo mount -o loop,ro "$WORK/system_ext.donor.raw" "$WORK/donor-mnt"
           sudo mount -o loop,ro "$WORK/system_ext.rebuilt.raw" "$WORK/rebuilt-mnt"
-
-          sudo python3 - "$WORK/donor-mnt" "$OUT/donor_manifest.tsv" <<'PY'
-import hashlib, os, stat, sys
-root,out=sys.argv[1:]
-def hxattr(path,name):
-    try:return os.getxattr(path,name,follow_symlinks=False).hex()
-    except OSError:return '-'
-rows=[]
-for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
-    for name in dirs+files:
-        p=os.path.join(base,name); rel=os.path.relpath(p,root); s=os.lstat(p)
-        if stat.S_ISREG(s.st_mode):
-            typ='f'; h=hashlib.sha256(open(p,'rb').read()).hexdigest(); target='-'
-        elif stat.S_ISLNK(s.st_mode):
-            typ='l'; h='-'; target=os.readlink(p)
-        elif stat.S_ISDIR(s.st_mode): typ='d'; h='-'; target='-'
-        else: typ='o'; h='-'; target='-'
-        rows.append((rel,typ,s.st_uid,s.st_gid,f'{stat.S_IMODE(s.st_mode):04o}',h,target,hxattr(p,'security.selinux'),hxattr(p,'security.capability')))
-with open(out,'w') as f:
-    f.write('path\ttype\tuid\tgid\tmode\tsha256\ttarget\tselinux_hex\tcapability_hex\n')
-    for r in sorted(rows): f.write('\t'.join(map(str,r))+'\n')
-PY
-          sudo python3 - "$WORK/rebuilt-mnt" "$OUT/rebuilt_manifest.tsv" <<'PY'
-import hashlib, os, stat, sys
-root,out=sys.argv[1:]
-def hxattr(path,name):
-    try:return os.getxattr(path,name,follow_symlinks=False).hex()
-    except OSError:return '-'
-rows=[]
-for base, dirs, files in os.walk(root, topdown=True, followlinks=False):
-    for name in dirs+files:
-        p=os.path.join(base,name); rel=os.path.relpath(p,root); s=os.lstat(p)
-        if stat.S_ISREG(s.st_mode):
-            typ='f'; h=hashlib.sha256(open(p,'rb').read()).hexdigest(); target='-'
-        elif stat.S_ISLNK(s.st_mode):
-            typ='l'; h='-'; target=os.readlink(p)
-        elif stat.S_ISDIR(s.st_mode): typ='d'; h='-'; target='-'
-        else: typ='o'; h='-'; target='-'
-        rows.append((rel,typ,s.st_uid,s.st_gid,f'{stat.S_IMODE(s.st_mode):04o}',h,target,hxattr(p,'security.selinux'),hxattr(p,'security.capability')))
-with open(out,'w') as f:
-    f.write('path\ttype\tuid\tgid\tmode\tsha256\ttarget\tselinux_hex\tcapability_hex\n')
-    for r in sorted(rows): f.write('\t'.join(map(str,r))+'\n')
-PY
+          sudo python3 wear7/scripts/fs_semantic_manifest.py "$WORK/donor-mnt" "$OUT/donor_manifest.tsv"
+          sudo python3 wear7/scripts/fs_semantic_manifest.py "$WORK/rebuilt-mnt" "$OUT/rebuilt_manifest.tsv"
           sudo umount "$WORK/donor-mnt" "$WORK/rebuilt-mnt"
           sudo chown "$(id -u):$(id -g)" "$OUT/donor_manifest.tsv" "$OUT/rebuilt_manifest.tsv"
-
           if diff -u "$OUT/donor_manifest.tsv" "$OUT/rebuilt_manifest.tsv" > "$OUT/manifest.diff"; then
             echo 'SYSTEM_EXT_SEMANTIC_ROUNDTRIP=PASS' | tee "$OUT/VERDICT.txt"
           else
