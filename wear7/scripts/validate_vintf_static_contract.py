@@ -31,7 +31,11 @@ def xml_files(root: Path, rel: str) -> list[Path]:
     d = root / rel
     if not d.is_dir():
         return []
-    return sorted(p for p in d.glob("*.xml") if p.is_file())
+    # Android places many framework HAL declarations in
+    # /system/etc/vintf/manifest/*.xml rather than directly under vintf/.
+    # Scan recursively so fragmented framework manifests are part of the
+    # contract check exactly as they are at runtime.
+    return sorted(p for p in d.rglob("*.xml") if p.is_file())
 
 
 def manifest_instances(paths: list[Path]) -> set[tuple[str, str, str, str]]:
@@ -48,7 +52,6 @@ def manifest_instances(paths: list[Path]) -> set[tuple[str, str, str, str]]:
                 continue
             name = next(((n.text or "").strip() for n in hal if lname(n.tag) == "name"), "")
 
-            # Modern framework manifests normally use <fqname>@1.x::I/instance</fqname>.
             for node in hal:
                 if lname(node.tag) != "fqname":
                     continue
@@ -57,7 +60,6 @@ def manifest_instances(paths: list[Path]) -> set[tuple[str, str, str, str]]:
                     major, minor, iface, instance = m.groups()
                     got.add((name, f"{major}.{minor}", iface, instance))
 
-            # Keep support for the older structured <version>/<interface> encoding.
             versions = [(n.text or "").strip() for n in hal if lname(n.tag) == "version"]
             for iface in hal:
                 if lname(iface.tag) != "interface":
@@ -116,11 +118,10 @@ def main() -> int:
     instances = manifest_instances(framework_manifests)
     missing = sorted(req for req in REQUIRED if not contract_present(instances, req))
     if missing:
-        raise RuntimeError("missing frozen vendor HIDL contracts: " + repr(missing))
+        present_related = sorted(x for x in instances if x[0] in {r[0] for r in missing})
+        raise RuntimeError("missing frozen vendor HIDL contracts: " + repr(missing) +
+                           " related_present=" + repr(present_related))
 
-    # Stock dace advertises target-level 7. Only the deliberately selected Wear
-    # FCM7 file is patched for first bringup; later FCM8/yearly matrices are kept
-    # intact and are not treated as the active target contract.
     fcm7 = s / "system/etc/vintf/wear_compatibility_matrix.7.xml"
     if not fcm7.is_file():
         raise RuntimeError("active Wear FCM7 matrix missing")
