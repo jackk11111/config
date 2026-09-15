@@ -151,8 +151,8 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$BUNDLE"
 
           python3 - <<'PY'
-          import csv, hashlib, pathlib, sys
-          root=pathlib.Path("$RUNNER_TEMP/work/stage0-bundle")
+          import csv, hashlib, os, pathlib
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'work/stage0-bundle'
           rows=list(csv.DictReader((root/'manifests/SOURCE_HASHES.tsv').open(), delimiter='\t'))
           if len(rows)!=8: raise SystemExit(f'expected 8 Stage0 rows, got {len(rows)}')
           for row in rows:
@@ -260,15 +260,17 @@ jobs:
             'ro.wear.comms.offload.enabled=false'; do grep -qxF "$kv" "$SYS/system/build.prop"; done
 
           python3 - <<'PY'
-          import csv, hashlib, pathlib
-          work=pathlib.Path("$RUNNER_TEMP/work")
-          roots={'payload/system/':work/'rebuilt-system-mnt/system/', 'payload/system_ext/':work/'rebuilt-system_ext-mnt/', 'payload/product/':work/'rebuilt-product-mnt/'}
-          rows=list(csv.DictReader((pathlib.Path('wear7/manifests/STAGE0_SOURCE_HASHES.tsv')).open(), delimiter='\t'))
+          import csv, hashlib, os, pathlib
+          work=pathlib.Path(os.environ['RUNNER_TEMP'])/'work'
+          rows=list(csv.DictReader(pathlib.Path('wear7/manifests/STAGE0_SOURCE_HASHES.tsv').open(), delimiter='\t'))
           for r in rows:
-              src=r['bundle_path']; dst=None
-              if src.endswith('TicCompanionWear.apk'): dst=work/'rebuilt-system-mnt/system/priv-app/TicCompanionWear/TicCompanionWear.apk'
-              elif src.endswith('DaceEnduroFastPairOverlay.apk'): dst=work/'rebuilt-product-mnt/overlay/DaceEnduroFastPairOverlay/DaceEnduroFastPairOverlay.apk'
-              else: dst=work/'rebuilt-system_ext-mnt/lib'/pathlib.Path(src).name
+              src=r['bundle_path']
+              if src.endswith('TicCompanionWear.apk'):
+                  dst=work/'rebuilt-system-mnt/system/priv-app/TicCompanionWear/TicCompanionWear.apk'
+              elif src.endswith('DaceEnduroFastPairOverlay.apk'):
+                  dst=work/'rebuilt-product-mnt/overlay/DaceEnduroFastPairOverlay/DaceEnduroFastPairOverlay.apk'
+              else:
+                  dst=work/'rebuilt-system_ext-mnt/lib'/pathlib.Path(src).name
               got=hashlib.sha256(dst.read_bytes()).hexdigest()
               if got != r['sha256']: raise SystemExit(f'{dst}: {got} != {r["sha256"]}')
           print('STAGE0_REBUILT_8_OF_8=PASS')
@@ -286,7 +288,7 @@ jobs:
           getfattr -n security.selinux -e text "$SYS/system/priv-app/TicCompanionWear/TicCompanionWear.apk" | tee "$OUT/NEW_PATH_SELINUX.txt"
           getfattr -n security.selinux -e text "$PROD/overlay/DaceEnduroFastPairOverlay/DaceEnduroFastPairOverlay.apk" | tee -a "$OUT/NEW_PATH_SELINUX.txt"
           for f in "$SX"/lib/libdisplayconfig.system.qti.so "$SX"/lib/libgralloc.system.qti.so "$SX"/lib/vendor.display.config@2.0.so "$SX"/lib/android.hardware.radio@1.5.so "$SX"/lib/android.hardware.radio@1.6.so "$SX"/lib/vendor.google_clockwork.wristorientation@1.0.so; do getfattr -n security.selinux -e text "$f" >> "$OUT/NEW_PATH_SELINUX.txt"; done
-          grep -q 'security.selinux=' "$OUT/NEW_PATH_SELINUX.txt"
+          test "$(grep -c 'security.selinux=' "$OUT/NEW_PATH_SELINUX.txt")" -ge 8
 
           sudo python3 wear7/scripts/fs_semantic_manifest.py "$SYS" "$OUT/system_stage0_manifest.tsv"
           sudo python3 wear7/scripts/fs_semantic_manifest.py "$SX" "$OUT/system_ext_stage0_manifest.tsv"
