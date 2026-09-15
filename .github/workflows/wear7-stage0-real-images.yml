@@ -215,7 +215,7 @@ jobs:
           OUT="$GITHUB_WORKSPACE/wear7-stage0-real-report"
           B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
           build_one() {
-            p=$1; mountp=$2; prefix=$3; extra=$4; contexts=$5
+            p=$1; mountp=$2; extra=$3; contexts=$4
             donor="$WORK/$p.raw"; stage="$WORK/stage-$p"; cfg="$WORK/$p.fs_config"; rebuilt="$WORK/$p.stage0.raw"
             old=$(stat -c %s "$donor")
             new=$(( (old + extra + 4095) / 4096 * 4096 ))
@@ -223,17 +223,28 @@ jobs:
             hashseed=$(debugfs -R stats "$donor" 2>/dev/null | awk -F: '/Directory Hash Seed:/ {gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2; exit}')
             inode=$(tune2fs -l "$donor" | awk -F: '/Inode count:/ {gsub(/ /,"",$2); print $2; exit}')
             inode=$((inode + 128))
-            args=("$stage" "$rebuilt" ext4 "$mountp" "$new" -j 0 -T 1230768000 -C "$cfg" -L "$p" -i "$inode" -I 256 -M 0 -U "$uuid" -c "$contexts")
-            if test -n "$hashseed"; then args+=( -S "$hashseed" ); fi
+            args=(
+              "$stage" "$rebuilt" ext4 "$mountp" "$new" "$contexts"
+              --journal_size 0
+              --timestamp 1230768000
+              --fs_config "$cfg"
+              --label "$p"
+              --inodes "$inode"
+              --inode_size 256
+              --reserved_percent 0
+              --mke2fs_uuid "$uuid"
+              --share_dup_blocks
+            )
+            if test -n "$hashseed"; then args+=(--mke2fs_hash_seed "$hashseed"); fi
             sudo env PATH="$B:$PATH" "$B/mkuserimg_mke2fs" "${args[@]}" | tee "$OUT/${p}_mkuserimg.log"
             sudo chown "$(id -u):$(id -g)" "$rebuilt"
             e2fsck -fn "$rebuilt" > "$OUT/${p}_stage0_fsck.txt" 2>&1 || rc=$?
             rc=${rc:-0}; test "$rc" -lt 8; unset rc
             printf '%s\tdonor_noavb=%s\tstage0_noavb=%s\tdelta=%s\n' "$p" "$old" "$new" "$((new-old))" >> "$OUT/REBUILT_SIZES.tsv"
           }
-          build_one system / '' $((32*1024*1024)) "$WORK/plat_file_contexts"
-          build_one system_ext /system_ext system_ext $((16*1024*1024)) "$WORK/system_ext_combined_file_contexts"
-          build_one product /product product $((8*1024*1024)) "$WORK/product_combined_file_contexts"
+          build_one system / $((32*1024*1024)) "$WORK/plat_file_contexts"
+          build_one system_ext /system_ext $((16*1024*1024)) "$WORK/system_ext_combined_file_contexts"
+          build_one product /product $((8*1024*1024)) "$WORK/product_combined_file_contexts"
 
       - name: Mount rebuilt images and enforce Stage0 invariants
         shell: bash
