@@ -1,0 +1,37 @@
+name: Wear7 host toolchain probe
+
+on:
+  push:
+    branches: [wear7-rom-staging]
+    paths:
+      - '.github/workflows/wear7-host-toolchain-probe.yml'
+      - 'wear7/TRIGGER_TOOLCHAIN_PROBE'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe Ubuntu/AOSP image tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          for p in e2fsprogs android-sdk-libsparse-utils android-sdk-ext4-utils android-sdk-build-tools android-sdk-platform-tools selinux-utils secilc aapt2; do
+            echo "===== APT POLICY $p ====="
+            apt-cache policy "$p" || true
+          done
+          sudo apt-get install -y e2fsprogs attr libcap2-bin unzip zip curl python3 || true
+          sudo apt-get install -y android-sdk-libsparse-utils android-sdk-ext4-utils android-sdk-build-tools android-sdk-platform-tools || true
+          sudo apt-get install -y selinux-utils secilc aapt2 || true
+          echo '===== COMMANDS ====='
+          for c in simg2img img2simg e2fsdroid make_ext4fs ext2simg avbtool lpmake lpdump lpunpack checkvintf idmap2 aapt2 secilc sefcontext_compile debugfs e2fsck resize2fs tune2fs getfattr setfattr getcap setcap; do
+            printf '%-24s ' "$c"
+            command -v "$c" || true
+          done
+          echo '===== PACKAGE SEARCH ====='
+          apt-cache search 'lpmake|liblp|checkvintf|idmap2|avbtool|e2fsdroid' || true
