@@ -1,0 +1,65 @@
+TICWATCH PRO 5 ENDURO / DACE — WEAR OS 7 KERNEL + KEXEC INTEGRATION LOCK
+Date: 2026-09-15
+
+SOURCE OF TRUTH
+- Handoff ZIP SHA-256: ac4383fcdc36a4671d84faaf31765cf567986e059f9c6e65ee5d617e5c0c3966
+- Status TXT SHA-256: e358c274c24e301a70d79eec20c80cfe87769a5c3f816ef1bfb81153757351fe
+- Repository: jackk11111/config
+- Kernel branch: ticwatch-max-lts-220
+- Proven checkpoint commit: b8e04cbb8962990296fbefb8bbffb4155ab3d118
+
+KERNEL STATUS
+KERNEL_READY_FOR_WEAR7_INTEGRATION = YES
+- release: 5.15.220-Xinran_StarBai-Test+
+- proven Image SHA-256: 976c4b7a27679bf7afb1c62ed3937f5f8f494d09860ff2d8d04b6132889aed18
+- final.config SHA-256: 9e63ad86d97fa6d6ce1914efeb8035dafb9043819796f0784a1bdf10a2557b54
+- Module.symvers SHA-256: 39c1019ed73a00b2ba8a9ab5f3a057d8cb0a8be1e285762b7cd56cb0bf95cea0
+- post-KEXEC known-good raw boot SHA-256: 86146751a2b07e77f90ca924b270e58f3984e247cdc52345590769f495330ea5
+- raw boot size: 100663296 bytes
+- raw boot bytes are NOT part of the V2 handoff and MUST NOT be fabricated from Image alone.
+
+KMI / STOCK 379 MODULE CONTRACT
+- CONFIG_MODVERSIONS=y
+- STOCK379_KMI_TARGETED_GATE=PASS
+- EXPECTED=337 / MISSING=0 / MISMATCH=0
+- historical complete audit: 260/260 stock modules, 0 CRC mismatch, 0 missing kernel symbols
+- preserve stock TicWatch vendor/vendor_dlkm module set; do not replace modules to match numeric vermagic.
+
+KEXEC RUNTIME STATUS
+KEXEC_RUNTIME = PASS
+Proven on-device:
+- classic sys_kexec_load accepted the payload;
+- ARM64 relocation/MMU handoff succeeded in the known-good path;
+- second kernel started;
+- initramfs unpacked;
+- /init executed as PID 1;
+- deliberate controlled panic/reboot occurred;
+- Wear OS 4 returned;
+- persistent boot remained unchanged.
+
+KNOWN-GOOD RESCUE COMPONENTS
+- userspace loader, purgatory-C bypass: 452859fb382d561e59b34653ae17ed204d73a7e4cb52f174dfdf4b9dd5ae8b98
+- Stage0 second-kernel Image: a0e13c73b692c5a1f4a36e08772984432bd61e4919808e228b9647c2c933377d
+- fixed rescue initramfs: 43e7bff15dc42419dcb75651af2965909803784dd032b35c36c4c0935b74f2e7
+- BusyBox: c629fce4b0dd3ba9775f851d0941e74582115f423258d3a79800f2bd11d30f5c
+
+KEXEC INTEGRATION RULES
+- Do NOT reopen the historical multiprobe campaign without a new regression.
+- Do NOT claim the precise internal purgatory-C defect has been root-caused; only bypass success is proven.
+- Preserve the functional ARM64 KEXEC/MMU/backport/device-shutdown fixes represented by the proven branch history.
+- Keep the known-good purgatory-C-bypass userspace behavior for rescue until a cleaner equivalent is proven.
+- The successful Wear4 load window --mem-min=0x52917000 / --mem-max=0x5bffffff is NOT a Wear7 constant. Re-evaluate target RAM layout before using KEXEC under Wear7.
+- The included first-kernel Image contains a runtime diagnostic/multiprobe harness. It is a known-good integration reference, not a requirement for the eventual production kernel. Remove nonessential diagnostics only after production equivalence is demonstrated.
+
+BOOT CHAIN RULE
+- Do not replace TicWatch boot-side device data with Pixel/Xiaomi boot/vendor_boot/firmware.
+- vendor_boot/init_boot/dtbo remain TicWatch device-specific unless a concrete later change is justified.
+- A final Wear7 boot image must be produced from the finalized kernel handoff while preserving the required TicWatch boot image structure. Never write the standalone Image directly to the boot block device.
+
+RECOVERY GATE
+RECOVERY_ROLLBACK_READY_FOR_FIRST_WEAR7_FLASH = NO
+Therefore:
+- offline Wear7 image staging/build/audit MAY continue;
+- persistent Wear7 flash remains FORBIDDEN until the parallel recovery branch returns YES.
+
+What remains in the recovery branch is intentionally outside this ROM staging branch: final recovery.img, temporary test, stock recovery live re-read/backup, persistent recovery-only test, physical custom-recovery entry, and verified rollback path.
