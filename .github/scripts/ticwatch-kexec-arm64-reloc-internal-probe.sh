@@ -52,7 +52,7 @@ for M in \
   'Lticwatch_probe_ttbr1' \
   'Lticwatch_probe_return' \
   'Lticwatch_reloc_normal' \
-  'break_before_make_ttbr_switch\tx2, x3, x4, x5'; do
+  $'break_before_make_ttbr_switch\tx2, x3, x4, x5'; do
   grep -Fq "$M" "$RK"
 done
 for M in \
