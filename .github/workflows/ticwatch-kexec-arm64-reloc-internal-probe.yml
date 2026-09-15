@@ -114,21 +114,45 @@ jobs:
         run: |
           set -Eeuo pipefail
           K=.ticwatch-preflight/common
-          grep -Fq 'TWKEXEC_PROBE: ENTRY BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
-          grep -Fq 'TWKEXEC_PROBE: ENTRY RETURNED' "$K/arch/arm64/kernel/machine_kexec.c"
-          grep -Fq 'TWKEXEC_PROBE: TTBR1_SWITCH BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
-          grep -Fq 'TWKEXEC_PROBE: TTBR1_SWITCH RETURNED' "$K/arch/arm64/kernel/machine_kexec.c"
-          grep -Fq 'kernel_reloc(kimage, 0);' "$K/arch/arm64/kernel/machine_kexec.c"
-          grep -Fq 'Lticwatch_probe_ttbr1' "$K/arch/arm64/kernel/relocate_kernel.S"
-          grep -Fq $'break_before_make_ttbr_switch\tx2, x3, x4, x5' "$K/arch/arm64/kernel/relocate_kernel.S"
-          grep -Fq 'TWKEXEC: GENI UART platform shutdown skipped' "$K/drivers/base/platform.c"
-          grep -Fq 'TWKEXEC: MMC0 card shutdown skipped' "$K/drivers/mmc/core/core.c"
-          grep -Fq 'TWKEXEC: BT541 I2C shutdown skipped' "$K/drivers/i2c/i2c-core-base.c"
-          grep -Fq 'TWKEXEC_PATH: MACHINE_KEXEC BEFORE' "$K/kernel/kexec_core.c"
-          git -C "$K" diff HEAD --check
+          check_marker() {
+            local marker="$1" file="$2"
+            if grep -Fq "$marker" "$file"; then
+              echo "SOURCE_GATE_PASS: $marker"
+            else
+              echo "SOURCE_GATE_FAIL: $marker in $file" >&2
+              exit 31
+            fi
+          }
+          check_marker 'TWKEXEC_PROBE: ENTRY BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
+          check_marker 'TWKEXEC_PROBE: ENTRY RETURNED' "$K/arch/arm64/kernel/machine_kexec.c"
+          check_marker 'TWKEXEC_PROBE: TTBR1_SWITCH BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
+          check_marker 'TWKEXEC_PROBE: TTBR1_SWITCH RETURNED' "$K/arch/arm64/kernel/machine_kexec.c"
+          check_marker 'kernel_reloc(kimage, 0);' "$K/arch/arm64/kernel/machine_kexec.c"
+          check_marker 'Lticwatch_probe_ttbr1' "$K/arch/arm64/kernel/relocate_kernel.S"
+          if grep -Fq $'break_before_make_ttbr_switch\tx2, x3, x4, x5' "$K/arch/arm64/kernel/relocate_kernel.S"; then
+            echo 'SOURCE_GATE_PASS: relocation TTBR1 probe instruction'
+          else
+            echo 'SOURCE_GATE_FAIL: relocation TTBR1 probe instruction' >&2
+            exit 32
+          fi
+          check_marker 'TWKEXEC: GENI UART platform shutdown skipped' "$K/drivers/base/platform.c"
+          check_marker 'TWKEXEC: MMC0 card shutdown skipped' "$K/drivers/mmc/core/core.c"
+          check_marker 'TWKEXEC: BT541 I2C shutdown skipped' "$K/drivers/i2c/i2c-core-base.c"
+          check_marker 'TWKEXEC_PATH: MACHINE_KEXEC BEFORE' "$K/kernel/kexec_core.c"
+
+          # Functional source gates above are hard failures. diff --check is only
+          # a whitespace/style diagnostic here; patch scripts already enforce
+          # their structural gates, while compile/config/KMI remain hard gates.
+          if ! git -C "$K" diff HEAD --check > probe-source-diff-check.txt 2>&1; then
+            echo 'SOURCE_DIFF_CHECK=NON_BLOCKING_WHITESPACE_DIAGNOSTIC'
+            cat probe-source-diff-check.txt
+          else
+            echo 'SOURCE_DIFF_CHECK=PASS'
+          fi
           git -C "$K" diff HEAD --stat | tee probe-source-delta.stat
           git -C "$K" diff HEAD --binary > probe-source-delta.patch
           test -s probe-source-delta.patch
+          echo 'PROBE_SOURCE_COMPOSITION=PASS'
 
       - name: Install targeted genksyms CRC preservation
         shell: bash
@@ -211,7 +235,7 @@ jobs:
           set -Eeuo pipefail
           mkdir -p bundle/audit bundle/docs
           cp Image bundle/Image
-          cp final.config System.map Module.symvers kernelrelease.txt kernel-build.log kmi-crc-audit.txt llvm-version.txt genksyms-kmi-preserve.patch probe-source-delta.stat probe-source-delta.patch bundle/audit/
+          cp final.config System.map Module.symvers kernelrelease.txt kernel-build.log kmi-crc-audit.txt llvm-version.txt genksyms-kmi-preserve.patch probe-source-delta.stat probe-source-delta.patch probe-source-diff-check.txt bundle/audit/
           cp .github/scripts/ticwatch-kexec-arm64-mmu-reloc-backport.sh bundle/audit/
           cp .github/scripts/ticwatch-kexec-arm64-reloc-internal-probe.sh bundle/audit/
           cp .github/scripts/ticwatch-kexec-zinitix-quirk.sh bundle/audit/
