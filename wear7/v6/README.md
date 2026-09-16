@@ -101,6 +101,7 @@ La conservazione non equivale a una release permanente.
 
 - [APEX e incompatibilità dei formati mixed/flattened](https://source.android.com/docs/core/ota/apex#flattened-apex)
 - [Compilazione SELinux in init](https://github.com/aosp-mirror/platform_system_core/blob/main/init/selinux.cpp)
+- [Invocazione diretta del linker Bionic](https://github.com/aosp-mirror/platform_bionic/blob/main/linker/linker_main.cpp)
 - [Regole overlayable in IdmapManager](https://github.com/aosp-mirror/platform_frameworks_base/blob/main/services/core/java/com/android/server/om/IdmapManager.java)
 
 I test di `test_preflight.py` usano piccoli file artificiali: provano il rifiuto

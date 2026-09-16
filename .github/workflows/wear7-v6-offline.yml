@@ -6,7 +6,8 @@ on:
     branches: [wear7-v6-offline-validation]
     paths:
       - '.github/workflows/wear7-v6-offline.yml'
-      - 'wear7/v6/**'
+      - 'wear7/v6/*.py'
+      - 'wear7/v6/*.sh'
 
 permissions:
   contents: read
