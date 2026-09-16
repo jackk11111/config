@@ -14,41 +14,46 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Probe public Android CI for android17-release artifacts
+      - name: Probe public Android CI for Android 17 artifacts
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p out
-          for u in \
-            'https://ci.android.com/builds/branches/android17-release/grid?legacy=1' \
-            'https://ci.android.com/builds/branches/android17-release/grid' \
-            'https://ci.android.com/builds/branches/android17-release/targets'; do
-            echo "=== $u ===" | tee -a out/probe.txt
-            code=$(curl -L -sS -o out/page.tmp -w '%{http_code}' "$u" || true)
-            echo "HTTP=$code bytes=$(wc -c < out/page.tmp)" | tee -a out/probe.txt
-            head -c 5000 out/page.tmp >> out/probe.txt || true
-            echo >> out/probe.txt
-            grep -Eo '[0-9]{7,9}' out/page.tmp | sort -nr | head -n 100 >> out/build_ids.txt || true
+          : > out/build_ids.txt
+          : > out/probe.txt
+          for branch in aosp-android-latest-release aosp-android17-release android17-release aosp-main; do
+            for suffix in 'grid?legacy=1' grid; do
+              u="https://ci.android.com/builds/branches/$branch/$suffix"
+              echo "=== $u ===" | tee -a out/probe.txt
+              code=$(curl -L -sS -o out/page.tmp -w '%{http_code}' "$u" || true)
+              echo "HTTP=$code bytes=$(wc -c < out/page.tmp)" | tee -a out/probe.txt
+              if [ "$code" = 200 ]; then
+                cp out/page.tmp "out/${branch//\//_}-${suffix//\?/_}.html"
+              fi
+              grep -Eo '[0-9]{7,9}' out/page.tmp | sort -nr | head -n 200 >> out/build_ids.txt || true
+            done
           done
           sort -u -nr out/build_ids.txt -o out/build_ids.txt || true
           echo '=== candidate build ids ==='
-          cat out/build_ids.txt || true
+          head -n 100 out/build_ids.txt || true
 
-          # Try common public target names and raw otatools locations against discovered IDs.
           : > out/attempts.txt
           found=''
-          for id in $(head -n 30 out/build_ids.txt 2>/dev/null || true); do
-            for target in aosp_cf_x86_64_phone-userdebug aosp_cf_x86_64_only_phone-userdebug aosp_cf_x86_phone-userdebug aosp_arm64-userdebug; do
+          for id in $(head -n 100 out/build_ids.txt 2>/dev/null || true); do
+            for target in \
+              aosp_cf_x86_64_phone-userdebug \
+              aosp_cf_x86_64_only_phone-userdebug \
+              aosp_cf_x86_64_phone-trunk_staging-userdebug \
+              aosp_cf_x86_phone-userdebug \
+              aosp_x86_64-userdebug; do
               for rel in otatools.zip raw/otatools.zip; do
                 url="https://ci.android.com/builds/submitted/$id/$target/latest/$rel"
-                code=$(curl -L -sS -o /tmp/ota.test -w '%{http_code}' --range 0-1023 "$url" || true)
+                code=$(curl -L -sS -o /tmp/ota.test -w '%{http_code}' --range 0-4095 "$url" || true)
                 bytes=$(wc -c </tmp/ota.test 2>/dev/null || echo 0)
                 printf '%s %s %s\n' "$code" "$bytes" "$url" >> out/attempts.txt
-                if [ "$code" = 200 ] || [ "$code" = 206 ]; then
-                  if file /tmp/ota.test | grep -qi 'Zip archive'; then
-                    found="$url"
-                    break 3
-                  fi
+                if { [ "$code" = 200 ] || [ "$code" = 206 ]; } && file /tmp/ota.test | grep -qi 'Zip archive'; then
+                  found="$url"
+                  break 3
                 fi
               done
             done
