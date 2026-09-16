@@ -27,15 +27,13 @@ jobs:
         with:
           ref: wear7-rom-staging
           fetch-depth: 1
-
       - name: Free space and install helpers
         run: |
           set -Eeuo pipefail
           sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk || true
           sudo apt-get update >/dev/null
-          sudo apt-get install -y curl unzip file android-sdk-libsparse-utils e2fsprogs >/dev/null
+          sudo apt-get install -y curl unzip file android-sdk-libsparse-utils e2fsprogs erofs-utils >/dev/null
           mkdir -p "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/ota" "$RUNNER_TEMP/parts" "$RUNNER_TEMP/mnt" "$RUNNER_TEMP/apex" report
-
       - name: Download final V4 super
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -44,139 +42,71 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           run-id: ${{ env.FINAL_RUN_ID }}
-
       - name: Pin official Android17 host tools
         run: |
           set -Eeuo pipefail
-          ZIP="$RUNNER_TEMP/ota/otatools.zip"
-          curl -fL --retry 3 -o "$ZIP" "$OTATOOLS_URL"
+          ZIP="$RUNNER_TEMP/ota/otatools.zip"; curl -fL --retry 3 -o "$ZIP" "$OTATOOLS_URL"
           sha256sum "$ZIP" | tee report/OTATOOLS_SHA256.txt
           test "$(sha256sum "$ZIP" | awk '{print $1}')" = f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84
           python3 - "$ZIP" "$RUNNER_TEMP/ota/x" <<'PY'
           import sys,zipfile,pathlib
-          z=zipfile.ZipFile(sys.argv[1]); out=pathlib.Path(sys.argv[2])
-          bins={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/deapexer','bin/debugfs','bin/debugfs_static','bin/fsck.erofs'}
+          z=zipfile.ZipFile(sys.argv[1]); out=pathlib.Path(sys.argv[2]); bins={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/deapexer','bin/debugfs','bin/debugfs_static','bin/fsck.erofs'}
           keep=[n for n in z.namelist() if n in bins or n.startswith('lib64/') or n.startswith('lib/')]
-          required={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/deapexer','bin/fsck.erofs'}
-          missing=required-set(keep)
+          required={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/deapexer','bin/fsck.erofs'}; missing=required-set(keep)
           if missing: raise SystemExit('missing host tools: '+','.join(sorted(missing)))
-          if not ({'bin/debugfs','bin/debugfs_static'} & set(keep)):
-              raise SystemExit('missing debugfs host tool')
+          if not ({'bin/debugfs','bin/debugfs_static'} & set(keep)): raise SystemExit('missing debugfs host tool')
           for n in keep: z.extract(n,out)
           PY
-          BIN="$RUNNER_TEMP/ota/x/bin"
-          test -e "$BIN/debugfs" || ln -s debugfs_static "$BIN/debugfs"
-          test -e "$BIN/debugfs_static" || ln -s debugfs "$BIN/debugfs_static"
+          BIN="$RUNNER_TEMP/ota/x/bin"; test -e "$BIN/debugfs" || ln -s debugfs_static "$BIN/debugfs"; test -e "$BIN/debugfs_static" || ln -s debugfs "$BIN/debugfs_static"
           chmod +x "$BIN/checkvintf" "$BIN/lpunpack" "$BIN/apexd_host" "$BIN/deapexer" "$BIN/debugfs" "$BIN/debugfs_static" "$BIN/fsck.erofs"
-          echo "CHECKVINTF=$BIN/checkvintf" >> "$GITHUB_ENV"
-          echo "LPUNPACK=$BIN/lpunpack" >> "$GITHUB_ENV"
-          echo "APEXD_HOST=$BIN/apexd_host" >> "$GITHUB_ENV"
-          echo "HOSTROOT=$RUNNER_TEMP/ota/x" >> "$GITHUB_ENV"
+          echo "CHECKVINTF=$BIN/checkvintf" >> "$GITHUB_ENV"; echo "LPUNPACK=$BIN/lpunpack" >> "$GITHUB_ENV"; echo "APEXD_HOST=$BIN/apexd_host" >> "$GITHUB_ENV"; echo "HOSTROOT=$RUNNER_TEMP/ota/x" >> "$GITHUB_ENV"
           sha256sum "$BIN/checkvintf" "$BIN/lpunpack" "$BIN/apexd_host" "$BIN/deapexer" "$BIN/fsck.erofs" | tee report/HOST_TOOLS_SHA256.txt
-          grep -q '^6f7601b9409ac5db70d8b05bc98d117fe68456464e710eb2e2964c7edf1325db ' report/HOST_TOOLS_SHA256.txt
-          grep -q '^9df5a76368804f062392ca5219dca58408a2d6a5fd648b5640d0ba7535cfc56f ' report/HOST_TOOLS_SHA256.txt
-
+          grep -q '^6f7601b9409ac5db70d8b05bc98d117fe68456464e710eb2e2964c7edf1325db ' report/HOST_TOOLS_SHA256.txt; grep -q '^9df5a76368804f062392ca5219dca58408a2d6a5fd648b5640d0ba7535cfc56f ' report/HOST_TOOLS_SHA256.txt
       - name: Unpack and mount final partitions
         run: |
           set -Eeuo pipefail
-          SUPER="$RUNNER_TEMP/candidate/super.img"
-          test -s "$SUPER"
-          sha256sum "$SUPER" | tee report/FINAL_SUPER_SHA256.txt
+          SUPER="$RUNNER_TEMP/candidate/super.img"; test -s "$SUPER"; sha256sum "$SUPER" | tee report/FINAL_SUPER_SHA256.txt
           test "$(sha256sum "$SUPER" | awk '{print $1}')" = 50f1a567e8dfcce4297a39f458e66196c1b59b420b002ec036d5c77fa1aa854a
-          simg2img "$SUPER" "$RUNNER_TEMP/super.raw.img"
-          env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$LPUNPACK" "$RUNNER_TEMP/super.raw.img" "$RUNNER_TEMP/parts" > report/LPUNPACK.txt
-          rm -f "$RUNNER_TEMP/super.raw.img"
+          simg2img "$SUPER" "$RUNNER_TEMP/super.raw.img"; env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$LPUNPACK" "$RUNNER_TEMP/super.raw.img" "$RUNNER_TEMP/parts" > report/LPUNPACK.txt; rm -f "$RUNNER_TEMP/super.raw.img"
           for p in system system_ext product vendor; do
-            test -s "$RUNNER_TEMP/parts/$p.img"
-            sudo mkdir -p "$RUNNER_TEMP/mnt/$p"
-            if test "$p" = system; then
-              sudo mount -o loop,rw "$RUNNER_TEMP/parts/$p.img" "$RUNNER_TEMP/mnt/$p"
-            else
-              sudo mount -o loop,ro "$RUNNER_TEMP/parts/$p.img" "$RUNNER_TEMP/mnt/$p"
-            fi
+            img="$RUNNER_TEMP/parts/$p.img"; test -s "$img"; sudo mkdir -p "$RUNNER_TEMP/mnt/$p"
+            fstype="$(blkid -s TYPE -o value "$img" || true)"; printf '%s=%s\n' "$p" "$fstype" | tee -a report/PARTITION_FS.txt
+            case "$fstype" in
+              ext4) sudo mount -o loop,ro "$img" "$RUNNER_TEMP/mnt/$p" ;;
+              erofs) sudo mount -t erofs -o loop,ro "$img" "$RUNNER_TEMP/mnt/$p" ;;
+              *) echo "unsupported filesystem $p:$fstype" >&2; exit 1 ;;
+            esac
           done
           if test -d "$RUNNER_TEMP/mnt/system/system/etc/vintf"; then SYS="$RUNNER_TEMP/mnt/system/system"; else SYS="$RUNNER_TEMP/mnt/system"; fi
-          SX="$RUNNER_TEMP/mnt/system_ext"
-          PROD="$RUNNER_TEMP/mnt/product"
-          VEN="$RUNNER_TEMP/mnt/vendor"
-          ODM="$VEN/odm"
-          test -d "$ODM"
-          test -s "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml"
-          echo "SYS=$SYS" >> "$GITHUB_ENV"
-          echo "SX=$SX" >> "$GITHUB_ENV"
-          echo "PROD=$PROD" >> "$GITHUB_ENV"
-          echo "VEN=$VEN" >> "$GITHUB_ENV"
-          echo "ODM=$ODM" >> "$GITHUB_ENV"
+          SX="$RUNNER_TEMP/mnt/system_ext"; PROD="$RUNNER_TEMP/mnt/product"; VEN="$RUNNER_TEMP/mnt/vendor"; ODM="$VEN/odm"; test -d "$ODM"; test -s "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml"
+          echo "SYS=$SYS" >> "$GITHUB_ENV"; echo "SX=$SX" >> "$GITHUB_ENV"; echo "PROD=$PROD" >> "$GITHUB_ENV"; echo "VEN=$VEN" >> "$GITHUB_ENV"; echo "ODM=$ODM" >> "$GITHUB_ENV"
           sudo find "$RUNNER_TEMP/mnt/system" "$SX" "$PROD" "$VEN" -type f \( -name build.prop -o -name prop.default \) -print | sort | tee report/PROPERTY_FILES.txt
-          while IFS= read -r f; do
-            sudo grep -h '^ro.product.first_api_level=' "$f" 2>/dev/null || true
-          done < report/PROPERTY_FILES.txt | sort -u | tee report/FIRST_API_LEVEL.txt
+          while IFS= read -r f; do sudo grep -h '^ro.product.first_api_level=' "$f" 2>/dev/null || true; done < report/PROPERTY_FILES.txt | sort -u | tee report/FIRST_API_LEVEL.txt
           grep -q '^ro.product.first_api_level=30$' report/FIRST_API_LEVEL.txt
           printf 'VENDOR_SKU=%s\nSELECTED_DEVICE_MANIFEST=%s\n' "$TICWATCH_VENDOR_SKU" "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml" | tee report/VENDOR_SKU_SELECTION.txt
-
-      - name: Generate and stage exact dace supplemental framework matrix
+      - name: Generate exact dace supplemental framework matrix
         run: |
           set -Eeuo pipefail
-          python3 wear7/scripts/generate_framework_matrix_from_device_manifest.py \
-            --main "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml" \
-            --fragments "$VEN/etc/vintf/manifest" \
-            --out report/compatibility_matrix.dace.xml \
-            --sepolicy-version 33.0 \
-            --kernel-sepolicy-version 30 \
-            --matrix-version 9.0 \
-            | tee report/DACE_MATRIX_GENERATOR.txt
-          test -s report/compatibility_matrix.dace.xml
-          grep -q '<sepolicy-version>33.0</sepolicy-version>' report/compatibility_matrix.dace.xml
-          grep -q '<name>vendor.display.config</name>' report/compatibility_matrix.dace.xml
-          grep -q '<name>vendor.qti.hardware.qseecom</name>' report/compatibility_matrix.dace.xml
-          sudo cp report/compatibility_matrix.dace.xml "$SYS/etc/vintf/compatibility_matrix.dace.xml"
-          sudo chown 0:0 "$SYS/etc/vintf/compatibility_matrix.dace.xml"
-          sudo chmod 0644 "$SYS/etc/vintf/compatibility_matrix.dace.xml"
-          sync
+          python3 wear7/scripts/generate_framework_matrix_from_device_manifest.py --main "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml" --fragments "$VEN/etc/vintf/manifest" --out report/compatibility_matrix.dace.xml --sepolicy-version 33.0 --kernel-sepolicy-version 30 --matrix-version 9.0 | tee report/DACE_MATRIX_GENERATOR.txt
+          test -s report/compatibility_matrix.dace.xml; grep -q '<sepolicy-version>33.0</sepolicy-version>' report/compatibility_matrix.dace.xml; grep -q '<name>vendor.display.config</name>' report/compatibility_matrix.dace.xml; grep -q '<name>vendor.qti.hardware.qseecom</name>' report/compatibility_matrix.dace.xml
           sha256sum report/compatibility_matrix.dace.xml | tee report/DACE_MATRIX_SHA256.txt
-          sudo sha256sum "$SYS/etc/vintf/compatibility_matrix.dace.xml" | tee report/DACE_MATRIX_INSTALLED_SHA256.txt
-
+          # EROFS system is immutable. Overlay only the VINTF directory so checkvintf sees the supplemental matrix without modifying the candidate image.
+          mkdir -p "$RUNNER_TEMP/system-vintf-overlay"; cp -a "$SYS/etc/vintf/." "$RUNNER_TEMP/system-vintf-overlay/"; cp report/compatibility_matrix.dace.xml "$RUNNER_TEMP/system-vintf-overlay/compatibility_matrix.dace.xml"
+          sudo mount --bind "$RUNNER_TEMP/system-vintf-overlay" "$SYS/etc/vintf"
+          sha256sum "$SYS/etc/vintf/compatibility_matrix.dace.xml" | tee report/DACE_MATRIX_INSTALLED_SHA256.txt
       - name: Activate APEXes exactly for host VINTF
         run: |
           set -Eeuo pipefail
           rm -rf "$RUNNER_TEMP/apex" && mkdir -p "$RUNNER_TEMP/apex"
-          env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" \
-            "$APEXD_HOST" --tool_path "$HOSTROOT" \
-            --apex_path "$RUNNER_TEMP/apex" \
-            --system_path "$SYS" \
-            --system_ext_path "$SX" \
-            --product_path "$PROD" \
-            --vendor_path "$VEN" \
-            --odm_path "$ODM" \
-            > report/APEXD_HOST_STDOUT.txt 2> report/APEXD_HOST_STDERR.txt
-          test -s "$RUNNER_TEMP/apex/apex-info-list.xml"
-          cp "$RUNNER_TEMP/apex/apex-info-list.xml" report/APEX_INFO_LIST.xml
-          grep -o '<apex-info ' report/APEX_INFO_LIST.xml | wc -l | tee report/APEX_COUNT.txt
-          echo "APEXMAP=$RUNNER_TEMP/apex" >> "$GITHUB_ENV"
-
+          env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$APEXD_HOST" --tool_path "$HOSTROOT" --apex_path "$RUNNER_TEMP/apex" --system_path "$SYS" --system_ext_path "$SX" --product_path "$PROD" --vendor_path "$VEN" --odm_path "$ODM" > report/APEXD_HOST_STDOUT.txt 2> report/APEXD_HOST_STDERR.txt
+          test -s "$RUNNER_TEMP/apex/apex-info-list.xml"; cp "$RUNNER_TEMP/apex/apex-info-list.xml" report/APEX_INFO_LIST.xml; grep -o '<apex-info ' report/APEX_INFO_LIST.xml | wc -l | tee report/APEX_COUNT.txt; echo "APEXMAP=$RUNNER_TEMP/apex" >> "$GITHUB_ENV"
       - name: Official checkvintf compatibility gate
         run: |
           set -Eeuo pipefail
           printf 'AOSP17_BUILD_ID=%s\nAOSP17_TARGET=%s\nTICWATCH_FIRST_API_LEVEL=%s\nTICWATCH_VENDOR_SKU=%s\n' "$AOSP17_BUILD_ID" "$AOSP17_TARGET" "$TICWATCH_FIRST_API_LEVEL" "$TICWATCH_VENDOR_SKU" | tee report/PROVENANCE.txt
           set +e
-          env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$CHECKVINTF" --check-compat \
-            --dirmap "/system:$SYS" \
-            --dirmap "/system_ext:$SX" \
-            --dirmap "/product:$PROD" \
-            --dirmap "/vendor:$VEN" \
-            --dirmap "/odm:$ODM" \
-            --dirmap "/apex:$APEXMAP" \
-            --property "ro.product.first_api_level=$TICWATCH_FIRST_API_LEVEL" \
-            --property 'ro.boot.product.hardware.sku=' \
-            --property "ro.boot.product.vendor.sku=$TICWATCH_VENDOR_SKU" \
-            > report/CHECKVINTF_STDOUT.txt 2> report/CHECKVINTF_STDERR.txt
-          rc=$?
-          set -e
-          echo "CHECKVINTF_EXIT=$rc" | tee report/CHECKVINTF_EXIT.txt
-          cat report/CHECKVINTF_STDOUT.txt
-          cat report/CHECKVINTF_STDERR.txt >&2
-          test "$rc" = 0
-          tail -n 1 report/CHECKVINTF_STDOUT.txt | grep -q '^COMPATIBLE$'
+          env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$CHECKVINTF" --check-compat --dirmap "/system:$SYS" --dirmap "/system_ext:$SX" --dirmap "/product:$PROD" --dirmap "/vendor:$VEN" --dirmap "/odm:$ODM" --dirmap "/apex:$APEXMAP" --property "ro.product.first_api_level=$TICWATCH_FIRST_API_LEVEL" --property 'ro.boot.product.hardware.sku=' --property "ro.boot.product.vendor.sku=$TICWATCH_VENDOR_SKU" > report/CHECKVINTF_STDOUT.txt 2> report/CHECKVINTF_STDERR.txt
+          rc=$?; set -e; echo "CHECKVINTF_EXIT=$rc" | tee report/CHECKVINTF_EXIT.txt; cat report/CHECKVINTF_STDOUT.txt; cat report/CHECKVINTF_STDERR.txt >&2; test "$rc" = 0; tail -n 1 report/CHECKVINTF_STDOUT.txt | grep -q '^COMPATIBLE$'
           cat > report/OFFICIAL_CHECKVINTF_FINAL_GATE.txt <<EOF
           OFFICIAL_CHECKVINTF_FINAL_GATE=PASS
           CHECKVINTF_SOURCE=AOSP_ANDROID17_PUBLIC_CI_BUILD_16102939
@@ -189,15 +119,14 @@ jobs:
           APEX_ACTIVATION=PASS
           KERNEL_REQUIREMENTS_CHECKED=NO_STATIC_PARTITION_GATE_ONLY
           EOF
-
       - name: Finalize and upload report
         if: always()
         run: |
           set -u
+          if test -n "${SYS:-}"; then sudo umount "$SYS/etc/vintf" 2>/dev/null || true; fi
           for p in system system_ext product vendor; do sudo umount "$RUNNER_TEMP/mnt/$p" 2>/dev/null || true; done
           sudo chown -R "$(id -u):$(id -g)" report 2>/dev/null || true
           find report -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > report/SHA256SUMS.txt
-
       - name: Upload official checkvintf V2 report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
