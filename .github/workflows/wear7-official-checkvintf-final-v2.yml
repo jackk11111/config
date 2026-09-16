@@ -28,7 +28,7 @@ jobs:
           sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk || true
           sudo apt-get update >/dev/null
           sudo apt-get install -y curl unzip file android-sdk-libsparse-utils e2fsprogs >/dev/null
-          mkdir -p "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/ota" "$RUNNER_TEMP/parts" "$RUNNER_TEMP/mnt" report
+          mkdir -p "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/ota" "$RUNNER_TEMP/parts" "$RUNNER_TEMP/mnt" "$RUNNER_TEMP/apex" report
 
       - name: Download final V4 super
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -49,15 +49,24 @@ jobs:
           python3 - "$ZIP" "$RUNNER_TEMP/ota/x" <<'PY'
           import sys,zipfile,pathlib
           z=zipfile.ZipFile(sys.argv[1]); out=pathlib.Path(sys.argv[2])
-          keep=[n for n in z.namelist() if n in ('bin/checkvintf','bin/lpunpack') or n.startswith('lib64/') or n.startswith('lib/')]
-          assert 'bin/checkvintf' in keep and 'bin/lpunpack' in keep
+          bins={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/deapexer','bin/debugfs','bin/debugfs_static','bin/fsck.erofs'}
+          keep=[n for n in z.namelist() if n in bins or n.startswith('lib64/') or n.startswith('lib/')]
+          required={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/deapexer','bin/fsck.erofs'}
+          missing=required-set(keep)
+          if missing: raise SystemExit('missing host tools: '+','.join(sorted(missing)))
+          if not ({'bin/debugfs','bin/debugfs_static'} & set(keep)):
+              raise SystemExit('missing debugfs host tool')
           for n in keep: z.extract(n,out)
           PY
-          chmod +x "$RUNNER_TEMP/ota/x/bin/checkvintf" "$RUNNER_TEMP/ota/x/bin/lpunpack"
-          echo "CHECKVINTF=$RUNNER_TEMP/ota/x/bin/checkvintf" >> "$GITHUB_ENV"
-          echo "LPUNPACK=$RUNNER_TEMP/ota/x/bin/lpunpack" >> "$GITHUB_ENV"
+          BIN="$RUNNER_TEMP/ota/x/bin"
+          test -e "$BIN/debugfs" || ln -s debugfs_static "$BIN/debugfs"
+          test -e "$BIN/debugfs_static" || ln -s debugfs "$BIN/debugfs_static"
+          chmod +x "$BIN/checkvintf" "$BIN/lpunpack" "$BIN/apexd_host" "$BIN/deapexer" "$BIN/debugfs" "$BIN/debugfs_static" "$BIN/fsck.erofs"
+          echo "CHECKVINTF=$BIN/checkvintf" >> "$GITHUB_ENV"
+          echo "LPUNPACK=$BIN/lpunpack" >> "$GITHUB_ENV"
+          echo "APEXD_HOST=$BIN/apexd_host" >> "$GITHUB_ENV"
           echo "HOSTROOT=$RUNNER_TEMP/ota/x" >> "$GITHUB_ENV"
-          sha256sum "$RUNNER_TEMP/ota/x/bin/checkvintf" "$RUNNER_TEMP/ota/x/bin/lpunpack" | tee report/HOST_TOOLS_SHA256.txt
+          sha256sum "$BIN/checkvintf" "$BIN/lpunpack" "$BIN/apexd_host" "$BIN/deapexer" "$BIN/fsck.erofs" | tee report/HOST_TOOLS_SHA256.txt
           grep -q '^6f7601b9409ac5db70d8b05bc98d117fe68456464e710eb2e2964c7edf1325db ' report/HOST_TOOLS_SHA256.txt
           grep -q '^9df5a76368804f062392ca5219dca58408a2d6a5fd648b5640d0ba7535cfc56f ' report/HOST_TOOLS_SHA256.txt
 
@@ -80,16 +89,36 @@ jobs:
           SX="$RUNNER_TEMP/mnt/system_ext"
           PROD="$RUNNER_TEMP/mnt/product"
           VEN="$RUNNER_TEMP/mnt/vendor"
+          ODM="$VEN/odm"
+          test -d "$ODM"
           echo "SYS=$SYS" >> "$GITHUB_ENV"
           echo "SX=$SX" >> "$GITHUB_ENV"
           echo "PROD=$PROD" >> "$GITHUB_ENV"
           echo "VEN=$VEN" >> "$GITHUB_ENV"
+          echo "ODM=$ODM" >> "$GITHUB_ENV"
           sudo find "$RUNNER_TEMP/mnt/system" "$SX" "$PROD" "$VEN" -type f \( -name build.prop -o -name prop.default \) -print | sort | tee report/PROPERTY_FILES.txt
-          : > report/FIRST_API_LEVEL.txt
           while IFS= read -r f; do
             sudo grep -h '^ro.product.first_api_level=' "$f" 2>/dev/null || true
           done < report/PROPERTY_FILES.txt | sort -u | tee report/FIRST_API_LEVEL.txt
           grep -q '^ro.product.first_api_level=30$' report/FIRST_API_LEVEL.txt
+
+      - name: Activate APEXes exactly for host VINTF
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/apex" && mkdir -p "$RUNNER_TEMP/apex"
+          env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" \
+            "$APEXD_HOST" --tool_path "$HOSTROOT" \
+            --apex_path "$RUNNER_TEMP/apex" \
+            --system_path "$SYS" \
+            --system_ext_path "$SX" \
+            --product_path "$PROD" \
+            --vendor_path "$VEN" \
+            --odm_path "$ODM" \
+            > report/APEXD_HOST_STDOUT.txt 2> report/APEXD_HOST_STDERR.txt
+          test -s "$RUNNER_TEMP/apex/apex-info-list.xml"
+          cp "$RUNNER_TEMP/apex/apex-info-list.xml" report/APEX_INFO_LIST.xml
+          grep -o '<apex-info ' report/APEX_INFO_LIST.xml | wc -l | tee report/APEX_COUNT.txt
+          echo "APEXMAP=$RUNNER_TEMP/apex" >> "$GITHUB_ENV"
 
       - name: Official checkvintf compatibility gate
         run: |
@@ -101,7 +130,11 @@ jobs:
             --dirmap "/system_ext:$SX" \
             --dirmap "/product:$PROD" \
             --dirmap "/vendor:$VEN" \
+            --dirmap "/odm:$ODM" \
+            --dirmap "/apex:$APEXMAP" \
             --property "ro.product.first_api_level=$TICWATCH_FIRST_API_LEVEL" \
+            --property 'ro.boot.product.hardware.sku=' \
+            --property 'ro.boot.product.vendor.sku=' \
             > report/CHECKVINTF_STDOUT.txt 2> report/CHECKVINTF_STDERR.txt
           rc=$?
           set -e
@@ -109,12 +142,14 @@ jobs:
           cat report/CHECKVINTF_STDOUT.txt
           cat report/CHECKVINTF_STDERR.txt >&2
           test "$rc" = 0
-          grep -q '^COMPATIBLE$' report/CHECKVINTF_STDOUT.txt
+          tail -n 1 report/CHECKVINTF_STDOUT.txt | grep -q '^COMPATIBLE$'
           cat > report/OFFICIAL_CHECKVINTF_FINAL_GATE.txt <<'EOF'
           OFFICIAL_CHECKVINTF_FINAL_GATE=PASS
           CHECKVINTF_SOURCE=AOSP_ANDROID17_PUBLIC_CI_BUILD_16102939
           FINAL_V4_SUPER=VERIFIED_SHA256
           TICWATCH_FIRST_API_LEVEL=30
+          ODM_DIRMAP=PASS
+          APEX_ACTIVATION=PASS
           KERNEL_REQUIREMENTS_CHECKED=NO_STATIC_PARTITION_GATE_ONLY
           EOF
 
