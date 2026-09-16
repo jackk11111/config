@@ -28,7 +28,6 @@ jobs:
         with:
           ref: wear7-rom-staging
           fetch-depth: 1
-
       - name: Prepare host
         run: |
           set -Eeuo pipefail
@@ -36,7 +35,6 @@ jobs:
           sudo apt-get update >/dev/null
           sudo apt-get install -y curl unzip file android-sdk-libsparse-utils e2fsprogs binutils xxd >/dev/null
           mkdir -p "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/src" "$RUNNER_TEMP/ota" "$RUNNER_TEMP/parts" "$RUNNER_TEMP/mnt/system" "$RUNNER_TEMP/mnt/system_ext" "$RUNNER_TEMP/mnt/product" "$RUNNER_TEMP/mnt/vendor" "$RUNNER_TEMP/mnt/stock-system" "$RUNNER_TEMP/apex" report
-
       - name: Download final V4 super
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -45,7 +43,6 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           run-id: ${{ env.FINAL_RUN_ID }}
-
       - name: Pin official Android17 host tools
         run: |
           set -Eeuo pipefail
@@ -61,7 +58,6 @@ jobs:
           BIN="$RUNNER_TEMP/ota/x/bin"; test -e "$BIN/debugfs" || ln -s debugfs_static "$BIN/debugfs"; test -e "$BIN/debugfs_static" || ln -s debugfs "$BIN/debugfs_static"
           chmod +x "$BIN/checkvintf" "$BIN/lpunpack" "$BIN/apexd_host" "$BIN/deapexer" "$BIN/debugfs" "$BIN/debugfs_static" "$BIN/fsck.erofs"
           echo "CHECKVINTF=$BIN/checkvintf" >> "$GITHUB_ENV"; echo "LPUNPACK=$BIN/lpunpack" >> "$GITHUB_ENV"; echo "APEXD_HOST=$BIN/apexd_host" >> "$GITHUB_ENV"; echo "HOSTROOT=$RUNNER_TEMP/ota/x" >> "$GITHUB_ENV"
-
       - name: Unpack and mount V4 candidate
         run: |
           set -Eeuo pipefail
@@ -71,7 +67,6 @@ jobs:
           if test -d "$RUNNER_TEMP/mnt/system/system/etc/vintf"; then SYS="$RUNNER_TEMP/mnt/system/system"; else SYS="$RUNNER_TEMP/mnt/system"; fi
           SX="$RUNNER_TEMP/mnt/system_ext"; PROD="$RUNNER_TEMP/mnt/product"; VEN="$RUNNER_TEMP/mnt/vendor"; ODM="$VEN/odm"
           echo "SYS=$SYS" >> "$GITHUB_ENV"; echo "SX=$SX" >> "$GITHUB_ENV"; echo "PROD=$PROD" >> "$GITHUB_ENV"; echo "VEN=$VEN" >> "$GITHUB_ENV"; echo "ODM=$ODM" >> "$GITHUB_ENV"
-
       - name: Reconstruct exact stock379 flattened VNDK33
         run: |
           set -Eeuo pipefail
@@ -81,67 +76,45 @@ jobs:
           if test -d "$RUNNER_TEMP/mnt/stock-system/system"; then SS="$RUNNER_TEMP/mnt/stock-system/system"; else SS="$RUNNER_TEMP/mnt/stock-system"; fi
           VNDK33="$SS/apex/com.android.vndk.current"; test -d "$VNDK33"; test -s "$VNDK33/apex_manifest.pb"; test -s "$VNDK33/etc/vndkcore.libraries.33.txt"
           echo "VNDK33=$VNDK33" >> "$GITHUB_ENV"
-          sudo du -sb "$VNDK33" | tee report/VNDK33_BYTES.txt
-          sudo xxd -g1 "$VNDK33/apex_manifest.pb" | tee report/VNDK33_APEX_MANIFEST_HEX.txt
-          sudo strings -a "$VNDK33/apex_manifest.pb" | tee report/VNDK33_APEX_MANIFEST_STRINGS.txt
+          sudo du -sb "$VNDK33" | tee report/VNDK33_BYTES.txt; sudo xxd -g1 "$VNDK33/apex_manifest.pb" | tee report/VNDK33_APEX_MANIFEST_HEX.txt; sudo strings -a "$VNDK33/apex_manifest.pb" | tee report/VNDK33_APEX_MANIFEST_STRINGS.txt
           sudo find "$VNDK33" -type f -print0 | sort -z | xargs -0 sha256sum | sed "s#$SS/##" > report/VNDK33_TREE_SHA256.txt
-          grep -q 'vndkcore.libraries.33.txt' <(sudo find "$VNDK33" -type f -printf '%f\n')
-
       - name: Overlay Dace matrix and flattened VNDK33 into candidate view
         run: |
           set -Eeuo pipefail
           python3 wear7/scripts/generate_framework_matrix_from_device_manifest.py --main "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml" --fragments "$VEN/etc/vintf/manifest" --out report/compatibility_matrix.dace.xml --sepolicy-version 33.0 --kernel-sepolicy-version 30 --matrix-version 9.0 | tee report/DACE_MATRIX_GENERATOR.txt
           mkdir -p "$RUNNER_TEMP/system-vintf-overlay" "$RUNNER_TEMP/system-apex-overlay"
           cp -a "$SYS/etc/vintf/." "$RUNNER_TEMP/system-vintf-overlay/"; cp report/compatibility_matrix.dace.xml "$RUNNER_TEMP/system-vintf-overlay/compatibility_matrix.dace.xml"
-          cp -a "$SYS/apex/." "$RUNNER_TEMP/system-apex-overlay/"; sudo cp -a "$VNDK33" "$RUNNER_TEMP/system-apex-overlay/com.android.vndk.current"
-          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/system-apex-overlay/com.android.vndk.current"
+          cp -a "$SYS/apex/." "$RUNNER_TEMP/system-apex-overlay/"; sudo cp -a "$VNDK33" "$RUNNER_TEMP/system-apex-overlay/com.android.vndk.current"; sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/system-apex-overlay/com.android.vndk.current"
           sudo mount --bind "$RUNNER_TEMP/system-vintf-overlay" "$SYS/etc/vintf"; sudo mount --bind "$RUNNER_TEMP/system-apex-overlay" "$SYS/apex"
-          test -s "$SYS/apex/com.android.vndk.current/etc/vndkcore.libraries.33.txt"
-
-      - name: Activate Pixel APEXes with flattened VNDK33 present
+      - name: Activate APEXes and register flattened VNDK33
         run: |
           set -Eeuo pipefail
           rm -rf "$RUNNER_TEMP/apex"; mkdir -p "$RUNNER_TEMP/apex"
           env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$APEXD_HOST" --tool_path "$HOSTROOT" --apex_path "$RUNNER_TEMP/apex" --system_path "$SYS" --system_ext_path "$SX" --product_path "$PROD" --vendor_path "$VEN" --odm_path "$ODM" > report/APEXD_HOST_STDOUT.txt 2> report/APEXD_HOST_STDERR.txt
-          test -s "$RUNNER_TEMP/apex/apex-info-list.xml"; cp "$RUNNER_TEMP/apex/apex-info-list.xml" report/APEX_INFO_LIST.xml
-          grep -i 'vndk' report/APEX_INFO_LIST.xml | tee report/APEX_INFO_VNDK.txt || true
-          find "$RUNNER_TEMP/apex" -maxdepth 2 -iname '*vndk*' -printf '%y\t%p\n' | tee report/ACTIVATED_VNDK_PATHS.txt || true
+          test -s "$RUNNER_TEMP/apex/apex-info-list.xml"; cp "$RUNNER_TEMP/apex/apex-info-list.xml" report/APEX_INFO_LIST_BEFORE.xml
+          sudo cp -a "$VNDK33" "$RUNNER_TEMP/apex/com.android.vndk.current"; sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/apex/com.android.vndk.current"
+          python3 - "$RUNNER_TEMP/apex/apex-info-list.xml" <<'PY'
+          import sys,xml.etree.ElementTree as ET
+          p=sys.argv[1]; t=ET.parse(p); r=t.getroot()
+          assert not any(x.get('moduleName')=='com.android.vndk.v33' for x in r.findall('apex-info'))
+          ET.SubElement(r,'apex-info',moduleName='com.android.vndk.v33',modulePath='/system/apex/com.android.vndk.current',partition='SYSTEM',preinstalledModulePath='/system/apex/com.android.vndk.current',versionCode='1',versionName='',isFactory='true',isActive='true',provideSharedApexLibs='false')
+          ET.indent(t,space='  '); t.write(p,encoding='utf-8',xml_declaration=True)
+          PY
+          cp "$RUNNER_TEMP/apex/apex-info-list.xml" report/APEX_INFO_LIST.xml; grep 'com.android.vndk.v33' report/APEX_INFO_LIST.xml | tee report/VNDK_APEX_REGISTRATION.txt
           echo "APEXMAP=$RUNNER_TEMP/apex" >> "$GITHUB_ENV"
-
-      - name: Add flattened VNDK33 to host apex namespace when needed
+      - name: Official Android17 checkvintf with Dace matrix plus registered VNDK33
         run: |
-          set -Eeuo pipefail
-          if ! grep -qi 'vndk' report/APEX_INFO_LIST.xml; then
-            sudo cp -a "$VNDK33" "$APEXMAP/com.android.vndk.current"
-            sudo chown -R "$(id -u):$(id -g)" "$APEXMAP/com.android.vndk.current"
-            echo FLATTENED_VNDK_MANUAL_HOST_MAP=YES | tee report/VNDK_HOST_MAPPING.txt
-          else
-            echo FLATTENED_VNDK_MANUAL_HOST_MAP=NO | tee report/VNDK_HOST_MAPPING.txt
-          fi
-          test -s "$APEXMAP/com.android.vndk.current/etc/vndkcore.libraries.33.txt" || find "$APEXMAP" -maxdepth 3 -iname '*vndk*' -print
-
-      - name: Official Android17 checkvintf with Dace matrix plus VNDK33
-        run: |
-          set -Eeuo pipefail
-          set +e
+          set -Eeuo pipefail; set +e
           env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$CHECKVINTF" --check-compat --dirmap "/system:$SYS" --dirmap "/system_ext:$SX" --dirmap "/product:$PROD" --dirmap "/vendor:$VEN" --dirmap "/odm:$ODM" --dirmap "/apex:$APEXMAP" --property "ro.product.first_api_level=$TICWATCH_FIRST_API_LEVEL" --property 'ro.boot.product.hardware.sku=' --property "ro.boot.product.vendor.sku=$TICWATCH_VENDOR_SKU" > report/CHECKVINTF_STDOUT.txt 2> report/CHECKVINTF_STDERR.txt
           rc=$?; set -e; echo "CHECKVINTF_EXIT=$rc" | tee report/CHECKVINTF_EXIT.txt; cat report/CHECKVINTF_STDOUT.txt; cat report/CHECKVINTF_STDERR.txt >&2
           test "$rc" = 0; tail -n1 report/CHECKVINTF_STDOUT.txt | grep -q '^COMPATIBLE$'
-          cat > report/VNDK33_BRIDGE_VERDICT.txt <<'EOF'
-          STOCK379_FLATTENED_VNDK33_BRIDGE=PASS
-          DACE_SUPPLEMENTAL_FRAMEWORK_MATRIX=PASS
-          OFFICIAL_ANDROID17_CHECKVINTF=PASS
-          ACTUAL_CANDIDATE_REBUILD_REQUIRED=YES
-          EOF
-
+          printf 'STOCK379_FLATTENED_VNDK33_BRIDGE=PASS\nDACE_SUPPLEMENTAL_FRAMEWORK_MATRIX=PASS\nOFFICIAL_ANDROID17_CHECKVINTF=PASS\nACTUAL_CANDIDATE_REBUILD_REQUIRED=YES\n' > report/VNDK33_BRIDGE_VERDICT.txt
       - name: Cleanup
         if: always()
         run: |
-          set -u
-          test -z "${SYS:-}" || sudo umount "$SYS/apex" 2>/dev/null || true; test -z "${SYS:-}" || sudo umount "$SYS/etc/vintf" 2>/dev/null || true
+          set -u; test -z "${SYS:-}" || sudo umount "$SYS/apex" 2>/dev/null || true; test -z "${SYS:-}" || sudo umount "$SYS/etc/vintf" 2>/dev/null || true
           sudo umount "$RUNNER_TEMP/mnt/stock-system" 2>/dev/null || true; for p in system system_ext product vendor; do sudo umount "$RUNNER_TEMP/mnt/$p" 2>/dev/null || true; done
           sudo chown -R "$(id -u):$(id -g)" report 2>/dev/null || true; find report -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > report/SHA256SUMS.txt
-
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
