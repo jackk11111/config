@@ -1,0 +1,185 @@
+name: Wear7 official Android17 checkvintf final gate
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-rom-staging]
+    paths: ['.github/workflows/wear7-official-checkvintf-final.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  FINAL_RUN_ID: '35052553333'
+  FINAL_SUPER_ARTIFACT: Wear7-Final-V4-Super
+  AOSP17_BUILD_ID: '16102939'
+  AOSP17_TARGET: aosp_cf_x86_64_only_phone-userdebug
+  OTATOOLS_URL: https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+  TICWATCH_FIRST_API_LEVEL: '30'
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: wear7-rom-staging
+          fetch-depth: 1
+
+      - name: Free runner space and install image helpers
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk || true
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y curl unzip file android-sdk-libsparse-utils e2fsprogs >/dev/null
+          mkdir -p "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/ota" "$RUNNER_TEMP/parts" "$RUNNER_TEMP/mnt" final-vintf-report
+          df -h
+
+      - name: Download exact final V4 super candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ env.FINAL_SUPER_ARTIFACT }}
+          path: ${{ runner.temp }}/candidate
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.FINAL_RUN_ID }}
+
+      - name: Download and pin official Android17 otatools
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          ZIP="$RUNNER_TEMP/ota/otatools.zip"
+          curl -fL --retry 3 --retry-delay 3 -o "$ZIP" "$OTATOOLS_URL"
+          sha256sum "$ZIP" | tee final-vintf-report/OTATOOLS_SHA256.txt
+          stat -c 'OTATOOLS_BYTES=%s' "$ZIP" | tee -a final-vintf-report/OTATOOLS_SHA256.txt
+          unzip -Z1 "$ZIP" > final-vintf-report/OTATOOLS_CONTENTS.txt
+          CV=$(grep -E '(^|/)bin/checkvintf$' final-vintf-report/OTATOOLS_CONTENTS.txt | head -n1)
+          LP=$(grep -E '(^|/)bin/lpunpack$' final-vintf-report/OTATOOLS_CONTENTS.txt | head -n1)
+          test -n "$CV"; test -n "$LP"
+          PREFIX="${CV%bin/checkvintf}"
+          python3 - "$ZIP" "$RUNNER_TEMP/ota/extract" "$PREFIX" "$CV" "$LP" <<'PY'
+          import pathlib,sys,zipfile
+          zpath,out,prefix,cv,lp=sys.argv[1:]
+          out=pathlib.Path(out)
+          with zipfile.ZipFile(zpath) as z:
+              wanted=[]
+              for n in z.namelist():
+                  if n in (cv,lp) or n.startswith(prefix+'lib64/') or n.startswith(prefix+'lib/'):
+                      wanted.append(n)
+              if cv not in wanted or lp not in wanted:
+                  raise SystemExit('required host binaries missing')
+              for n in wanted:
+                  z.extract(n,out)
+          print('EXTRACTED',len(wanted))
+          PY
+          ROOT="$RUNNER_TEMP/ota/extract/$PREFIX"
+          chmod +x "$RUNNER_TEMP/ota/extract/$CV" "$RUNNER_TEMP/ota/extract/$LP"
+          echo "CHECKVINTF=$RUNNER_TEMP/ota/extract/$CV" >> "$GITHUB_ENV"
+          echo "LPUNPACK=$RUNNER_TEMP/ota/extract/$LP" >> "$GITHUB_ENV"
+          echo "OTATOOLS_ROOT=$ROOT" >> "$GITHUB_ENV"
+          echo "AOSP17_BUILD_ID=$AOSP17_BUILD_ID" | tee final-vintf-report/OTATOOLS_PROVENANCE.txt
+          echo "AOSP17_TARGET=$AOSP17_TARGET" | tee -a final-vintf-report/OTATOOLS_PROVENANCE.txt
+          echo "OTATOOLS_URL=$OTATOOLS_URL" | tee -a final-vintf-report/OTATOOLS_PROVENANCE.txt
+          env LD_LIBRARY_PATH="$ROOT/lib64:$ROOT/lib" "$RUNNER_TEMP/ota/extract/$CV" --help > final-vintf-report/CHECKVINTF_HELP.txt 2>&1 || true
+          env LD_LIBRARY_PATH="$ROOT/lib64:$ROOT/lib" "$RUNNER_TEMP/ota/extract/$LP" --help > final-vintf-report/LPUNPACK_HELP.txt 2>&1 || true
+          file "$RUNNER_TEMP/ota/extract/$CV" "$RUNNER_TEMP/ota/extract/$LP" | tee final-vintf-report/HOST_TOOLS_FILE.txt
+          sha256sum "$RUNNER_TEMP/ota/extract/$CV" "$RUNNER_TEMP/ota/extract/$LP" | tee final-vintf-report/HOST_TOOLS_SHA256.txt
+
+      - name: Unpack final super using official Android17 lpunpack
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          SUPER=$(find "$RUNNER_TEMP/candidate" -type f -name super.img -print -quit)
+          test -s "$SUPER"
+          sha256sum "$SUPER" | tee final-vintf-report/FINAL_SUPER_SHA256.txt
+          file "$SUPER" | tee final-vintf-report/FINAL_SUPER_FILE.txt
+          ROOT="$OTATOOLS_ROOT"
+          if ! env LD_LIBRARY_PATH="$ROOT/lib64:$ROOT/lib" "$LPUNPACK" "$SUPER" "$RUNNER_TEMP/parts" > final-vintf-report/LPUNPACK_DIRECT.txt 2>&1; then
+            echo 'DIRECT_SPARSE_LPUNPACK=FAILED_FALLBACK_RAW' | tee -a final-vintf-report/LPUNPACK_DIRECT.txt
+            simg2img "$SUPER" "$RUNNER_TEMP/super.raw.img"
+            env LD_LIBRARY_PATH="$ROOT/lib64:$ROOT/lib" "$LPUNPACK" "$RUNNER_TEMP/super.raw.img" "$RUNNER_TEMP/parts" | tee final-vintf-report/LPUNPACK_RAW.txt
+            rm -f "$RUNNER_TEMP/super.raw.img"
+          else
+            echo 'DIRECT_SPARSE_LPUNPACK=PASS' | tee -a final-vintf-report/LPUNPACK_DIRECT.txt
+          fi
+          for p in system system_ext product vendor vendor_dlkm system_dlkm; do
+            test -s "$RUNNER_TEMP/parts/$p.img"
+            printf '%s\t%s\t%s\n' "$p" "$(stat -c %s "$RUNNER_TEMP/parts/$p.img")" "$(sha256sum "$RUNNER_TEMP/parts/$p.img" | awk '{print $1}')" >> final-vintf-report/PARTITION_SHA256.tsv
+          done
+          df -h
+
+      - name: Mount final V4 partitions read-only and audit API properties
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          for p in system system_ext product vendor; do
+            sudo mkdir -p "$RUNNER_TEMP/mnt/$p"
+            sudo mount -o loop,ro "$RUNNER_TEMP/parts/$p.img" "$RUNNER_TEMP/mnt/$p"
+          done
+          SYS="$RUNNER_TEMP/mnt/system"
+          if test -d "$SYS/system/etc/vintf"; then SYSTEM_MAP="$SYS/system"; else SYSTEM_MAP="$SYS"; fi
+          echo "SYSTEM_MAP=$SYSTEM_MAP" >> "$GITHUB_ENV"
+          echo "SYSTEM_EXT_MAP=$RUNNER_TEMP/mnt/system_ext" >> "$GITHUB_ENV"
+          echo "PRODUCT_MAP=$RUNNER_TEMP/mnt/product" >> "$GITHUB_ENV"
+          echo "VENDOR_MAP=$RUNNER_TEMP/mnt/vendor" >> "$GITHUB_ENV"
+          {
+            echo '=== final candidate API properties ==='
+            sudo grep -RhsE '^(ro\.(product|board|vendor)\.(first_)?api_level|ro\.vendor\.api_level)=' "$RUNNER_TEMP/mnt/system" "$RUNNER_TEMP/mnt/system_ext" "$RUNNER_TEMP/mnt/product" "$RUNNER_TEMP/mnt/vendor" 2>/dev/null | sort -u || true
+            echo '=== final candidate identity properties ==='
+            sudo grep -RhsE '^(ro\.product\.(device|model)|ro\.product\.vendor\.device|ro\.board\.platform)=' "$RUNNER_TEMP/mnt/system" "$RUNNER_TEMP/mnt/system_ext" "$RUNNER_TEMP/mnt/product" "$RUNNER_TEMP/mnt/vendor" 2>/dev/null | sort -u || true
+          } | tee final-vintf-report/FINAL_PROPERTIES.txt
+          grep -q '^ro.vendor.api_level=30$' final-vintf-report/FINAL_PROPERTIES.txt
+
+      - name: Run official Android17 checkvintf against final V4 candidate
+        shell: bash
+        run: |
+          set -Eeuxo pipefail
+          ROOT="$OTATOOLS_ROOT"
+          CMD=("$CHECKVINTF" --check-compat \
+            --dirmap "/system:$SYSTEM_MAP" \
+            --dirmap "/system_ext:$SYSTEM_EXT_MAP" \
+            --dirmap "/product:$PRODUCT_MAP" \
+            --dirmap "/vendor:$VENDOR_MAP" \
+            --property "ro.product.first_api_level=$TICWATCH_FIRST_API_LEVEL")
+          printf '%q ' "${CMD[@]}" > final-vintf-report/CHECKVINTF_COMMAND.txt; echo >> final-vintf-report/CHECKVINTF_COMMAND.txt
+          set +e
+          env LD_LIBRARY_PATH="$ROOT/lib64:$ROOT/lib" "${CMD[@]}" > final-vintf-report/CHECKVINTF_STDOUT.txt 2> final-vintf-report/CHECKVINTF_STDERR.txt
+          rc=$?
+          set -e
+          echo "CHECKVINTF_EXIT=$rc" | tee final-vintf-report/CHECKVINTF_EXIT.txt
+          cat final-vintf-report/CHECKVINTF_STDOUT.txt
+          cat final-vintf-report/CHECKVINTF_STDERR.txt >&2
+          test "$rc" = 0
+          grep -q 'COMPATIBLE' final-vintf-report/CHECKVINTF_STDOUT.txt
+          cat > final-vintf-report/OFFICIAL_CHECKVINTF_FINAL_GATE.txt <<EOF
+          OFFICIAL_CHECKVINTF_FINAL_GATE=PASS
+          CHECKVINTF_SOURCE=AOSP_ANDROID17_PUBLIC_CI
+          AOSP17_BRANCH=aosp-android-latest-release
+          AOSP17_BUILD_ID=$AOSP17_BUILD_ID
+          AOSP17_TARGET=$AOSP17_TARGET
+          TICWATCH_FIRST_API_LEVEL=$TICWATCH_FIRST_API_LEVEL
+          KERNEL_REQUIREMENTS_CHECKED=NO_STATIC_PARTITION_GATE_ONLY
+          FINAL_V4_SUPER_RUN_ID=$FINAL_RUN_ID
+          EOF
+
+      - name: Finalize report hashes
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          for p in system system_ext product vendor; do sudo umount "$RUNNER_TEMP/mnt/$p" 2>/dev/null || true; done
+          sudo chown -R "$(id -u):$(id -g)" final-vintf-report 2>/dev/null || true
+          find final-vintf-report -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > final-vintf-report/SHA256SUMS.txt
+          df -h
+
+      - name: Upload official final VINTF report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: Wear7-Official-CheckVintf-Final
+          path: final-vintf-report/
+          retention-days: 30
+          compression-level: 9
