@@ -20,9 +20,12 @@ reconstruction, final super extraction/comparison and package preflight.
 All 12 preparation-tool tests passed. These results come from the completed
 run and its downloaded report; no rebuild or test rerun is needed to resume.
 
-**Resume at the hardware recovery/rollback gate.** Before installation,
-complete the write/streaming adapter against the validated recovery and settle
-the userdata migration strategy. Wi-Fi/ADB root in recovery, first Wear7
+**Resume at the hardware recovery/rollback gate.** The [installer development kit](installer/README.md)
+now implements bounded transfer, readback, interruption recovery and image rollback;
+21 local file-simulation tests passed. The ADB backend still needs physical recovery
+validation and writes remain blocked. Userdata/metadata are excluded from the
+transport. A clean first setup is proposed; reset consent and its recovery-specific
+implementation remain open. Wi-Fi/ADB root in recovery, first Wear7
 boot, pairing, hardware behavior and persistent ADB/root still require
 device evidence. GitHub Actions cannot close those runtime checks.
 

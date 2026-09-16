@@ -89,9 +89,12 @@ di condividerli. Un controllo preliminare positivo lascia comunque
 - Primo avvio Wear7, pairing con una companion funzionante, Wi-Fi/Bluetooth,
   display e touch, sensori, ricarica, sospensione, ADB/root dopo riavvio.
 
-L'adattatore di scrittura deve essere completato contro l'interfaccia della
-recovery collaudata. Qui è pronto il preflight; nessun comando di installazione
-è abilitato e nessuna prova sull'orologio è stata eseguita da questa pipeline.
+Il [kit installer](../installer/README.md) aggiunge il trasferimento a blocchi,
+la rilettura, il journal e il ripristino, con 21 test locali su file simulati.
+Il backend ADB deve essere collaudato contro la recovery finale: le scritture
+restano bloccate, userdata/metadata sono esclusi e nessun riavvio è automatico.
+L'installazione pulita è una proposta ancora priva di consenso al reset;
+nessuna prova sull'orologio è stata eseguita da questa pipeline.
 
 Gli artifact GitHub Actions hanno conservazione di 90 giorni. Prima della loro
 scadenza occorre archiviare Bootchain, Super, report e bridge firmato insieme.

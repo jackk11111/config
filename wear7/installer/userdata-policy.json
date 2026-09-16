@@ -1,0 +1,15 @@
+{
+  "format": 1,
+  "transport_userdata_action": "UNTOUCHED",
+  "transport_metadata_action": "UNTOUCHED",
+  "transport_recovery_action": "UNTOUCHED",
+  "automatic_reboot": false,
+  "in_place_migration_supported": false,
+  "recommended_first_bringup_strategy": "CLEAN_SETUP_AFTER_EXPLICIT_USER_CONSENT",
+  "user_reset_consent": "NOT_GIVEN",
+  "reset_implementation": "PENDING_VALIDATED_RECOVERY_FSTAB_AND_ENCRYPTION_HANDLING",
+  "userdata_backup_inventory": "NOT_VERIFIED",
+  "metadata_backup_inventory": "NOT_VERIFIED",
+  "rom_image_rollback_restores_user_data": false,
+  "erase_or_format_commands_in_installer": false
+}

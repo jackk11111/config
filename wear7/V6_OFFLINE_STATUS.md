@@ -50,6 +50,18 @@ checksum, report e APEX prima della scadenza. La pipeline dipende ancora dagli
 artifact V5B originali per una nuova ricostruzione; il loro archivio va conservato
 se si desidera riprodurre il processo dopo la scadenza degli input.
 
+## Preparazione installer successiva alla build
+
+Il [kit installer](installer/README.md) anticipa lo sviluppo senza ricompilare
+la ROM. Trasferimento da 16 MiB, rilettura, journal sul telefono, ripresa e
+ripristino sono implementati; 21 test locali su file simulati sono passati.
+Le scritture reali restano bloccate in assenza di una recovery qualificata.
+Gli hash delle immagini V6 e i risultati della run sopra non cambiano.
+
+La gestione dati durante il trasporto è definita: userdata e metadata intatti,
+nessun wipe e nessun riavvio automatico. Per il primo avvio è proposta una
+configurazione pulita; consenso al reset e procedura effettiva restano aperti.
+
 ## Ciò che rimane aperto
 
 Recovery Wi-Fi/root, backup fuori dal dispositivo e ripristino fisico non sono
