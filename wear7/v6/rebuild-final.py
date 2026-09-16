@@ -85,6 +85,7 @@ def main():
     raw=a.work/'final-super.raw'
     run(['simg2img',output/'super.img',raw])
     if raw.stat().st_size!=SUPER_SIZE: raise RuntimeError('wrong final super size')
+    raw_sha256=sha(raw)
     run([a.tools/'bin/lpunpack',raw,final]); raw.unlink()
     for n in SIZES:
         if sha(final/(n+'.img'))!=sha(images[n]): raise RuntimeError('super roundtrip changed '+n)
@@ -106,7 +107,7 @@ def main():
         run(['umount',mount])
     image_hashes={f.name:{'sha256':sha(f),'bytes':f.stat().st_size} for f in sorted(output.glob('*.img'))}
     manifest={'format':1,'candidate':'Wear7-V6','device':'dace','platform':'monaco','ab':False,
-              'super_expanded_bytes':SUPER_SIZE,'partitions':SIZES,'images':image_hashes,
+              'super_expanded_bytes':SUPER_SIZE,'super_expanded_sha256':raw_sha256,'partitions':SIZES,'images':image_hashes,
               'kernel':'5.15.220-Xinran_StarBai-Test+','input_run':35094447396,
               'source_commit':os.environ.get('GITHUB_SHA','unknown'),
               'offline_gates':json.loads((a.report/'final/GATES.json').read_text()),

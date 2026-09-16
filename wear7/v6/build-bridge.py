@@ -13,6 +13,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import struct
 import zipfile
 
 
@@ -86,25 +87,50 @@ def main():
     fsconfig=a.work/'fs_config'
     rows=['/ 0 0 0755','/lost+found 0 0 0700','/apex_manifest.pb 0 0 0644','/apex_manifest.json 0 0 0644']
     for x in sorted(payload.rglob('*')):
-        st=x.lstat(); mode=st.st_mode&0o7777
+        st=(source/x.relative_to(payload)).lstat(); mode=st.st_mode&0o7777
         rows.append(f'/{x.relative_to(payload)} {st.st_uid} {st.st_gid} {mode:04o}')
     fsconfig.write_text('\n'.join(rows)+'\n')
     unsigned=a.work/'unsigned.apex'; signed=a.work/'com.android.vndk.v33.apex'
-    run([a.tools/'bin/apexer','--force','--apexer_tool_path',a.tools/'bin','--manifest',source/'apex_manifest.pb','--file_contexts',contexts,'--canned_fs_config',fsconfig,'--key',priv,'--pubkey',pub,'--min_sdk_version','33','--target_sdk_version','37','--payload_type','image',payload,unsigned])
-    run([a.tools/'bin/signapk',keys/'outer.x509.pem',keys/'outer.pk8',unsigned,signed])
+    run([a.tools/'bin/apexer','--force','--apexer_tool_path',a.tools/'bin','--manifest',source/'apex_manifest.pb','--file_contexts',contexts,'--canned_fs_config',fsconfig,'--key',priv,'--pubkey',pub,'--android_jar_path',a.system/'framework/framework-res.apk','--min_sdk_version','33','--target_sdk_version','37','--payload_type','image',payload,unsigned])
+    run([a.tools/'bin/signapk','-a','4096','--align-file-size',keys/'outer.x509.pem',keys/'outer.pk8',unsigned,signed])
     run([shutil.which('apksigner') or a.tools/'bin/apksigner','verify','--verbose',signed])
     with zipfile.ZipFile(signed) as z:
         for name in ('apex_payload.img','apex_pubkey','apex_manifest.pb','AndroidManifest.xml'):
             if name not in z.namelist(): raise RuntimeError('missing '+name)
+        entry=z.getinfo('apex_payload.img')
+        with signed.open('rb') as f:
+            f.seek(entry.header_offset); header=f.read(30)
+        name_len,extra_len=struct.unpack_from('<HH',header,26)
+        payload_offset=entry.header_offset+30+name_len+extra_len
+        if entry.compress_type!=zipfile.ZIP_STORED or payload_offset%4096 or signed.stat().st_size%4096:
+            raise RuntimeError('APEX payload/container lacks required 4096-byte alignment')
         image=a.work/'apex_payload.img'; image.write_bytes(z.read('apex_payload.img'))
         if z.read('apex_pubkey')!=pub.read_bytes(): raise RuntimeError('public key mismatch')
     run([a.tools/'bin/avbtool','verify_image','--image',image,'--key',priv])
+    mounted=a.work/'verified-payload'; mounted.mkdir()
+    run(['mount','-o','loop,ro',image,mounted])
+    try:
+        checked=0
+        for src in source.rglob('*'):
+            if src.name in ('apex_manifest.pb','apex_manifest.json'): continue
+            dst=mounted/src.relative_to(source)
+            a_st=src.lstat(); b_st=dst.lstat()
+            if (a_st.st_mode,a_st.st_uid,a_st.st_gid)!=(b_st.st_mode,b_st.st_uid,b_st.st_gid):
+                raise RuntimeError('VNDK payload metadata changed: '+str(src))
+            if src.is_symlink():
+                if os.readlink(src)!=os.readlink(dst): raise RuntimeError('VNDK symlink changed')
+            elif src.is_file() and digest(src)!=digest(dst): raise RuntimeError('VNDK library changed')
+            if os.getxattr(src,'security.selinux',follow_symlinks=False)!=os.getxattr(dst,'security.selinux',follow_symlinks=False):
+                raise RuntimeError('VNDK SELinux label changed: '+str(src))
+            checked+=1
+    finally:
+        run(['umount',mounted])
     dest=a.system/'apex/com.android.vndk.v33.apex'
     shutil.copyfile(signed,dest); dest.chmod(0o644)
     os.setxattr(dest,'security.selinux',os.getxattr(source,'security.selinux'))
     shutil.rmtree(a.system/'apex/com.android.vndk.current')
     shutil.copyfile(signed,a.report/'com.android.vndk.v33.apex')
-    result={'name':manifest['name'],'source_payload_files':len(payload_hashes),'signed_apex_sha256':digest(signed),'signing':'unique_build_keys_not_published','update_strategy':'reuse_signed_apex_or_replace_in_system_release','private_keys_published':False}
+    result={'name':manifest['name'],'source_payload_files':len(payload_hashes),'signed_apex_sha256':digest(signed),'signing':'unique_build_keys_not_published','update_strategy':'reuse_signed_apex_or_replace_in_system_release','verified_payload_entries':checked,'payload_offset':payload_offset,'payload_alignment':4096,'private_keys_published':False}
     (a.report/'VNDK33_BRIDGE.json').write_text(json.dumps(result,indent=2)+'\n')
     shutil.rmtree(keys)
     print('VNDK33_PACKAGED_APEX=PASS',json.dumps(result),flush=True)

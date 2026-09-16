@@ -9,7 +9,8 @@ vendor_boot/dtbo restano identici; le immagini vbmeta vengono rigenerate se camb
 ## Cosa deve verificare la pipeline
 
 1. Riconfezionare le librerie stock VNDK33 in un APEX firmato, preservandone
-   contenuto ed etichette SELinux, ed eliminare la cartella APEX flattened.
+   contenuto ed etichette SELinux, verificare firma e allineamento a 4096 byte,
+   ed eliminare la cartella APEX flattened.
 2. Estrarre gli APEX con `apexd_host` e verificare che VNDK33 sia presente una sola volta.
 3. Eseguire il `checkvintf` ufficiale sui file effettivi, con SKU monaco.
 4. Compilare insieme le policy SELinux platform/system_ext/product/vendor e
@@ -19,7 +20,9 @@ vendor_boot/dtbo restano identici; le immagini vbmeta vengono rigenerate se camb
 6. Ricostruire system, AVB e super, riestrarre super, confrontare le partizioni
    e i metadati del filesystem, quindi ripetere i controlli sul risultato finale.
 
-Un errore blocca la pubblicazione degli artifact candidati. I report vengono
+Un errore blocca la pubblicazione degli artifact candidati. Il guardiano della
+pipeline usa un errore esplicito, anche quando vengono eseguiti più controlli
+indipendenti per raccogliere tutti i risultati. I report vengono
 conservati anche in caso di errore e indicano quale controllo è fallito.
 Le altre cinque partizioni logiche vengono confrontate byte per byte.
 

@@ -45,10 +45,10 @@ def main():
                     props.update(line.split('=',1) for line in f.read_text(errors='replace').splitlines() if '=' in line and not line.startswith('#'))
         if props.get('ro.apex.updatable')!='true': raise RuntimeError('unexpected APEX update mode')
         flat=[str(x) for root in roots.values() for x in (root/'apex').glob('*') if x.is_dir() and (x/'apex_manifest.pb').exists()]
-        if flat: raise RuntimeError('mixed flattened APEX remains: '+repr(flat))
         cmd=[a.tools/'bin/apexd_host','--tool_path',a.tools,'--apex_path',apex]
         for key,root in roots.items(): cmd += ['--'+key+'_path',root]
         run('APEXD_HOST',cmd)
+        if flat: raise RuntimeError('mixed flattened APEX remains: '+repr(flat))
         nodes=ET.parse(apex/'apex-info-list.xml').getroot()
         matches=[n.attrib for n in nodes if n.attrib.get('moduleName')=='com.android.vndk.v33' and n.attrib.get('isActive')=='true']
         if len(matches)!=1: raise RuntimeError('VNDK33 not uniquely active in host activation')
@@ -95,6 +95,39 @@ def main():
         m=re.search(r"targetSdkVersion:'(\d+)'",badging)
         if not m: raise RuntimeError('overlay targetSdk unknown')
         target_sdk=int(m.group(1))
+        required_name=re.search(r"requiredPropertyName:'([^']+)'",badging)
+        required_value=re.search(r"requiredPropertyValue:'([^']+)'",badging)
+        # aapt2 versions use either = or : in this part of badging.
+        required_name=required_name or re.search(r"requiredPropertyName='([^']+)'",badging)
+        required_value=required_value or re.search(r"requiredPropertyValue='([^']+)'",badging)
+        if required_name:
+            if not required_value: raise RuntimeError('incomplete overlay property condition')
+            found=set()
+            for root in roots.values():
+                for rel in ('build.prop','etc/build.prop'):
+                    f=root/rel
+                    if f.is_file():
+                        for line in f.read_text(errors='replace').splitlines():
+                            if line.startswith(required_name[1]+'='): found.add(line.split('=',1)[1])
+            if found!={required_value[1]}: raise RuntimeError('overlay required property is absent or ambiguous: '+repr(found))
+        config=a.product/'overlay/config/config.xml'
+        if config.is_file():
+            config_text=config.read_text()
+            (a.report/'PRODUCT_OVERLAY_CONFIG.xml').write_text(config_text)
+            package='com.mobvoi.ticwatch.fastpair.dace.enduro.overlay'
+            # A config changes Android's defaults: an omitted overlay is disabled.
+            def entries(path,seen):
+                path=path.resolve()
+                if not path.is_relative_to(config.parent.resolve()) or path in seen or len(seen)>5:
+                    raise RuntimeError('invalid recursive overlay config merge')
+                seen=seen|{path}; root_config=ET.parse(path).getroot(); found=[]
+                for node in root_config:
+                    if node.tag=='overlay': found.append(node)
+                    elif node.tag=='merge': found+=entries(config.parent/node.attrib['path'],seen)
+                return found
+            matches=[n for n in entries(config,set()) if n.attrib.get('package')==package]
+            if len(matches)!=1 or matches[0].attrib.get('enabled')!='true':
+                raise RuntimeError('Dace overlay not explicitly enabled in product overlay config')
         # Match Android IdmapManager: preinstalled pre-Q overlays do not enforce
         # overlayable; Q+ overlays always do. Never modify targetSdk to pass.
         flags=['--policy','public','--policy','product']
@@ -113,7 +146,8 @@ def main():
         outpath=a.work/'dace.idmap'
         run('IDMAP_CREATE',cmd+['create','--target-apk-path',target,'--overlay-apk-path',overlay,'--idmap-path',outpath,*flags],targetenv)
         if not outpath.is_file() or outpath.stat().st_size==0: raise RuntimeError('no idmap created')
-        run('IDMAP_DUMP',cmd+['dump','--idmap-path',outpath],targetenv)
+        dump=run('IDMAP_DUMP',cmd+['dump','--idmap-path',outpath],targetenv)
+        if 'google_fast_pair_service_model_id' not in dump: raise RuntimeError('Fast Pair model ID is not mapped by the idmap')
         (a.report/'IDMAP_RUNTIME_POLICY.json').write_text(json.dumps({'target_sdk':target_sdk,'partition':'product','enforce_overlayable':target_sdk>=29,'target_sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'overlay_sha256':hashlib.sha256(overlay.read_bytes()).hexdigest()},indent=2)+'\n')
     gate('APEX_INTEGRATION',apex_gate)
     gate('OFFICIAL_VINTF',vintf_gate)
