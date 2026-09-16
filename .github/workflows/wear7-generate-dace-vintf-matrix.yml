@@ -1,0 +1,104 @@
+name: Wear7 generate exact dace framework VINTF matrix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-rom-staging]
+    paths: ['.github/workflows/wear7-generate-dace-vintf-matrix.yml']
+
+permissions:
+  contents: read
+
+env:
+  TIC_URL: https://android.googleapis.com/packages/data/ota-api/package/2269bd24a774cae37adc720d3d97bd1b76846e2b.zip
+  TIC_SHA256: ffa61d822a5c667c230ce2ba9426ce4eb282adcaa0891279ef002f65ca15a08d
+  OTATOOLS_URL: https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+  OTATOOLS_SHA256: f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84
+
+jobs:
+  generate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: wear7-rom-staging
+          fetch-depth: 1
+
+      - name: Prepare host
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y curl unzip e2fsprogs >/dev/null
+          mkdir -p "$RUNNER_TEMP/src" "$RUNNER_TEMP/mnt" "$RUNNER_TEMP/ota" report
+
+      - name: Reconstruct exact stock379 vendor
+        run: |
+          set -Eeuo pipefail
+          curl -fL --retry 3 --retry-delay 3 -o "$RUNNER_TEMP/src/tic379.zip" "$TIC_URL"
+          echo "$TIC_SHA256  $RUNNER_TEMP/src/tic379.zip" | sha256sum -c -
+          python3 wear7/scripts/reconstruct_block_ota.py "$RUNNER_TEMP/src/tic379.zip" vendor "$RUNNER_TEMP/vendor.raw"
+          test "$(stat -c %s "$RUNNER_TEMP/vendor.raw")" = 297361408
+          echo '150238505037c881b079b7c9de1adc231f2c4a94b64f8dd3a7694ebc7408371e  '"$RUNNER_TEMP/vendor.raw" | sha256sum -c -
+          sudo mount -o loop,ro "$RUNNER_TEMP/vendor.raw" "$RUNNER_TEMP/mnt"
+          test -s "$RUNNER_TEMP/mnt/etc/vintf/manifest_monaco.xml"
+          sha256sum "$RUNNER_TEMP/mnt/etc/vintf/manifest_monaco.xml" | tee report/MANIFEST_MONACO_SHA256.txt
+          find "$RUNNER_TEMP/mnt/etc/vintf/manifest" -maxdepth 1 -type f -name '*.xml' -print | sort | tee report/MANIFEST_FRAGMENTS.txt
+
+      - name: Pin official Android17 assemble_vintf
+        run: |
+          set -Eeuo pipefail
+          ZIP="$RUNNER_TEMP/ota/otatools.zip"
+          curl -fL --retry 3 --retry-delay 3 -o "$ZIP" "$OTATOOLS_URL"
+          echo "$OTATOOLS_SHA256  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$RUNNER_TEMP/ota/x" <<'PY'
+          import sys,zipfile,pathlib
+          z=zipfile.ZipFile(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          keep=[n for n in z.namelist() if n=='bin/assemble_vintf' or n.startswith('lib64/') or n.startswith('lib/')]
+          if 'bin/assemble_vintf' not in keep: raise SystemExit('assemble_vintf missing')
+          for n in keep: z.extract(n,out)
+          PY
+          chmod +x "$RUNNER_TEMP/ota/x/bin/assemble_vintf"
+          file "$RUNNER_TEMP/ota/x/bin/assemble_vintf" | tee report/ASSEMBLE_VINTF_FILE.txt
+          sha256sum "$RUNNER_TEMP/ota/x/bin/assemble_vintf" | tee report/ASSEMBLE_VINTF_SHA256.txt
+          env LD_LIBRARY_PATH="$RUNNER_TEMP/ota/x/lib64:$RUNNER_TEMP/ota/x/lib" "$RUNNER_TEMP/ota/x/bin/assemble_vintf" -h > report/ASSEMBLE_VINTF_HELP.txt 2>&1 || true
+
+      - name: Generate compatible framework matrix from exact merged device manifest
+        run: |
+          set -Eeuo pipefail
+          AV="$RUNNER_TEMP/ota/x/bin/assemble_vintf"
+          args=(-i "$RUNNER_TEMP/mnt/etc/vintf/manifest_monaco.xml")
+          while IFS= read -r f; do args+=(-i "$f"); done < report/MANIFEST_FRAGMENTS.txt
+          env LD_LIBRARY_PATH="$RUNNER_TEMP/ota/x/lib64:$RUNNER_TEMP/ota/x/lib" VINTF_IGNORE_TARGET_FCM_VERSION=true "$AV" "${args[@]}" -m -o report/compatibility_matrix.dace.xml 2> report/ASSEMBLE_VINTF_STDERR.txt
+          test -s report/compatibility_matrix.dace.xml
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          p='report/compatibility_matrix.dace.xml'
+          r=ET.parse(p).getroot()
+          assert r.tag=='compatibility-matrix' and r.attrib.get('type')=='framework'
+          print('MATRIX_LEVEL',r.attrib.get('level'))
+          print('HAL_COUNT',len(r.findall('hal')))
+          sp=r.find('sepolicy')
+          print('SEPOLICY',ET.tostring(sp,encoding='unicode') if sp is not None else 'NONE')
+          PY
+          grep -q '<sepolicy-version>33.0</sepolicy-version>' report/compatibility_matrix.dace.xml
+          grep -q '<name>vendor.display.config</name>' report/compatibility_matrix.dace.xml
+          grep -q '<name>vendor.qti.hardware.qseecom</name>' report/compatibility_matrix.dace.xml
+          grep -q '<name>android.hardware.bluetooth.audio</name>' report/compatibility_matrix.dace.xml
+          sha256sum report/compatibility_matrix.dace.xml | tee report/DACE_MATRIX_SHA256.txt
+          cat report/compatibility_matrix.dace.xml
+
+      - name: Cleanup and upload
+        if: always()
+        run: |
+          sudo umount "$RUNNER_TEMP/mnt" 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" report 2>/dev/null || true
+          find report -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > report/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: Wear7-Dace-Vintf-Matrix
+          path: report/
+          retention-days: 30
+          compression-level: 9
