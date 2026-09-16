@@ -1,0 +1,148 @@
+name: Wear7 official checkvintf VNDK33 bridge probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-rom-staging]
+    paths: ['.github/workflows/wear7-checkvintf-vndk33-probe.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  FINAL_RUN_ID: '35052553333'
+  TIC_URL: https://android.googleapis.com/packages/data/ota-api/package/2269bd24a774cae37adc720d3d97bd1b76846e2b.zip
+  TIC_SHA256: ffa61d822a5c667c230ce2ba9426ce4eb282adcaa0891279ef002f65ca15a08d
+  OTATOOLS_URL: https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+  OTATOOLS_SHA256: f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84
+  TICWATCH_FIRST_API_LEVEL: '30'
+  TICWATCH_VENDOR_SKU: monaco
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: wear7-rom-staging
+          fetch-depth: 1
+
+      - name: Prepare host
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk || true
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y curl unzip file android-sdk-libsparse-utils e2fsprogs >/dev/null
+          mkdir -p "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/src" "$RUNNER_TEMP/ota" "$RUNNER_TEMP/parts" "$RUNNER_TEMP/mnt/system" "$RUNNER_TEMP/mnt/system_ext" "$RUNNER_TEMP/mnt/product" "$RUNNER_TEMP/mnt/vendor" "$RUNNER_TEMP/mnt/stock-system" "$RUNNER_TEMP/apex" report
+
+      - name: Download final V4 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-Final-V4-Super
+          path: ${{ runner.temp }}/candidate
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.FINAL_RUN_ID }}
+
+      - name: Pin official Android17 host tools
+        run: |
+          set -Eeuo pipefail
+          ZIP="$RUNNER_TEMP/ota/otatools.zip"; curl -fL --retry 3 -o "$ZIP" "$OTATOOLS_URL"
+          echo "$OTATOOLS_SHA256  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$RUNNER_TEMP/ota/x" <<'PY'
+          import sys,zipfile,pathlib
+          z=zipfile.ZipFile(sys.argv[1]); out=pathlib.Path(sys.argv[2]); bins={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/deapexer','bin/debugfs','bin/debugfs_static','bin/fsck.erofs'}
+          keep=[n for n in z.namelist() if n in bins or n.startswith('lib64/') or n.startswith('lib/')]
+          req={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/deapexer','bin/fsck.erofs'}
+          if req-set(keep): raise SystemExit('missing required host tools')
+          for n in keep: z.extract(n,out)
+          PY
+          BIN="$RUNNER_TEMP/ota/x/bin"; test -e "$BIN/debugfs" || ln -s debugfs_static "$BIN/debugfs"; test -e "$BIN/debugfs_static" || ln -s debugfs "$BIN/debugfs_static"
+          chmod +x "$BIN/checkvintf" "$BIN/lpunpack" "$BIN/apexd_host" "$BIN/deapexer" "$BIN/debugfs" "$BIN/debugfs_static" "$BIN/fsck.erofs"
+          echo "CHECKVINTF=$BIN/checkvintf" >> "$GITHUB_ENV"; echo "LPUNPACK=$BIN/lpunpack" >> "$GITHUB_ENV"; echo "APEXD_HOST=$BIN/apexd_host" >> "$GITHUB_ENV"; echo "HOSTROOT=$RUNNER_TEMP/ota/x" >> "$GITHUB_ENV"
+
+      - name: Unpack and mount candidate
+        run: |
+          set -Eeuo pipefail
+          SUPER="$RUNNER_TEMP/candidate/super.img"; test "$(sha256sum "$SUPER"|awk '{print $1}')" = 50f1a567e8dfcce4297a39f458e66196c1b59b420b002ec036d5c77fa1aa854a
+          simg2img "$SUPER" "$RUNNER_TEMP/super.raw"; env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$LPUNPACK" "$RUNNER_TEMP/super.raw" "$RUNNER_TEMP/parts"; rm "$RUNNER_TEMP/super.raw"
+          for p in system system_ext product vendor; do sudo mount -o loop,ro "$RUNNER_TEMP/parts/$p.img" "$RUNNER_TEMP/mnt/$p"; done
+          if test -d "$RUNNER_TEMP/mnt/system/system/etc/vintf"; then SYS="$RUNNER_TEMP/mnt/system/system"; else SYS="$RUNNER_TEMP/mnt/system"; fi
+          SX="$RUNNER_TEMP/mnt/system_ext"; PROD="$RUNNER_TEMP/mnt/product"; VEN="$RUNNER_TEMP/mnt/vendor"; ODM="$VEN/odm"
+          echo "SYS=$SYS" >> "$GITHUB_ENV"; echo "SX=$SX" >> "$GITHUB_ENV"; echo "PROD=$PROD" >> "$GITHUB_ENV"; echo "VEN=$VEN" >> "$GITHUB_ENV"; echo "ODM=$ODM" >> "$GITHUB_ENV"
+
+      - name: Reconstruct stock379 system and select exact VNDK33 APEX
+        run: |
+          set -Eeuo pipefail
+          curl -fL --retry 3 --retry-delay 3 -o "$RUNNER_TEMP/src/tic379.zip" "$TIC_URL"
+          echo "$TIC_SHA256  $RUNNER_TEMP/src/tic379.zip" | sha256sum -c -
+          python3 wear7/scripts/reconstruct_block_ota.py "$RUNNER_TEMP/src/tic379.zip" system "$RUNNER_TEMP/stock-system.raw"
+          sudo mount -o loop,ro "$RUNNER_TEMP/stock-system.raw" "$RUNNER_TEMP/mnt/stock-system"
+          if test -d "$RUNNER_TEMP/mnt/stock-system/system"; then SS="$RUNNER_TEMP/mnt/stock-system/system"; else SS="$RUNNER_TEMP/mnt/stock-system"; fi
+          mapfile -t A < <(sudo find "$SS/apex" -maxdepth 1 -type f \( -name 'com.android.vndk.v33*.apex' -o -name 'com.android.vndk.v33*.capex' \) -print)
+          test "${#A[@]}" = 1
+          VNDK33="${A[0]}"; echo "VNDK33=$VNDK33" >> "$GITHUB_ENV"
+          printf 'PATH=%s\nSIZE=%s\nSHA256=%s\n' "$VNDK33" "$(stat -c %s "$VNDK33")" "$(sha256sum "$VNDK33"|awk '{print $1}')" | tee report/VNDK33_APEX_SOURCE.txt
+          file "$VNDK33" | tee report/VNDK33_APEX_FILE.txt
+
+      - name: Overlay supplemental dace matrix and stock VNDK33 APEX
+        run: |
+          set -Eeuo pipefail
+          python3 wear7/scripts/generate_framework_matrix_from_device_manifest.py --main "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml" --fragments "$VEN/etc/vintf/manifest" --out report/compatibility_matrix.dace.xml --sepolicy-version 33.0 --kernel-sepolicy-version 30 --matrix-version 9.0 | tee report/DACE_MATRIX_GENERATOR.txt
+          mkdir -p "$RUNNER_TEMP/system-vintf-overlay" "$RUNNER_TEMP/system-apex-overlay"
+          cp -a "$SYS/etc/vintf/." "$RUNNER_TEMP/system-vintf-overlay/"; cp report/compatibility_matrix.dace.xml "$RUNNER_TEMP/system-vintf-overlay/compatibility_matrix.dace.xml"
+          cp -a "$SYS/apex/." "$RUNNER_TEMP/system-apex-overlay/"; cp -a "$VNDK33" "$RUNNER_TEMP/system-apex-overlay/$(basename "$VNDK33")"
+          sudo mount --bind "$RUNNER_TEMP/system-vintf-overlay" "$SYS/etc/vintf"
+          sudo mount --bind "$RUNNER_TEMP/system-apex-overlay" "$SYS/apex"
+          test -s "$SYS/apex/$(basename "$VNDK33")"
+          sha256sum "$SYS/apex/$(basename "$VNDK33")" | tee report/VNDK33_APEX_INSTALLED_SHA256.txt
+
+      - name: Activate APEXes and prove VNDK33 manifest
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/apex"; mkdir -p "$RUNNER_TEMP/apex"
+          env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$APEXD_HOST" --tool_path "$HOSTROOT" --apex_path "$RUNNER_TEMP/apex" --system_path "$SYS" --system_ext_path "$SX" --product_path "$PROD" --vendor_path "$VEN" --odm_path "$ODM" > report/APEXD_HOST_STDOUT.txt 2> report/APEXD_HOST_STDERR.txt
+          test -s "$RUNNER_TEMP/apex/apex-info-list.xml"; cp "$RUNNER_TEMP/apex/apex-info-list.xml" report/APEX_INFO_LIST.xml
+          grep -q 'com.android.vndk.v33' report/APEX_INFO_LIST.xml
+          test -d "$RUNNER_TEMP/apex/com.android.vndk.v33"
+          find "$RUNNER_TEMP/apex/com.android.vndk.v33" -maxdepth 3 -type f | sort | tee report/VNDK33_ACTIVATED_FILES.txt
+          test -s "$RUNNER_TEMP/apex/com.android.vndk.v33/etc/vintf/manifest.xml"
+          cat "$RUNNER_TEMP/apex/com.android.vndk.v33/etc/vintf/manifest.xml" | tee report/VNDK33_ACTIVATED_MANIFEST.xml
+          grep -q '<vendor-ndk>' report/VNDK33_ACTIVATED_MANIFEST.xml
+          grep -q '<version>33</version>' report/VNDK33_ACTIVATED_MANIFEST.xml
+          echo "APEXMAP=$RUNNER_TEMP/apex" >> "$GITHUB_ENV"
+
+      - name: Official Android17 checkvintf gate with VNDK33 bridge
+        run: |
+          set -Eeuo pipefail
+          set +e
+          env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$CHECKVINTF" --check-compat --dirmap "/system:$SYS" --dirmap "/system_ext:$SX" --dirmap "/product:$PROD" --dirmap "/vendor:$VEN" --dirmap "/odm:$ODM" --dirmap "/apex:$APEXMAP" --property "ro.product.first_api_level=$TICWATCH_FIRST_API_LEVEL" --property 'ro.boot.product.hardware.sku=' --property "ro.boot.product.vendor.sku=$TICWATCH_VENDOR_SKU" > report/CHECKVINTF_STDOUT.txt 2> report/CHECKVINTF_STDERR.txt
+          rc=$?; set -e; echo "CHECKVINTF_EXIT=$rc" | tee report/CHECKVINTF_EXIT.txt; cat report/CHECKVINTF_STDOUT.txt; cat report/CHECKVINTF_STDERR.txt >&2
+          test "$rc" = 0; tail -n1 report/CHECKVINTF_STDOUT.txt | grep -q '^COMPATIBLE$'
+          cat > report/VNDK33_BRIDGE_VERDICT.txt <<'EOF'
+          STOCK379_VNDK33_APEX_BRIDGE=PASS
+          DACE_SUPPLEMENTAL_FRAMEWORK_MATRIX=PASS
+          OFFICIAL_ANDROID17_CHECKVINTF=PASS
+          CANDIDATE_REBUILD_WITH_VNDK33_REQUIRED=YES
+          EOF
+
+      - name: Cleanup
+        if: always()
+        run: |
+          set -u
+          test -z "${SYS:-}" || sudo umount "$SYS/apex" 2>/dev/null || true
+          test -z "${SYS:-}" || sudo umount "$SYS/etc/vintf" 2>/dev/null || true
+          sudo umount "$RUNNER_TEMP/mnt/stock-system" 2>/dev/null || true
+          for p in system system_ext product vendor; do sudo umount "$RUNNER_TEMP/mnt/$p" 2>/dev/null || true; done
+          sudo chown -R "$(id -u):$(id -g)" report 2>/dev/null || true
+          find report -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > report/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: Wear7-CheckVintf-VNDK33-Probe
+          path: report/
+          retention-days: 30
+          compression-level: 9
