@@ -16,6 +16,7 @@ env:
   AOSP17_BUILD_ID: '16102939'
   AOSP17_TARGET: aosp_cf_x86_64_only_phone-userdebug
   TICWATCH_FIRST_API_LEVEL: '30'
+  TICWATCH_VENDOR_SKU: monaco
 
 jobs:
   check:
@@ -91,6 +92,7 @@ jobs:
           VEN="$RUNNER_TEMP/mnt/vendor"
           ODM="$VEN/odm"
           test -d "$ODM"
+          test -s "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml"
           echo "SYS=$SYS" >> "$GITHUB_ENV"
           echo "SX=$SX" >> "$GITHUB_ENV"
           echo "PROD=$PROD" >> "$GITHUB_ENV"
@@ -101,6 +103,7 @@ jobs:
             sudo grep -h '^ro.product.first_api_level=' "$f" 2>/dev/null || true
           done < report/PROPERTY_FILES.txt | sort -u | tee report/FIRST_API_LEVEL.txt
           grep -q '^ro.product.first_api_level=30$' report/FIRST_API_LEVEL.txt
+          printf 'VENDOR_SKU=%s\nSELECTED_DEVICE_MANIFEST=%s\n' "$TICWATCH_VENDOR_SKU" "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml" | tee report/VENDOR_SKU_SELECTION.txt
 
       - name: Activate APEXes exactly for host VINTF
         run: |
@@ -123,7 +126,7 @@ jobs:
       - name: Official checkvintf compatibility gate
         run: |
           set -Eeuo pipefail
-          printf 'AOSP17_BUILD_ID=%s\nAOSP17_TARGET=%s\nTICWATCH_FIRST_API_LEVEL=%s\n' "$AOSP17_BUILD_ID" "$AOSP17_TARGET" "$TICWATCH_FIRST_API_LEVEL" | tee report/PROVENANCE.txt
+          printf 'AOSP17_BUILD_ID=%s\nAOSP17_TARGET=%s\nTICWATCH_FIRST_API_LEVEL=%s\nTICWATCH_VENDOR_SKU=%s\n' "$AOSP17_BUILD_ID" "$AOSP17_TARGET" "$TICWATCH_FIRST_API_LEVEL" "$TICWATCH_VENDOR_SKU" | tee report/PROVENANCE.txt
           set +e
           env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$CHECKVINTF" --check-compat \
             --dirmap "/system:$SYS" \
@@ -134,7 +137,7 @@ jobs:
             --dirmap "/apex:$APEXMAP" \
             --property "ro.product.first_api_level=$TICWATCH_FIRST_API_LEVEL" \
             --property 'ro.boot.product.hardware.sku=' \
-            --property 'ro.boot.product.vendor.sku=' \
+            --property "ro.boot.product.vendor.sku=$TICWATCH_VENDOR_SKU" \
             > report/CHECKVINTF_STDOUT.txt 2> report/CHECKVINTF_STDERR.txt
           rc=$?
           set -e
@@ -143,11 +146,13 @@ jobs:
           cat report/CHECKVINTF_STDERR.txt >&2
           test "$rc" = 0
           tail -n 1 report/CHECKVINTF_STDOUT.txt | grep -q '^COMPATIBLE$'
-          cat > report/OFFICIAL_CHECKVINTF_FINAL_GATE.txt <<'EOF'
+          cat > report/OFFICIAL_CHECKVINTF_FINAL_GATE.txt <<EOF
           OFFICIAL_CHECKVINTF_FINAL_GATE=PASS
           CHECKVINTF_SOURCE=AOSP_ANDROID17_PUBLIC_CI_BUILD_16102939
           FINAL_V4_SUPER=VERIFIED_SHA256
           TICWATCH_FIRST_API_LEVEL=30
+          TICWATCH_VENDOR_SKU=$TICWATCH_VENDOR_SKU
+          DEVICE_MANIFEST=vendor/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml
           ODM_DIRMAP=PASS
           APEX_ACTIVATION=PASS
           KERNEL_REQUIREMENTS_CHECKED=NO_STATIC_PARTITION_GATE_ONLY
