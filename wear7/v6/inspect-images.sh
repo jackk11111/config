@@ -72,4 +72,12 @@ for f in FINAL_OFFLINE_VERDICT.txt VINTF_STATIC_CONTRACT.txt KERNEL_SOURCE_REPOR
     if test -f "$W/prior-report/$f"; then cat "$W/prior-report/$f"; fi
 done
 echo 'INSPECTION_COMPLETE=YES'
+echo '--- Official apexer interface ---'
+apexer --help > "$REP/APEXER_HELP.txt"
+cat "$REP/APEXER_HELP.txt"
+mkdir -p "$W/stage-system"
+cp -a "$W/mnt/system/." "$W/stage-system/"
+python3 wear7/v6/build-bridge.py --source "$S/apex/com.android.vndk.current" --system "$W/stage-system/system" --tools "$T" --work "$W/bridge" --report "$REP"
+python3 wear7/v6/validate-images.py --system "$W/stage-system/system" --system-ext "$SX" --product "$P" --vendor "$V" --tools "$T" --work "$W/validation" --report "$REP"
+
 echo 'FLASH_AUTHORIZED=NO'

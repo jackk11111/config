@@ -23,7 +23,7 @@ jobs:
           set -Eeuo pipefail
           sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk
           sudo apt-get update -qq
-          sudo apt-get install -y -qq e2fsprogs android-sdk-libsparse-utils erofs-utils unzip curl python3-yaml secilc qemu-user-static > /dev/null
+          sudo apt-get install -y -qq e2fsprogs android-sdk-libsparse-utils erofs-utils unzip curl python3-yaml secilc qemu-user-static apksigner > /dev/null
           mkdir -p "$RUNNER_TEMP/v6/input" "$RUNNER_TEMP/v6/tools" "$RUNNER_TEMP/v6/parts" "$RUNNER_TEMP/v6/mnt" wear7-v6-report
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -47,7 +47,7 @@ jobs:
           repository: '${{ github.repository }}'
           run-id: '35094447396'
       - name: Verify inputs and inspect the exact final-image integration
-        run: bash wear7/v6/inspect-images.sh
+        run: sudo env RUNNER_TEMP="$RUNNER_TEMP" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" bash wear7/v6/inspect-images.sh
       - name: Preserve analysis
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
