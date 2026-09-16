@@ -13,6 +13,16 @@ for row in (p/'SHA256SUMS.txt').read_text().splitlines():
     if not f.is_file(): raise SystemExit('missing '+name)
     with f.open('rb') as h: actual=hashlib.file_digest(h,'sha256').hexdigest()
     if actual!=digest: raise SystemExit('checksum mismatch '+name)
+    pinned={
+        'boot.img':'f5173a192b1d1e335198aa04ef8f47928d87b26d793fd9621737f211143c8353',
+        'init_boot.img':'c128f41b1e1fe4a2062b1b8464bf8e01650419f158ab7d412a3bf1f0099c9884',
+        'vendor_boot.img':'9d7cd2a5f7a21e9554552e94aaf89c2fdc6d036f59c8e8abe355456f8a5f18cf',
+        'dtbo.img':'eb2a8d0028b6e22898b26e4bc71419190a4ea3431a2b66c6c57d9e280ade4c96',
+        'vbmeta.img':'74c55a89f6158f95b01fe4b02e07b8ad2343b63df26951a3ed778eec8a5f51e4',
+        'vbmeta_system.img':'b9189593ed8a1e7d0d0e2fbcf97d5b3edd575928c84e175dd007120473d2343e',
+        'super.img':'054c4abc0d25fe7c1a3873c34b647f439674deb7ae1dc8526dface7b436d82a6',
+        'CANDIDATE_MANIFEST.txt':'f1c7dd05953ff9d6ebd944a24bcad5af5a0d2999d7d798f36a1f3e8a4c9698d9'}
+    if pinned.get(name)!=actual: raise SystemExit('input differs from audited V5B '+name)
     print('INPUT_SHA256',name,actual)
 required={'boot.img','init_boot.img','vendor_boot.img','dtbo.img','vbmeta.img','vbmeta_system.img','super.img','CANDIDATE_MANIFEST.txt'}
 if seen!=required: raise SystemExit('unexpected candidate file set: '+repr(seen))
@@ -80,6 +90,8 @@ cp -a "$W/mnt/system/." "$W/stage-system/"
 bridge_rc=0; gates_rc=0
 python3 wear7/v6/build-bridge.py --source "$S/apex/com.android.vndk.current" --system "$W/stage-system/system" --tools "$T" --work "$W/bridge" --report "$REP" || bridge_rc=$?
 python3 wear7/v6/validate-images.py --system "$W/stage-system/system" --system-ext "$SX" --product "$P" --vendor "$V" --tools "$T" --work "$W/validation" --report "$REP" || gates_rc=$?
-test "$bridge_rc" = 0 && test "$gates_rc" = 0
+if (( bridge_rc != 0 || gates_rc != 0 )); then exit 1; fi
+python3 wear7/v6/rebuild-final.py --work "$W" --tools "$T" --report "$REP" --output "$GITHUB_WORKSPACE/wear7-v6-candidate"
+python3 wear7/v6/recovery-preflight.py --package "$GITHUB_WORKSPACE/wear7-v6-candidate" --report "$REP/PACKAGE_PREFLIGHT.json"
 
 echo 'FLASH_AUTHORIZED=NO'

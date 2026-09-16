@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Package the unchanged stock VNDK33 payload as a signed, non-updatable APEX.
+"""Package the unchanged stock VNDK33 payload as a signed built-in APEX.
 
 Keys are unique to this build and are never published. The resulting signed APEX
 is the reusable bridge input for subsequent builds; library updates need a new
@@ -76,7 +76,7 @@ def main():
     run(['openssl','pkcs8','-topk8','-inform','PEM','-outform','DER','-in',keys/'outer.pem','-out',keys/'outer.pk8','-nocrypt'])
     contexts=a.work/'file_contexts'
     # Preserve the actual stock SELinux labels, including library subtypes.
-    context_rows=['/ u:object_r:system_file:s0', '/apex_manifest\\.pb u:object_r:system_file:s0', '/apex_manifest\\.json u:object_r:system_file:s0']
+    context_rows=['(/.*)? u:object_r:system_file:s0', '/apex_manifest\\.pb u:object_r:system_file:s0', '/apex_manifest\\.json u:object_r:system_file:s0']
     for x in sorted(source.rglob('*')):
         if x.name in ('apex_manifest.pb','apex_manifest.json'): continue
         label=os.getxattr(x,'security.selinux',follow_symlinks=False).rstrip(b'\0').decode()
@@ -84,7 +84,7 @@ def main():
     contexts.write_text('\n'.join(context_rows)+'\n')
     shutil.copyfile(contexts,a.report/'VNDK33_FILE_CONTEXTS.txt')
     fsconfig=a.work/'fs_config'
-    rows=['/ 0 0 0755','/apex_manifest.pb 0 0 0644','/apex_manifest.json 0 0 0644']
+    rows=['/ 0 0 0755','/lost+found 0 0 0700','/apex_manifest.pb 0 0 0644','/apex_manifest.json 0 0 0644']
     for x in sorted(payload.rglob('*')):
         st=x.lstat(); mode=st.st_mode&0o7777
         rows.append(f'/{x.relative_to(payload)} {st.st_uid} {st.st_gid} {mode:04o}')
