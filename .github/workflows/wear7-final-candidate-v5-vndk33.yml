@@ -1,4 +1,5 @@
 name: Wear7 final pre-recovery candidate V5 VNDK33 bridge
+# trigger-v5-1
 
 on:
   workflow_dispatch:
@@ -38,35 +39,21 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: wear7-rom-staging
-          fetch-depth: 1
+        with: {ref: wear7-rom-staging, fetch-depth: 1}
       - name: Download verified Wear7 integration kernel V3
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: ${{ env.KERNEL_ARTIFACT }}
-          path: ${{ runner.temp }}/kernel-artifact
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ env.KERNEL_RUN_ID }}
+        with: {name: '${{ env.KERNEL_ARTIFACT }}', path: '${{ runner.temp }}/kernel-artifact', github-token: '${{ secrets.GITHUB_TOKEN }}', repository: '${{ github.repository }}', run-id: '${{ env.KERNEL_RUN_ID }}'}
       - name: Download exact paired KernelSU userspace
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: ${{ env.KSU_ARTIFACT }}
-          path: ${{ runner.temp }}/ksu-paired
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ env.KSU_RUN_ID }}
+        with: {name: '${{ env.KSU_ARTIFACT }}', path: '${{ runner.temp }}/ksu-paired', github-token: '${{ secrets.GITHUB_TOKEN }}', repository: '${{ github.repository }}', run-id: '${{ env.KSU_RUN_ID }}'}
       - name: Execute V2 core with VNDK33 and Dace bridge injected before filesystem rebuild
         shell: bash
         run: |
           set -Eeuo pipefail
-          sudo apt-get update >/dev/null
-          sudo apt-get install -y python3-yaml >/dev/null
+          sudo apt-get update >/dev/null; sudo apt-get install -y python3-yaml >/dev/null
           python3 - <<'PY'
           import os,pathlib,subprocess,yaml
-          workspace=pathlib.Path(os.environ['GITHUB_WORKSPACE']); wf=workspace/'.github/workflows/wear7-final-candidate-v2.yml'
-          steps=yaml.safe_load(wf.read_text())['jobs']['assemble']['steps']; env=os.environ.copy()
+          workspace=pathlib.Path(os.environ['GITHUB_WORKSPACE']); steps=yaml.safe_load((workspace/'.github/workflows/wear7-final-candidate-v2.yml').read_text())['jobs']['assemble']['steps']; env=os.environ.copy()
           ef=pathlib.Path(env['RUNNER_TEMP'])/'v5-env'; pf=pathlib.Path(env['RUNNER_TEMP'])/'v5-path'; ef.write_text(''); pf.write_text(''); ep=pp=0
           def absorb():
               global ep,pp
@@ -81,29 +68,22 @@ jobs:
               if not script: continue
               if '$'+'{{' in script: raise SystemExit('unexpected expression in '+name)
               if name=='Generate exact filesystem metadata configs and contexts':
-                  W=pathlib.Path(env['RUNNER_TEMP'])/'work'; stage=W/'stage-system'; tic=W/'tic-system.raw'; ticven=W/'tic-vendor.raw'
-                  mnt=W/'v5-stock-system'; vmnt=W/'v5-stock-vendor'; subprocess.run(['sudo','mkdir','-p',str(mnt),str(vmnt)],check=True)
-                  subprocess.run(['sudo','mount','-o','loop,ro',str(tic),str(mnt)],check=True); subprocess.run(['sudo','mount','-o','loop,ro',str(ticven),str(vmnt)],check=True)
-                  ss=mnt/'system' if (mnt/'system').is_dir() else mnt
-                  src=ss/'apex/com.android.vndk.current'; dst=stage/'system/apex/com.android.vndk.current'
+                  W=pathlib.Path(env['RUNNER_TEMP'])/'work'; stage=W/'stage-system'; mnt=W/'v5-stock-system'; vmnt=W/'v5-stock-vendor'
+                  subprocess.run(['sudo','mkdir','-p',str(mnt),str(vmnt)],check=True); subprocess.run(['sudo','mount','-o','loop,ro',str(W/'tic-system.raw'),str(mnt)],check=True); subprocess.run(['sudo','mount','-o','loop,ro',str(W/'tic-vendor.raw'),str(vmnt)],check=True)
+                  ss=mnt/'system' if (mnt/'system').is_dir() else mnt; src=ss/'apex/com.android.vndk.current'; dst=stage/'system/apex/com.android.vndk.current'
                   if not (src/'apex_manifest.pb').is_file(): raise SystemExit('stock flattened VNDK33 missing')
                   subprocess.run(['sudo','rm','-rf',str(dst)],check=True); subprocess.run(['sudo','cp','-a',str(src),str(dst)],check=True)
-                  manifest=stage/'system/etc/vintf/manifest.xml'
-                  code="""import sys,xml.etree.ElementTree as E\np=sys.argv[1]; t=E.parse(p); r=t.getroot(); vs=[x for x in r.findall('vendor-ndk') if x.findtext('version')=='33'];\nif not vs:\n x=E.Element('vendor-ndk'); E.SubElement(x,'version').text='33'; s=r.find('system-sdk'); r.insert(list(r).index(s) if s is not None else len(r),x)\nE.indent(t,space='    '); t.write(p,encoding='unicode')\n"""
-                  subprocess.run(['sudo','python3','-c',code,str(manifest)],check=True)
-                  matrix=stage/'system/etc/vintf/compatibility_matrix.dace.xml'
-                  subprocess.run(['sudo','python3',str(workspace/'wear7/scripts/generate_framework_matrix_from_device_manifest.py'),'--main',str(vmnt/'etc/vintf/manifest_monaco.xml'),'--fragments',str(vmnt/'etc/vintf/manifest'),'--out',str(matrix),'--sepolicy-version','33.0','--kernel-sepolicy-version','30','--matrix-version','9.0'],check=True)
-                  rep=workspace/'wear7-final-v2-report/VNDK33_DACE_REAL_BRIDGE.txt'; rep.write_text('STOCK379_FLATTENED_VNDK33_INSTALLED=YES\nFRAMEWORK_MANIFEST_VENDOR_NDK_33=YES\nDACE_SUPPLEMENTAL_MATRIX_INSTALLED=YES\n')
-                  subprocess.run(['sudo','umount',str(mnt)],check=True); subprocess.run(['sudo','umount',str(vmnt)],check=True); subprocess.run(['sudo','chown','-R',f'{os.getuid()}:{os.getgid()}',str(stage),str(rep)],check=True)
-                  injected=True
+                  manifest=stage/'system/etc/vintf/manifest.xml'; code="""import sys,xml.etree.ElementTree as E\np=sys.argv[1];t=E.parse(p);r=t.getroot()\nif not any(x.findtext('version')=='33' for x in r.findall('vendor-ndk')):\n x=E.Element('vendor-ndk');E.SubElement(x,'version').text='33';s=r.find('system-sdk');r.insert(list(r).index(s) if s is not None else len(r),x)\nE.indent(t,space='    ');t.write(p,encoding='unicode')\n"""; subprocess.run(['sudo','python3','-c',code,str(manifest)],check=True)
+                  matrix=stage/'system/etc/vintf/compatibility_matrix.dace.xml'; subprocess.run(['sudo','python3',str(workspace/'wear7/scripts/generate_framework_matrix_from_device_manifest.py'),'--main',str(vmnt/'etc/vintf/manifest_monaco.xml'),'--fragments',str(vmnt/'etc/vintf/manifest'),'--out',str(matrix),'--sepolicy-version','33.0','--kernel-sepolicy-version','30','--matrix-version','9.0'],check=True)
+                  rep=workspace/'wear7-final-v2-report/VNDK33_DACE_REAL_BRIDGE.txt'; subprocess.run(['sudo','sh','-c',f"printf 'STOCK379_FLATTENED_VNDK33_INSTALLED=YES\\nFRAMEWORK_MANIFEST_VENDOR_NDK_33=YES\\nDACE_SUPPLEMENTAL_MATRIX_INSTALLED=YES\\n' > '{rep}'"],check=True)
+                  subprocess.run(['sudo','umount',str(mnt)],check=True); subprocess.run(['sudo','umount',str(vmnt)],check=True); injected=True
               print('===== V5 CORE',idx,name,'=====',flush=True); subprocess.run(['bash','-Eeuo','pipefail','-c',script],cwd=workspace,env=env,check=True); absorb(); executed+=1
-          if not injected: raise SystemExit('VNDK bridge injection point not reached')
-          if executed<10: raise SystemExit('too few core steps')
+          if not injected or executed<10: raise SystemExit('V5 injection/core incomplete')
           PY
       - name: Finalize V5 pre-recovery policy
         run: |
           set -Eeuo pipefail
-          OUT=wear7-final-v2-candidate; REP=wear7-final-v2-report
+          OUT=wear7-final-v2-candidate; REP=wear7-final-v2-report; sudo chown -R "$(id -u):$(id -g)" "$REP" "$OUT"
           grep -q '^STOCK379_FLATTENED_VNDK33_INSTALLED=YES$' "$REP/VNDK33_DACE_REAL_BRIDGE.txt"
           cat >> "$OUT/CANDIDATE_MANIFEST.txt" <<'EOF'
           VNDK33_BRIDGE=STOCK379_FLATTENED_APEX_PLUS_FRAMEWORK_VENDOR_NDK_DECLARATION
@@ -119,9 +99,7 @@ jobs:
           RECOVERY_ROLLBACK_READY_FOR_FIRST_WEAR7_FLASH=NO
           FIRST_WEAR7_FLASH=FORBIDDEN_UNTIL_RECOVERY_READY
           EOF
-          cp "$OUT/CANDIDATE_MANIFEST.txt" "$REP/CANDIDATE_MANIFEST.txt"
-          sha256sum "$OUT"/* > "$OUT/SHA256SUMS.txt"
-          find "$REP" -maxdepth 1 -type f ! -name REPORT_SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > "$REP/REPORT_SHA256SUMS.txt"
+          cp "$OUT/CANDIDATE_MANIFEST.txt" "$REP/CANDIDATE_MANIFEST.txt"; rm -f "$OUT/SHA256SUMS.txt"; sha256sum "$OUT"/* > "$OUT/SHA256SUMS.txt"; find "$REP" -maxdepth 1 -type f ! -name REPORT_SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > "$REP/REPORT_SHA256SUMS.txt"
       - name: Upload V5 reports
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
@@ -129,19 +107,7 @@ jobs:
       - name: Upload V5 bootchain
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: success()
-        with:
-          name: Wear7-Final-V5-Bootchain
-          path: |
-            wear7-final-v2-candidate/boot.img
-            wear7-final-v2-candidate/init_boot.img
-            wear7-final-v2-candidate/vendor_boot.img
-            wear7-final-v2-candidate/dtbo.img
-            wear7-final-v2-candidate/vbmeta.img
-            wear7-final-v2-candidate/vbmeta_system.img
-            wear7-final-v2-candidate/CANDIDATE_MANIFEST.txt
-            wear7-final-v2-candidate/SHA256SUMS.txt
-          retention-days: 30
-          compression-level: 0
+        with: {name: Wear7-Final-V5-Bootchain, path: 'wear7-final-v2-candidate/boot.img\nwear7-final-v2-candidate/init_boot.img\nwear7-final-v2-candidate/vendor_boot.img\nwear7-final-v2-candidate/dtbo.img\nwear7-final-v2-candidate/vbmeta.img\nwear7-final-v2-candidate/vbmeta_system.img\nwear7-final-v2-candidate/CANDIDATE_MANIFEST.txt\nwear7-final-v2-candidate/SHA256SUMS.txt', retention-days: 30, compression-level: 0}
       - name: Upload V5 super
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: success()
