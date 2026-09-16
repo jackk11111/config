@@ -14,25 +14,77 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Inspect public Android CI branch-grid frontend and API
+      - name: Query Android CI public branch APIs
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p out
           BASE='https://ci.android.com'
-          PAGE="$BASE/builds/branches/aosp-android-latest-release/grid"
-          curl -fLsS "$PAGE" -o out/grid.html
-          CACHE=$(grep -Eo '"CacheBust":"[0-9]+"' out/grid.html | head -n1 | grep -Eo '[0-9]+')
-          test -n "$CACHE"
-          JS="$BASE/public_builds/elements/grid_page/grid_page_bin_mashed.js?c=$CACHE"
-          curl -fLsS "$JS" -o out/grid.js
-          echo "CACHE=$CACHE" | tee out/frontend.txt
-          echo "JS_BYTES=$(wc -c < out/grid.js)" | tee -a out/frontend.txt
-          grep -Eo '.{0,100}(fetch|xhr|XMLHttpRequest|builds/branches|public_builds|branch[^ ]{0,80}).{0,180}' out/grid.js | head -n 1000 > out/api_strings.txt || true
-          grep -Eo '/[^"'\'' ]{3,200}' out/grid.js | sort -u | grep -E '(build|branch|target|grid|api)' | head -n 500 > out/path_strings.txt || true
-          cat out/api_strings.txt || true
-          echo '--- PATHS ---'
-          cat out/path_strings.txt || true
+          BRANCH='aosp-android-latest-release'
+
+          curl -fLsS "$BASE/builds/branches.json" -o out/branches.json
+          curl -fLsS "$BASE/builds/branch/$BRANCH/last-build-id" -o out/last-build-id.json
+          echo '=== LAST BUILD ===' | tee out/summary.txt
+          cat out/last-build-id.json | tee -a out/summary.txt
+          echo | tee -a out/summary.txt
+
+          BUILD_ID=$(python3 - <<'PY'
+          import json
+          d=json.load(open('out/last-build-id.json'))
+          for k in ('last_build_id','lastBuildId','build_id','buildId'):
+              if k in d:
+                  print(d[k]); break
+          else:
+              raise SystemExit('no build id key: '+repr(d))
+          PY
+          )
+          test -n "$BUILD_ID"
+          echo "BUILD_ID=$BUILD_ID" | tee -a out/summary.txt
+
+          # Query branch/build metadata and common public target locations.
+          for u in \
+            "$BASE/builds/branch/$BRANCH" \
+            "$BASE/builds/$BUILD_ID/branch" \
+            "$BASE/build_explorer/build_id/$BUILD_ID/"; do
+            key=$(echo "$u" | sha256sum | cut -c1-12)
+            code=$(curl -LsS -o "out/meta-$key.txt" -w '%{http_code}' "$u" || true)
+            echo "META $code $u" | tee -a out/summary.txt
+          done
+
+          : > out/attempts.txt
+          found=''
+          for target in \
+            aosp_cf_x86_64_phone-userdebug \
+            aosp_cf_x86_64_only_phone-userdebug \
+            aosp_cf_x86_64_phone-trunk_staging-userdebug \
+            aosp_cf_x86_phone-userdebug \
+            aosp_x86_64-userdebug \
+            aosp_arm64-userdebug; do
+            for basekind in submitted release; do
+              for rel in \
+                otatools.zip \
+                raw/otatools.zip \
+                artifacts/otatools.zip \
+                'view/otatools.zip'; do
+                url="$BASE/builds/$basekind/$BUILD_ID/$target/latest/$rel"
+                code=$(curl -LsS -o /tmp/ota.test -w '%{http_code}' --range 0-4095 "$url" || true)
+                bytes=$(wc -c </tmp/ota.test 2>/dev/null || echo 0)
+                mime=$(file -b /tmp/ota.test 2>/dev/null || true)
+                printf '%s\t%s\t%s\t%s\n' "$code" "$bytes" "$mime" "$url" >> out/attempts.txt
+                if { [ "$code" = 200 ] || [ "$code" = 206 ]; } && echo "$mime" | grep -qi 'Zip archive'; then
+                  found="$url"
+                  break 3
+                fi
+              done
+            done
+          done
+          if [ -n "$found" ]; then
+            echo "OTATOOLS_URL=$found" | tee out/result.txt
+          else
+            echo 'OTATOOLS_URL=NOT_FOUND_COMMON_PATHS' | tee out/result.txt
+          fi
+          cat out/result.txt | tee -a out/summary.txt
+          tail -n 80 out/attempts.txt | tee -a out/summary.txt
 
       - name: Upload locator report
         uses: actions/upload-artifact@v4
