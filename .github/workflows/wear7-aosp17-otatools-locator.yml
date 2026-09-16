@@ -22,7 +22,7 @@ jobs:
           BASE='https://ci.android.com'
           PAGE="$BASE/builds/branches/aosp-android-latest-release/grid"
           curl -fLsS "$PAGE" -o out/grid.html
-          CACHE=$(sed -n 's/.*grid_page_bin_mashed.js?c=\([0-9]*\).*/\1/p' out/grid.html | head -n1)
+          CACHE=$(grep -Eo '"CacheBust":"[0-9]+"' out/grid.html | head -n1 | grep -Eo '[0-9]+')
           test -n "$CACHE"
           JS="$BASE/public_builds/elements/grid_page/grid_page_bin_mashed.js?c=$CACHE"
           curl -fLsS "$JS" -o out/grid.js
@@ -30,9 +30,9 @@ jobs:
           echo "JS_BYTES=$(wc -c < out/grid.js)" | tee -a out/frontend.txt
           grep -Eo '.{0,100}(fetch|xhr|XMLHttpRequest|builds/branches|public_builds|branch[^ ]{0,80}).{0,180}' out/grid.js | head -n 1000 > out/api_strings.txt || true
           grep -Eo '/[^"'\'' ]{3,200}' out/grid.js | sort -u | grep -E '(build|branch|target|grid|api)' | head -n 500 > out/path_strings.txt || true
-          cat out/api_strings.txt
+          cat out/api_strings.txt || true
           echo '--- PATHS ---'
-          cat out/path_strings.txt
+          cat out/path_strings.txt || true
 
       - name: Upload locator report
         uses: actions/upload-artifact@v4
