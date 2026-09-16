@@ -1,0 +1,59 @@
+name: Wear7 V6 final-image offline validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-v6-offline-validation]
+    paths:
+      - '.github/workflows/wear7-v6-offline.yml'
+      - 'wear7/v6/**'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Prepare isolated image analysis
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs android-sdk-libsparse-utils erofs-utils unzip curl python3-yaml secilc qemu-user-static > /dev/null
+          mkdir -p "$RUNNER_TEMP/v6/input" "$RUNNER_TEMP/v6/tools" "$RUNNER_TEMP/v6/parts" "$RUNNER_TEMP/v6/mnt" wear7-v6-report
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-Final-V5B-Bootchain
+          path: '${{ runner.temp }}/v6/input'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35094447396'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-Final-V5B-Super
+          path: '${{ runner.temp }}/v6/input'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35094447396'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-Final-V5B-Reports
+          path: '${{ runner.temp }}/v6/prior-report'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35094447396'
+      - name: Verify inputs and inspect the exact final-image integration
+        run: bash wear7/v6/inspect-images.sh
+      - name: Preserve analysis
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V6-Offline-Analysis
+          path: wear7-v6-report/
+          if-no-files-found: error
+          retention-days: 90
+
