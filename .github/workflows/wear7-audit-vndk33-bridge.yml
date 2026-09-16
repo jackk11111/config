@@ -1,0 +1,126 @@
+name: Wear7 audit exact VNDK33 compatibility bridge
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-rom-staging]
+    paths: ['.github/workflows/wear7-audit-vndk33-bridge.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  FINAL_RUN_ID: '35052553333'
+  TIC_URL: https://android.googleapis.com/packages/data/ota-api/package/2269bd24a774cae37adc720d3d97bd1b76846e2b.zip
+  TIC_SHA256: ffa61d822a5c667c230ce2ba9426ce4eb282adcaa0891279ef002f65ca15a08d
+  BUILD_TOOLS_SHA: 010d8a83d84ced4beef7779453766350db8c08cd
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: wear7-rom-staging
+          fetch-depth: 1
+
+      - name: Prepare host
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk || true
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y curl unzip android-sdk-libsparse-utils e2fsprogs file >/dev/null
+          mkdir -p "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/src" "$RUNNER_TEMP/parts" "$RUNNER_TEMP/mnt/stock-system" "$RUNNER_TEMP/mnt/stock-vendor" "$RUNNER_TEMP/mnt/final-system" report
+
+      - name: Pin lpunpack
+        run: |
+          set -Eeuo pipefail
+          git clone --filter=blob:none --no-checkout https://android.googlesource.com/kernel/prebuilts/build-tools "$RUNNER_TEMP/build-tools"
+          git -C "$RUNNER_TEMP/build-tools" fetch --depth=1 origin "$BUILD_TOOLS_SHA"
+          git -C "$RUNNER_TEMP/build-tools" checkout --detach FETCH_HEAD
+          B="$RUNNER_TEMP/build-tools/linux-x86/bin"
+          test -x "$B/lpunpack"; test -x "$B/simg2img"
+          echo "B=$B" >> "$GITHUB_ENV"
+
+      - name: Download final V4 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-Final-V4-Super
+          path: ${{ runner.temp }}/candidate
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.FINAL_RUN_ID }}
+
+      - name: Mount final candidate system
+        run: |
+          set -Eeuo pipefail
+          SUPER="$RUNNER_TEMP/candidate/super.img"
+          test "$(sha256sum "$SUPER" | awk '{print $1}')" = 50f1a567e8dfcce4297a39f458e66196c1b59b420b002ec036d5c77fa1aa854a
+          "$B/simg2img" "$SUPER" "$RUNNER_TEMP/super.raw"
+          "$B/lpunpack" "$RUNNER_TEMP/super.raw" "$RUNNER_TEMP/parts"
+          sudo mount -o loop,ro "$RUNNER_TEMP/parts/system.img" "$RUNNER_TEMP/mnt/final-system"
+          if test -d "$RUNNER_TEMP/mnt/final-system/system"; then echo "FINAL_SYS=$RUNNER_TEMP/mnt/final-system/system" >> "$GITHUB_ENV"; else echo "FINAL_SYS=$RUNNER_TEMP/mnt/final-system" >> "$GITHUB_ENV"; fi
+
+      - name: Download and reconstruct exact stock379 system vendor
+        run: |
+          set -Eeuo pipefail
+          curl -fL --retry 3 --retry-delay 3 -o "$RUNNER_TEMP/src/tic379.zip" "$TIC_URL"
+          echo "$TIC_SHA256  $RUNNER_TEMP/src/tic379.zip" | sha256sum -c -
+          python3 wear7/scripts/reconstruct_block_ota.py "$RUNNER_TEMP/src/tic379.zip" system "$RUNNER_TEMP/stock-system.raw"
+          python3 wear7/scripts/reconstruct_block_ota.py "$RUNNER_TEMP/src/tic379.zip" vendor "$RUNNER_TEMP/stock-vendor.raw"
+          sudo mount -o loop,ro "$RUNNER_TEMP/stock-system.raw" "$RUNNER_TEMP/mnt/stock-system"
+          sudo mount -o loop,ro "$RUNNER_TEMP/stock-vendor.raw" "$RUNNER_TEMP/mnt/stock-vendor"
+          if test -d "$RUNNER_TEMP/mnt/stock-system/system"; then echo "STOCK_SYS=$RUNNER_TEMP/mnt/stock-system/system" >> "$GITHUB_ENV"; else echo "STOCK_SYS=$RUNNER_TEMP/mnt/stock-system" >> "$GITHUB_ENV"; fi
+          echo "STOCK_VEN=$RUNNER_TEMP/mnt/stock-vendor" >> "$GITHUB_ENV"
+
+      - name: Audit framework manifest and VNDK33 payload
+        run: |
+          set -Eeuo pipefail
+          echo '=== STOCK FRAMEWORK MANIFEST ===' | tee report/STOCK_FRAMEWORK_MANIFEST.txt
+          sudo cat "$STOCK_SYS/etc/vintf/manifest.xml" | tee -a report/STOCK_FRAMEWORK_MANIFEST.txt
+          echo '=== FINAL FRAMEWORK MANIFEST ===' | tee report/FINAL_FRAMEWORK_MANIFEST.txt
+          sudo cat "$FINAL_SYS/etc/vintf/manifest.xml" | tee -a report/FINAL_FRAMEWORK_MANIFEST.txt
+          echo '=== STOCK VENDOR DEVICE MATRIX ===' | tee report/STOCK_VENDOR_COMPATIBILITY_MATRIX.txt
+          sudo cat "$STOCK_VEN/etc/vintf/compatibility_matrix.xml" | tee -a report/STOCK_VENDOR_COMPATIBILITY_MATRIX.txt
+          python3 - "$STOCK_SYS/etc/vintf/manifest.xml" "$FINAL_SYS/etc/vintf/manifest.xml" "$STOCK_VEN/etc/vintf/compatibility_matrix.xml" <<'PY' | tee report/VINTF_VNDK_SUMMARY.txt
+          import sys,xml.etree.ElementTree as ET
+          for label,p in [('stock_framework',sys.argv[1]),('final_framework',sys.argv[2]),('stock_device_matrix',sys.argv[3])]:
+              r=ET.parse(p).getroot(); print('##',label,r.tag,r.attrib)
+              for x in r.findall('.//vendor-ndk'):
+                  print('vendor-ndk',ET.tostring(x,encoding='unicode'))
+              for x in r.findall('.//system-sdk'):
+                  print('system-sdk',ET.tostring(x,encoding='unicode'))
+          PY
+          : > report/STOCK_VNDK33_FILES.tsv
+          for d in "$STOCK_SYS/lib/vndk-33" "$STOCK_SYS/lib/vndk-sp-33" "$STOCK_SYS/lib64/vndk-33" "$STOCK_SYS/lib64/vndk-sp-33"; do
+            if test -d "$d"; then
+              sudo find "$d" -maxdepth 1 \( -type f -o -type l \) -print0 | sort -z | while IFS= read -r -d '' f; do
+                rel=${f#"$STOCK_SYS/"}; if test -L "$f"; then printf '%s\tSYMLINK\t%s\n' "$rel" "$(readlink "$f")"; else printf '%s\t%s\t%s\t%s\n' "$rel" "$(stat -c %s "$f")" "$(sha256sum "$f"|awk '{print $1}')" "$(file -b "$f")"; fi
+              done >> report/STOCK_VNDK33_FILES.tsv
+            fi
+          done
+          awk -F '\t' 'BEGIN{s=0;n=0} $2 ~ /^[0-9]+$/ {s+=$2;n++} END{print "STOCK_VNDK33_REGULAR_FILES="n; print "STOCK_VNDK33_BYTES="s}' report/STOCK_VNDK33_FILES.tsv | tee report/STOCK_VNDK33_SIZE.txt
+          for d in "$FINAL_SYS/lib/vndk-33" "$FINAL_SYS/lib/vndk-sp-33" "$FINAL_SYS/lib64/vndk-33" "$FINAL_SYS/lib64/vndk-sp-33"; do test ! -d "$d" || sudo find "$d" -maxdepth 1 -type f -printf '%p\n'; done | sed "s#^$FINAL_SYS/##" | sort > report/FINAL_VNDK33_FILES.txt
+          wc -l report/FINAL_VNDK33_FILES.txt | tee report/FINAL_VNDK33_COUNT.txt
+          sudo grep -R "vndk-33\|namespace.*vndk\|vndk\.version" -n "$STOCK_SYS/etc" 2>/dev/null | head -n 400 > report/STOCK_LINKER_VNDK_REFERENCES.txt || true
+          sudo grep -R "vndk-33\|namespace.*vndk\|vndk\.version" -n "$FINAL_SYS/etc" 2>/dev/null | head -n 400 > report/FINAL_LINKER_VNDK_REFERENCES.txt || true
+
+      - name: Upload audit
+        if: always()
+        run: |
+          set -u
+          sudo umount "$RUNNER_TEMP/mnt/final-system" 2>/dev/null || true
+          sudo umount "$RUNNER_TEMP/mnt/stock-system" 2>/dev/null || true
+          sudo umount "$RUNNER_TEMP/mnt/stock-vendor" 2>/dev/null || true
+          sudo chown -R "$(id -u):$(id -g)" report 2>/dev/null || true
+          find report -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > report/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: Wear7-VNDK33-Bridge-Audit
+          path: report/
+          retention-days: 30
+          compression-level: 9
