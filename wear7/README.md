@@ -2,6 +2,36 @@
 
 Software-side staging branch for `dace` / `monaco`.
 
+## Current checkpoint — verified V6, 2026-09-16
+
+**The latest completed offline candidate is Wear7 V6.** The earlier Stage0
+sections below describe its history, not outstanding image-build work.
+
+- Successful [Actions run 35146642220](https://github.com/jackk11111/config/actions/runs/35146642220), completed at 20:31 UTC.
+- Verified image-building code: `d160e4f6b32d29cbecc802f3d9443fe0d2b7de44`.
+- [Results, artifact links and archive checksums](V6_OFFLINE_STATUS.md).
+- [Recovery preparation tools and their limits](v6/README.md).
+- [Draft PR #1](https://github.com/jackk11111/config/pull/1) targets `wear7-rom-staging`; the candidate remains on `wear7-v6-offline-validation`.
+- Wear7 kernel remains `5.15.220-Xinran_StarBai-Test+`. Recovery revisions R6/R7/R7.1 are a separate workstream.
+
+The existing run closed the signed VNDK33 APEX bridge, official VINTF,
+combined SELinux compilation, real Fast Pair idmap2 mapping, filesystem/AVB
+reconstruction, final super extraction/comparison and package preflight.
+All 12 preparation-tool tests passed. These results come from the completed
+run and its downloaded report; no rebuild or test rerun is needed to resume.
+
+**Resume at the hardware recovery/rollback gate.** Before installation,
+complete the write/streaming adapter against the validated recovery and settle
+the userdata migration strategy. Wi-Fi/ADB root in recovery, first Wear7
+boot, pairing, hardware behavior and persistent ADB/root still require
+device evidence. GitHub Actions cannot close those runtime checks.
+
+The artifacts are a validated offline candidate, not a recovery installer.
+The candidate manifest still records `flash_authorized=false`,
+`recovery_integration=UNTESTED` and `userdata_migration=UNTESTED`.
+Keep the completed offline gates closed unless their inputs change or new
+contradictory evidence appears. Do not merge or flash solely because CI is green.
+
 ## Frozen first-build architecture
 
 - SYSTEM: Pixel Watch 3 `solios` Wear OS 7 / Android 17 / API 37, build `CP2A.260603.001.S1`.
@@ -44,4 +74,4 @@ Confirmed:
 
 Full findings and remaining image-build gates are in `manifests/PIXEL_FINAL_PREFLIGHT_2026-09-15.txt`.
 
-This does **not** authorize a Wear7 flash. Real image staging, idmap2, SELinux compile, checkvintf, AVB/super validation and the dedicated recovery physical PASS remain mandatory.
+The offline image gates listed in this historical Stage0 section were subsequently completed by V6 above. Device recovery/rollback validation and the remaining installation/runtime gates are still open; no flash is authorized.
