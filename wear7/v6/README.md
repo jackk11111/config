@@ -44,6 +44,7 @@ indipendenti o per ribloccare il bootloader.
 
 Estrarre Bootchain e Super della stessa esecuzione in un'unica cartella sotto
 `/storage/emulated/0/Download/`. I due artifact non sono uno ZIP installabile da recovery.
+Copiare anche gli script di questa cartella accanto al comando preflight.
 Servono Python 3.11+ e, solo per interrogare l'orologio, adb già configurato e autorizzato.
 
 Verifica dei soli file, senza collegamento al dispositivo:
@@ -59,6 +60,19 @@ Quando la recovery sarà collaudata e già connessa via ADB autenticato, aggiung
 Il controllo legge UID, identità dace/monaco, stato bootloader, slot, dimensioni
 e alias delle partizioni, oltre ai filesystem montati. Non esegue connessioni,
 root, reboot, mount, scritture su partizioni o wipe.
+
+Per preparare un file raw sul telefono, dopo un esito positivo dei controlli:
+
+```sh
+python prepare-super.py \
+  --package /storage/emulated/0/Download/Wear7-V6 \
+  --output /storage/emulated/0/Download/Wear7-V6-super.raw.img
+```
+
+Servono almeno 4,5 GiB liberi oltre al pacchetto già estratto. Il file deve essere
+nuovo: non viene sovrascritto un output esistente. La conversione gestisce chunk
+raw/fill/dont-care e verifica il checksum raw della build. Non invia file
+all'orologio. L'immagine sparse originale non va scritta direttamente con `dd`.
 
 I report possono contenere informazioni del dispositivo: controllarli prima
 di condividerli. Un controllo preliminare positivo lascia comunque

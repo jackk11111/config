@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Verify package rejection tests
-        run: python3 wear7/v6/test_preflight.py
+        run: python3 -m unittest discover -s wear7/v6 -p 'test_*.py'
       - name: Prepare isolated image analysis
         run: |
           set -Eeuo pipefail

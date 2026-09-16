@@ -95,6 +95,8 @@ def main():
         m=re.search(r"targetSdkVersion:'(\d+)'",badging)
         if not m: raise RuntimeError('overlay targetSdk unknown')
         target_sdk=int(m.group(1))
+        run('TARGET_OVERLAYABLE',[a.tools/'bin/aapt2','dump','overlayable',target])
+        run('DACE_OVERLAY_RESOURCES',[a.tools/'bin/aapt2','dump','resources',overlay])
         required_name=re.search(r"requiredPropertyName:'([^']+)'",badging)
         required_value=re.search(r"requiredPropertyValue:'([^']+)'",badging)
         # aapt2 versions use either = or : in this part of badging.
@@ -142,7 +144,7 @@ def main():
             if x.is_dir(): libdirs += [x/'lib',x/'lib/bionic']
         libs=':'.join(str(x) for x in libdirs if x.is_dir())
         targetenv=env.copy(); targetenv.pop('LD_LIBRARY_PATH',None)
-        cmd=['/usr/bin/qemu-arm-static',linker,'--library-path',libs,binfile]
+        cmd=['/usr/bin/qemu-arm-static','-E','LD_LIBRARY_PATH='+libs,linker,binfile]
         outpath=a.work/'dace.idmap'
         run('IDMAP_CREATE',cmd+['create','--target-apk-path',target,'--overlay-apk-path',overlay,'--idmap-path',outpath,*flags],targetenv)
         if not outpath.is_file() or outpath.stat().st_size==0: raise RuntimeError('no idmap created')
