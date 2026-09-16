@@ -80,9 +80,7 @@ jobs:
           echo "CHECKVINTF=$RUNNER_TEMP/ota/extract/$CV" >> "$GITHUB_ENV"
           echo "LPUNPACK=$RUNNER_TEMP/ota/extract/$LP" >> "$GITHUB_ENV"
           echo "OTATOOLS_ROOT=$ROOT" >> "$GITHUB_ENV"
-          echo "AOSP17_BUILD_ID=$AOSP17_BUILD_ID" | tee final-vintf-report/OTATOOLS_PROVENANCE.txt
-          echo "AOSP17_TARGET=$AOSP17_TARGET" | tee -a final-vintf-report/OTATOOLS_PROVENANCE.txt
-          echo "OTATOOLS_URL=$OTATOOLS_URL" | tee -a final-vintf-report/OTATOOLS_PROVENANCE.txt
+          printf 'AOSP17_BUILD_ID=%s\nAOSP17_TARGET=%s\nOTATOOLS_URL=%s\n' "$AOSP17_BUILD_ID" "$AOSP17_TARGET" "$OTATOOLS_URL" | tee final-vintf-report/OTATOOLS_PROVENANCE.txt
           env LD_LIBRARY_PATH="$ROOT/lib64:$ROOT/lib" "$RUNNER_TEMP/ota/extract/$CV" --help > final-vintf-report/CHECKVINTF_HELP.txt 2>&1 || true
           env LD_LIBRARY_PATH="$ROOT/lib64:$ROOT/lib" "$RUNNER_TEMP/ota/extract/$LP" --help > final-vintf-report/LPUNPACK_HELP.txt 2>&1 || true
           file "$RUNNER_TEMP/ota/extract/$CV" "$RUNNER_TEMP/ota/extract/$LP" | tee final-vintf-report/HOST_TOOLS_FILE.txt
@@ -125,11 +123,14 @@ jobs:
           echo "SYSTEM_EXT_MAP=$RUNNER_TEMP/mnt/system_ext" >> "$GITHUB_ENV"
           echo "PRODUCT_MAP=$RUNNER_TEMP/mnt/product" >> "$GITHUB_ENV"
           echo "VENDOR_MAP=$RUNNER_TEMP/mnt/vendor" >> "$GITHUB_ENV"
+
+          sudo find "$RUNNER_TEMP/mnt/system" "$RUNNER_TEMP/mnt/system_ext" "$RUNNER_TEMP/mnt/product" "$RUNNER_TEMP/mnt/vendor" \
+            -maxdepth 3 -type f \( -name build.prop -o -name prop.default \) -print | sort > final-vintf-report/PROPERTY_FILES.txt
           {
             echo '=== final candidate API properties ==='
-            sudo grep -RhsE '^(ro\.(product|board|vendor)\.(first_)?api_level|ro\.vendor\.api_level)=' "$RUNNER_TEMP/mnt/system" "$RUNNER_TEMP/mnt/system_ext" "$RUNNER_TEMP/mnt/product" "$RUNNER_TEMP/mnt/vendor" 2>/dev/null | sort -u || true
+            while IFS= read -r f; do sudo grep -hE '^(ro\.(product|board|vendor)\.(first_)?api_level|ro\.vendor\.api_level)=' "$f" || true; done < final-vintf-report/PROPERTY_FILES.txt | sort -u
             echo '=== final candidate identity properties ==='
-            sudo grep -RhsE '^(ro\.product\.(device|model)|ro\.product\.vendor\.device|ro\.board\.platform)=' "$RUNNER_TEMP/mnt/system" "$RUNNER_TEMP/mnt/system_ext" "$RUNNER_TEMP/mnt/product" "$RUNNER_TEMP/mnt/vendor" 2>/dev/null | sort -u || true
+            while IFS= read -r f; do sudo grep -hE '^(ro\.product\.(device|model)|ro\.product\.vendor\.device|ro\.board\.platform)=' "$f" || true; done < final-vintf-report/PROPERTY_FILES.txt | sort -u
           } | tee final-vintf-report/FINAL_PROPERTIES.txt
           grep -q '^ro.vendor.api_level=30$' final-vintf-report/FINAL_PROPERTIES.txt
 
@@ -153,7 +154,7 @@ jobs:
           cat final-vintf-report/CHECKVINTF_STDOUT.txt
           cat final-vintf-report/CHECKVINTF_STDERR.txt >&2
           test "$rc" = 0
-          grep -q 'COMPATIBLE' final-vintf-report/CHECKVINTF_STDOUT.txt
+          grep -q '^COMPATIBLE$' final-vintf-report/CHECKVINTF_STDOUT.txt
           cat > final-vintf-report/OFFICIAL_CHECKVINTF_FINAL_GATE.txt <<EOF
           OFFICIAL_CHECKVINTF_FINAL_GATE=PASS
           CHECKVINTF_SOURCE=AOSP_ANDROID17_PUBLIC_CI
