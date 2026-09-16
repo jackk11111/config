@@ -14,55 +14,25 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - name: Probe public Android CI for Android 17 artifacts
+      - name: Inspect public Android CI branch-grid frontend and API
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p out
-          : > out/build_ids.txt
-          : > out/probe.txt
-          for branch in aosp-android-latest-release aosp-android17-release android17-release aosp-main; do
-            for suffix in 'grid?legacy=1' grid; do
-              u="https://ci.android.com/builds/branches/$branch/$suffix"
-              echo "=== $u ===" | tee -a out/probe.txt
-              code=$(curl -L -sS -o out/page.tmp -w '%{http_code}' "$u" || true)
-              echo "HTTP=$code bytes=$(wc -c < out/page.tmp)" | tee -a out/probe.txt
-              if [ "$code" = 200 ]; then
-                cp out/page.tmp "out/${branch//\//_}-${suffix//\?/_}.html"
-              fi
-              grep -Eo '[0-9]{7,9}' out/page.tmp | sort -nr | head -n 200 >> out/build_ids.txt || true
-            done
-          done
-          sort -u -nr out/build_ids.txt -o out/build_ids.txt || true
-          echo '=== candidate build ids ==='
-          head -n 100 out/build_ids.txt || true
-
-          : > out/attempts.txt
-          found=''
-          for id in $(head -n 100 out/build_ids.txt 2>/dev/null || true); do
-            for target in \
-              aosp_cf_x86_64_phone-userdebug \
-              aosp_cf_x86_64_only_phone-userdebug \
-              aosp_cf_x86_64_phone-trunk_staging-userdebug \
-              aosp_cf_x86_phone-userdebug \
-              aosp_x86_64-userdebug; do
-              for rel in otatools.zip raw/otatools.zip; do
-                url="https://ci.android.com/builds/submitted/$id/$target/latest/$rel"
-                code=$(curl -L -sS -o /tmp/ota.test -w '%{http_code}' --range 0-4095 "$url" || true)
-                bytes=$(wc -c </tmp/ota.test 2>/dev/null || echo 0)
-                printf '%s %s %s\n' "$code" "$bytes" "$url" >> out/attempts.txt
-                if { [ "$code" = 200 ] || [ "$code" = 206 ]; } && file /tmp/ota.test | grep -qi 'Zip archive'; then
-                  found="$url"
-                  break 3
-                fi
-              done
-            done
-          done
-          if [ -n "$found" ]; then
-            echo "OTATOOLS_URL=$found" | tee out/result.txt
-          else
-            echo 'OTATOOLS_URL=NOT_FOUND_FROM_PUBLIC_GRID_PROBE' | tee out/result.txt
-          fi
+          BASE='https://ci.android.com'
+          PAGE="$BASE/builds/branches/aosp-android-latest-release/grid"
+          curl -fLsS "$PAGE" -o out/grid.html
+          CACHE=$(sed -n 's/.*grid_page_bin_mashed.js?c=\([0-9]*\).*/\1/p' out/grid.html | head -n1)
+          test -n "$CACHE"
+          JS="$BASE/public_builds/elements/grid_page/grid_page_bin_mashed.js?c=$CACHE"
+          curl -fLsS "$JS" -o out/grid.js
+          echo "CACHE=$CACHE" | tee out/frontend.txt
+          echo "JS_BYTES=$(wc -c < out/grid.js)" | tee -a out/frontend.txt
+          grep -Eo '.{0,100}(fetch|xhr|XMLHttpRequest|builds/branches|public_builds|branch[^ ]{0,80}).{0,180}' out/grid.js | head -n 1000 > out/api_strings.txt || true
+          grep -Eo '/[^"'\'' ]{3,200}' out/grid.js | sort -u | grep -E '(build|branch|target|grid|api)' | head -n 500 > out/path_strings.txt || true
+          cat out/api_strings.txt
+          echo '--- PATHS ---'
+          cat out/path_strings.txt
 
       - name: Upload locator report
         uses: actions/upload-artifact@v4
