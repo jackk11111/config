@@ -35,7 +35,7 @@ for n in z.namelist():
 PY
 T="$W/tools/extracted"; chmod +x "$T/bin/"*
 export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
-for t in lpunpack checkvintf apexd_host apexer avbtool signapk secilc idmap2 aapt2 debugfs_static fsck.erofs; do
+for t in lpunpack checkvintf apexd_host apexer avbtool signapk secilc idmap2 aapt2 debugfs_static fsck.erofs mkuserimg_mke2fs e2fsdroid tune2fs lpmake; do
     command -v "$t" || true
 done
 test -e "$T/bin/debugfs" || ln -s debugfs_static "$T/bin/debugfs"
@@ -77,7 +77,9 @@ apexer --help > "$REP/APEXER_HELP.txt"
 cat "$REP/APEXER_HELP.txt"
 mkdir -p "$W/stage-system"
 cp -a "$W/mnt/system/." "$W/stage-system/"
-python3 wear7/v6/build-bridge.py --source "$S/apex/com.android.vndk.current" --system "$W/stage-system/system" --tools "$T" --work "$W/bridge" --report "$REP"
-python3 wear7/v6/validate-images.py --system "$W/stage-system/system" --system-ext "$SX" --product "$P" --vendor "$V" --tools "$T" --work "$W/validation" --report "$REP"
+bridge_rc=0; gates_rc=0
+python3 wear7/v6/build-bridge.py --source "$S/apex/com.android.vndk.current" --system "$W/stage-system/system" --tools "$T" --work "$W/bridge" --report "$REP" || bridge_rc=$?
+python3 wear7/v6/validate-images.py --system "$W/stage-system/system" --system-ext "$SX" --product "$P" --vendor "$V" --tools "$T" --work "$W/validation" --report "$REP" || gates_rc=$?
+test "$bridge_rc" = 0 && test "$gates_rc" = 0
 
 echo 'FLASH_AUTHORIZED=NO'

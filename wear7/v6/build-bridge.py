@@ -34,7 +34,31 @@ def main():
     source=a.source
     if not (source/'apex_manifest.pb').is_file():
         raise RuntimeError('exact flattened VNDK payload missing')
-    manifest=json.loads((source/'apex_manifest.json').read_text())
+    data=(source/'apex_manifest.pb').read_bytes()
+    # Read field 1 (name) from the preserved protobuf; Android 13 need not
+    # provide the deprecated JSON manifest alongside it.
+    offset=0; names=[]
+    def varint():
+        nonlocal offset
+        value=0
+        for shift in range(0,70,7):
+            if offset>=len(data): raise ValueError('truncated manifest')
+            b=data[offset]; offset+=1; value|=(b&127)<<shift
+            if not b&128: return value
+        raise ValueError('invalid protobuf varint')
+    while offset<len(data):
+        tag=varint(); field=tag>>3; wire=tag&7
+        if wire==0: varint()
+        elif wire==2:
+            size=varint(); value=data[offset:offset+size]; offset+=size
+            if len(value)!=size: raise ValueError('truncated protobuf field')
+            if field==1: names.append(value.decode())
+        elif wire in (1,5): offset+=8 if wire==1 else 4
+        else: raise ValueError('unsupported protobuf wire type')
+        if offset>len(data): raise ValueError('manifest out of bounds')
+    if len(names)!=1: raise ValueError('ambiguous manifest name')
+    manifest={'name':names[0],'protobuf_sha256':hashlib.sha256(data).hexdigest()}
+    print('STOCK_VNDK_MANIFEST',json.dumps(manifest),flush=True)
     if manifest['name']!='com.android.vndk.v33':
         raise RuntimeError('wrong VNDK manifest: '+repr(manifest))
     payload=a.work/'payload'
@@ -44,7 +68,7 @@ def main():
     payload_hashes={str(x.relative_to(payload)):digest(x) for x in sorted(payload.rglob('*')) if x.is_file() and not x.is_symlink()}
     (a.report/'VNDK33_PAYLOAD_SHA256.json').write_text(json.dumps(payload_hashes,indent=2)+'\n')
     keys=a.work/'keys'; keys.mkdir(mode=0o700)
-    priv=keys/'payload.pem'; pub=keys/'payload.avbpubkey'
+    priv=keys/'com.android.vndk.v33.pem'; pub=keys/'com.android.vndk.v33.avbpubkey'
     # Nothing from keys/ is copied into a published artifact.
     run(['openssl','genrsa','-out',priv,'4096'])
     run([a.tools/'bin/avbtool','extract_public_key','--key',priv,'--output',pub])
@@ -77,6 +101,7 @@ def main():
     run([a.tools/'bin/avbtool','verify_image','--image',image,'--key',priv])
     dest=a.system/'apex/com.android.vndk.v33.apex'
     shutil.copyfile(signed,dest); dest.chmod(0o644)
+    os.setxattr(dest,'security.selinux',os.getxattr(source,'security.selinux'))
     shutil.rmtree(a.system/'apex/com.android.vndk.current')
     shutil.copyfile(signed,a.report/'com.android.vndk.v33.apex')
     result={'name':manifest['name'],'source_payload_files':len(payload_hashes),'signed_apex_sha256':digest(signed),'signing':'unique_build_keys_not_published','update_strategy':'reuse_signed_apex_or_replace_in_system_release','private_keys_published':False}
