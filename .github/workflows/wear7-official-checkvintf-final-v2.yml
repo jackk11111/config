@@ -84,7 +84,11 @@ jobs:
           echo "SX=$SX" >> "$GITHUB_ENV"
           echo "PROD=$PROD" >> "$GITHUB_ENV"
           echo "VEN=$VEN" >> "$GITHUB_ENV"
-          grep -h '^ro.product.first_api_level=' "$SYS/build.prop" "$PROD/etc/build.prop" "$VEN/build.prop" 2>/dev/null | sort -u | tee report/FIRST_API_LEVEL.txt || true
+          sudo find "$RUNNER_TEMP/mnt/system" "$SX" "$PROD" "$VEN" -type f \( -name build.prop -o -name prop.default \) -print | sort | tee report/PROPERTY_FILES.txt
+          : > report/FIRST_API_LEVEL.txt
+          while IFS= read -r f; do
+            sudo grep -h '^ro.product.first_api_level=' "$f" 2>/dev/null || true
+          done < report/PROPERTY_FILES.txt | sort -u | tee report/FIRST_API_LEVEL.txt
           grep -q '^ro.product.first_api_level=30$' report/FIRST_API_LEVEL.txt
 
       - name: Official checkvintf compatibility gate
