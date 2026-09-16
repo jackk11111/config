@@ -23,6 +23,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: wear7-rom-staging
+          fetch-depth: 1
+
       - name: Free space and install helpers
         run: |
           set -Eeuo pipefail
@@ -84,7 +89,11 @@ jobs:
           for p in system system_ext product vendor; do
             test -s "$RUNNER_TEMP/parts/$p.img"
             sudo mkdir -p "$RUNNER_TEMP/mnt/$p"
-            sudo mount -o loop,ro "$RUNNER_TEMP/parts/$p.img" "$RUNNER_TEMP/mnt/$p"
+            if test "$p" = system; then
+              sudo mount -o loop,rw "$RUNNER_TEMP/parts/$p.img" "$RUNNER_TEMP/mnt/$p"
+            else
+              sudo mount -o loop,ro "$RUNNER_TEMP/parts/$p.img" "$RUNNER_TEMP/mnt/$p"
+            fi
           done
           if test -d "$RUNNER_TEMP/mnt/system/system/etc/vintf"; then SYS="$RUNNER_TEMP/mnt/system/system"; else SYS="$RUNNER_TEMP/mnt/system"; fi
           SX="$RUNNER_TEMP/mnt/system_ext"
@@ -104,6 +113,28 @@ jobs:
           done < report/PROPERTY_FILES.txt | sort -u | tee report/FIRST_API_LEVEL.txt
           grep -q '^ro.product.first_api_level=30$' report/FIRST_API_LEVEL.txt
           printf 'VENDOR_SKU=%s\nSELECTED_DEVICE_MANIFEST=%s\n' "$TICWATCH_VENDOR_SKU" "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml" | tee report/VENDOR_SKU_SELECTION.txt
+
+      - name: Generate and stage exact dace supplemental framework matrix
+        run: |
+          set -Eeuo pipefail
+          python3 wear7/scripts/generate_framework_matrix_from_device_manifest.py \
+            --main "$VEN/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml" \
+            --fragments "$VEN/etc/vintf/manifest" \
+            --out report/compatibility_matrix.dace.xml \
+            --sepolicy-version 33.0 \
+            --kernel-sepolicy-version 30 \
+            --matrix-version 9.0 \
+            | tee report/DACE_MATRIX_GENERATOR.txt
+          test -s report/compatibility_matrix.dace.xml
+          grep -q '<sepolicy-version>33.0</sepolicy-version>' report/compatibility_matrix.dace.xml
+          grep -q '<name>vendor.display.config</name>' report/compatibility_matrix.dace.xml
+          grep -q '<name>vendor.qti.hardware.qseecom</name>' report/compatibility_matrix.dace.xml
+          sudo cp report/compatibility_matrix.dace.xml "$SYS/etc/vintf/compatibility_matrix.dace.xml"
+          sudo chown 0:0 "$SYS/etc/vintf/compatibility_matrix.dace.xml"
+          sudo chmod 0644 "$SYS/etc/vintf/compatibility_matrix.dace.xml"
+          sync
+          sha256sum report/compatibility_matrix.dace.xml | tee report/DACE_MATRIX_SHA256.txt
+          sudo sha256sum "$SYS/etc/vintf/compatibility_matrix.dace.xml" | tee report/DACE_MATRIX_INSTALLED_SHA256.txt
 
       - name: Activate APEXes exactly for host VINTF
         run: |
@@ -149,7 +180,8 @@ jobs:
           cat > report/OFFICIAL_CHECKVINTF_FINAL_GATE.txt <<EOF
           OFFICIAL_CHECKVINTF_FINAL_GATE=PASS
           CHECKVINTF_SOURCE=AOSP_ANDROID17_PUBLIC_CI_BUILD_16102939
-          FINAL_V4_SUPER=VERIFIED_SHA256
+          FINAL_V4_SUPER_BASE=VERIFIED_SHA256
+          DACE_SUPPLEMENTAL_MATRIX=PASS_EPHEMERAL_VALIDATION
           TICWATCH_FIRST_API_LEVEL=30
           TICWATCH_VENDOR_SKU=$TICWATCH_VENDOR_SKU
           DEVICE_MANIFEST=vendor/etc/vintf/manifest_${TICWATCH_VENDOR_SKU}.xml
