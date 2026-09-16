@@ -1,0 +1,129 @@
+name: Wear7 official Android17 checkvintf final gate V2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-rom-staging]
+    paths: ['.github/workflows/wear7-official-checkvintf-final-v2.yml']
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  FINAL_RUN_ID: '35052553333'
+  OTATOOLS_URL: https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+  AOSP17_BUILD_ID: '16102939'
+  AOSP17_TARGET: aosp_cf_x86_64_only_phone-userdebug
+  TICWATCH_FIRST_API_LEVEL: '30'
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Free space and install helpers
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk || true
+          sudo apt-get update >/dev/null
+          sudo apt-get install -y curl unzip file android-sdk-libsparse-utils e2fsprogs >/dev/null
+          mkdir -p "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/ota" "$RUNNER_TEMP/parts" "$RUNNER_TEMP/mnt" report
+
+      - name: Download final V4 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-Final-V4-Super
+          path: ${{ runner.temp }}/candidate
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.FINAL_RUN_ID }}
+
+      - name: Pin official Android17 host tools
+        run: |
+          set -Eeuo pipefail
+          ZIP="$RUNNER_TEMP/ota/otatools.zip"
+          curl -fL --retry 3 -o "$ZIP" "$OTATOOLS_URL"
+          sha256sum "$ZIP" | tee report/OTATOOLS_SHA256.txt
+          test "$(sha256sum "$ZIP" | awk '{print $1}')" = f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84
+          python3 - "$ZIP" "$RUNNER_TEMP/ota/x" <<'PY'
+          import sys,zipfile,pathlib
+          z=zipfile.ZipFile(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          keep=[n for n in z.namelist() if n in ('bin/checkvintf','bin/lpunpack') or n.startswith('lib64/') or n.startswith('lib/')]
+          assert 'bin/checkvintf' in keep and 'bin/lpunpack' in keep
+          for n in keep: z.extract(n,out)
+          PY
+          chmod +x "$RUNNER_TEMP/ota/x/bin/checkvintf" "$RUNNER_TEMP/ota/x/bin/lpunpack"
+          echo "CHECKVINTF=$RUNNER_TEMP/ota/x/bin/checkvintf" >> "$GITHUB_ENV"
+          echo "LPUNPACK=$RUNNER_TEMP/ota/x/bin/lpunpack" >> "$GITHUB_ENV"
+          echo "HOSTROOT=$RUNNER_TEMP/ota/x" >> "$GITHUB_ENV"
+          sha256sum "$RUNNER_TEMP/ota/x/bin/checkvintf" "$RUNNER_TEMP/ota/x/bin/lpunpack" | tee report/HOST_TOOLS_SHA256.txt
+          grep -q '^6f7601b9409ac5db70d8b05bc98d117fe68456464e710eb2e2964c7edf1325db ' report/HOST_TOOLS_SHA256.txt
+          grep -q '^9df5a76368804f062392ca5219dca58408a2d6a5fd648b5640d0ba7535cfc56f ' report/HOST_TOOLS_SHA256.txt
+
+      - name: Unpack and mount final partitions
+        run: |
+          set -Eeuo pipefail
+          SUPER="$RUNNER_TEMP/candidate/super.img"
+          test -s "$SUPER"
+          sha256sum "$SUPER" | tee report/FINAL_SUPER_SHA256.txt
+          test "$(sha256sum "$SUPER" | awk '{print $1}')" = 50f1a567e8dfcce4297a39f458e66196c1b59b420b002ec036d5c77fa1aa854a
+          simg2img "$SUPER" "$RUNNER_TEMP/super.raw.img"
+          env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$LPUNPACK" "$RUNNER_TEMP/super.raw.img" "$RUNNER_TEMP/parts" > report/LPUNPACK.txt
+          rm -f "$RUNNER_TEMP/super.raw.img"
+          for p in system system_ext product vendor; do
+            test -s "$RUNNER_TEMP/parts/$p.img"
+            sudo mkdir -p "$RUNNER_TEMP/mnt/$p"
+            sudo mount -o loop,ro "$RUNNER_TEMP/parts/$p.img" "$RUNNER_TEMP/mnt/$p"
+          done
+          if test -d "$RUNNER_TEMP/mnt/system/system/etc/vintf"; then SYS="$RUNNER_TEMP/mnt/system/system"; else SYS="$RUNNER_TEMP/mnt/system"; fi
+          echo "SYS=$SYS" >> "$GITHUB_ENV"
+          echo "SX=$RUNNER_TEMP/mnt/system_ext" >> "$GITHUB_ENV"
+          echo "PROD=$RUNNER_TEMP/mnt/product" >> "$GITHUB_ENV"
+          echo "VEN=$RUNNER_TEMP/mnt/vendor" >> "$GITHUB_ENV"
+          grep -h '^ro.product.first_api_level=' "$SYS/build.prop" "$PROD/etc/build.prop" "$VEN/build.prop" 2>/dev/null | sort -u | tee report/FIRST_API_LEVEL.txt || true
+          grep -q '^ro.product.first_api_level=30$' report/FIRST_API_LEVEL.txt
+
+      - name: Official checkvintf compatibility gate
+        run: |
+          set -Eeuo pipefail
+          printf 'AOSP17_BUILD_ID=%s\nAOSP17_TARGET=%s\nTICWATCH_FIRST_API_LEVEL=%s\n' "$AOSP17_BUILD_ID" "$AOSP17_TARGET" "$TICWATCH_FIRST_API_LEVEL" | tee report/PROVENANCE.txt
+          set +e
+          env LD_LIBRARY_PATH="$HOSTROOT/lib64:$HOSTROOT/lib" "$CHECKVINTF" --check-compat \
+            --dirmap "/system:$SYS" \
+            --dirmap "/system_ext:$SX" \
+            --dirmap "/product:$PROD" \
+            --dirmap "/vendor:$VEN" \
+            --property "ro.product.first_api_level=$TICWATCH_FIRST_API_LEVEL" \
+            > report/CHECKVINTF_STDOUT.txt 2> report/CHECKVINTF_STDERR.txt
+          rc=$?
+          set -e
+          echo "CHECKVINTF_EXIT=$rc" | tee report/CHECKVINTF_EXIT.txt
+          cat report/CHECKVINTF_STDOUT.txt
+          cat report/CHECKVINTF_STDERR.txt >&2
+          test "$rc" = 0
+          grep -q '^COMPATIBLE$' report/CHECKVINTF_STDOUT.txt
+          cat > report/OFFICIAL_CHECKVINTF_FINAL_GATE.txt <<'EOF'
+          OFFICIAL_CHECKVINTF_FINAL_GATE=PASS
+          CHECKVINTF_SOURCE=AOSP_ANDROID17_PUBLIC_CI_BUILD_16102939
+          FINAL_V4_SUPER=VERIFIED_SHA256
+          TICWATCH_FIRST_API_LEVEL=30
+          KERNEL_REQUIREMENTS_CHECKED=NO_STATIC_PARTITION_GATE_ONLY
+          EOF
+
+      - name: Finalize and upload report
+        if: always()
+        run: |
+          set -u
+          for p in system system_ext product vendor; do sudo umount "$RUNNER_TEMP/mnt/$p" 2>/dev/null || true; done
+          sudo chown -R "$(id -u):$(id -g)" report 2>/dev/null || true
+          find report -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > report/SHA256SUMS.txt
+
+      - name: Upload official checkvintf V2 report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-Official-CheckVintf-Final-V2
+          path: report/
+          retention-days: 30
+          compression-level: 9
