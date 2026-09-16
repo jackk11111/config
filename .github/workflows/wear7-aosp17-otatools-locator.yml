@@ -1,0 +1,67 @@
+name: Wear7 AOSP17 otatools locator
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-rom-staging]
+    paths: ['.github/workflows/wear7-aosp17-otatools-locator.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  locate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Probe public Android CI for android17-release artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p out
+          for u in \
+            'https://ci.android.com/builds/branches/android17-release/grid?legacy=1' \
+            'https://ci.android.com/builds/branches/android17-release/grid' \
+            'https://ci.android.com/builds/branches/android17-release/targets'; do
+            echo "=== $u ===" | tee -a out/probe.txt
+            code=$(curl -L -sS -o out/page.tmp -w '%{http_code}' "$u" || true)
+            echo "HTTP=$code bytes=$(wc -c < out/page.tmp)" | tee -a out/probe.txt
+            head -c 5000 out/page.tmp >> out/probe.txt || true
+            echo >> out/probe.txt
+            grep -Eo '[0-9]{7,9}' out/page.tmp | sort -nr | head -n 100 >> out/build_ids.txt || true
+          done
+          sort -u -nr out/build_ids.txt -o out/build_ids.txt || true
+          echo '=== candidate build ids ==='
+          cat out/build_ids.txt || true
+
+          # Try common public target names and raw otatools locations against discovered IDs.
+          : > out/attempts.txt
+          found=''
+          for id in $(head -n 30 out/build_ids.txt 2>/dev/null || true); do
+            for target in aosp_cf_x86_64_phone-userdebug aosp_cf_x86_64_only_phone-userdebug aosp_cf_x86_phone-userdebug aosp_arm64-userdebug; do
+              for rel in otatools.zip raw/otatools.zip; do
+                url="https://ci.android.com/builds/submitted/$id/$target/latest/$rel"
+                code=$(curl -L -sS -o /tmp/ota.test -w '%{http_code}' --range 0-1023 "$url" || true)
+                bytes=$(wc -c </tmp/ota.test 2>/dev/null || echo 0)
+                printf '%s %s %s\n' "$code" "$bytes" "$url" >> out/attempts.txt
+                if [ "$code" = 200 ] || [ "$code" = 206 ]; then
+                  if file /tmp/ota.test | grep -qi 'Zip archive'; then
+                    found="$url"
+                    break 3
+                  fi
+                fi
+              done
+            done
+          done
+          if [ -n "$found" ]; then
+            echo "OTATOOLS_URL=$found" | tee out/result.txt
+          else
+            echo 'OTATOOLS_URL=NOT_FOUND_FROM_PUBLIC_GRID_PROBE' | tee out/result.txt
+          fi
+
+      - name: Upload locator report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-AOSP17-Otatools-Locator
+          path: out/
+          retention-days: 7
