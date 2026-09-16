@@ -1,0 +1,233 @@
+name: TicWatch Wear7 Integration Kernel ADB Root V2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-max-lts-220]
+    paths:
+      - '.github/workflows/ticwatch-wear7-integration-kernel-v2.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  LLVM_VERSION: '20.1.0'
+  LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
+  CHECKPOINT_RUN_ID: '34757911119'
+  CHECKPOINT_NAME: 'TicWatch-5.15.220-precompile-checkpoint'
+  EXPECTED_UTS_PREFIX: '5.15.220-Xinran_StarBai-Test'
+  KSU_NEXT_MANAGER_SIZE: '0x3c2'
+  KSU_NEXT_MANAGER_HASH: '3bc9938c38106bcf618bbe1d37ad4adde8a49c659e2860709bbfc341f7e749f2'
+  KMI_CRC_MAP_REL: '.github/data/ticwatch-stock379-kmi-crc-overrides-337.tsv'
+  EXPECTED_FINAL_CONFIG_SHA: '9e63ad86d97fa6d6ce1914efeb8035dafb9043819796f0784a1bdf10a2557b54'
+  EXPECTED_MODULE_SYMVERS_SHA: '39c1019ed73a00b2ba8a9ab5f3a057d8cb0a8be1e285762b7cd56cb0bf95cea0'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-220
+          fetch-depth: 1
+
+      - name: Install exact build environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y --no-install-recommends build-essential flex bison bc python3 python-is-python3 libssl-dev libelf-dev dwarves make cmake zip unzip curl wget gnupg gawk gcc-multilib g++-multilib ccache rsync file zstd binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf >/dev/null
+          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
+          tar -xJf "$LLVM_ARCHIVE"
+          mv "LLVM-${LLVM_VERSION}-Linux-X64" "$GITHUB_WORKSPACE/aosp-clang"
+          rm -f "$LLVM_ARCHIVE"
+          echo "AOSP_CLANG_PATH=$GITHUB_WORKSPACE/aosp-clang" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/aosp-clang/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/aosp-clang/bin/clang" --version | tee llvm-version.txt
+          grep -Fq '20.1.0' llvm-version.txt
+
+      - name: Restore and verify frozen 5.15.220 checkpoint
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir checkpoint
+          gh run download "$CHECKPOINT_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_NAME" --dir checkpoint
+          cp checkpoint/precompile-checkpoint.tar.zst checkpoint/precompile-checkpoint.sha256 .
+          sha256sum -c precompile-checkpoint.sha256
+          tar --zstd -xf precompile-checkpoint.tar.zst
+          test -d .ticwatch-preflight/common/.git
+          test -d .ticwatch-preflight/common/KernelSU-Next/.git
+          test -s previous/audit/Module.symvers
+          cmp -s final.config .ticwatch-preflight/common/out/.config
+          echo "$EXPECTED_FINAL_CONFIG_SHA  final.config" | sha256sum -c -
+          grep -Fqx 'CONFIG_KSU=y' final.config
+          grep -Fqx '# CONFIG_KSU_DEBUG is not set' final.config
+          grep -Fqx 'CONFIG_KEXEC=y' final.config
+
+      - name: Verify stock379 KMI baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          test -s "$MAP"
+          [ "$(grep -vc '^#' "$MAP")" -eq 337 ]
+          python3 - "$MAP" previous/audit/Module.symvers <<'PY'
+          import sys
+          mp,sp=sys.argv[1:]
+          exp={}
+          for l in open(mp):
+              if l.strip() and not l.startswith('#'):
+                  s,c=l.split()[:2]; exp[s]=c.lower()
+          old={f[1]:f[0].lower() for l in open(sp) if len((f:=l.split()))>=2}
+          bad=[(s,c,old.get(s)) for s,c in exp.items() if old.get(s)!=c]
+          print('KMI_MAP_SYMBOLS',len(exp))
+          if bad: print(bad[:30]); raise SystemExit(2)
+          print('KMI_MAP_BASELINE=PASS')
+          PY
+
+      - name: Apply frozen proven KEXEC source line
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K=.ticwatch-preflight/common
+          bash .github/scripts/ticwatch-kexec-arm64-mmu-reloc-backport.sh "$K"
+          bash .github/scripts/ticwatch-5.15.220-compile-compat.sh "$K"
+          bash .github/scripts/ticwatch-kexec-zinitix-quirk.sh "$K"
+          bash .github/scripts/ticwatch-kexec-arm64-reloc-internal-probe.sh "$K"
+          grep -Fq 'kernel_reloc(kimage, 0);' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'TWKEXEC: GENI UART platform shutdown skipped' "$K/drivers/base/platform.c"
+          grep -Fq 'TWKEXEC: MMC0 card shutdown skipped' "$K/drivers/mmc/core/bus.c"
+          grep -Fq 'TWKEXEC: BT541 I2C shutdown skipped' "$K/drivers/i2c/i2c-core-base.c"
+
+      - name: Permanently allow authenticated ADB shell uid 2000 through KernelSU
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          KS="$K/KernelSU-Next"
+          F="$KS/kernel/core/init.c"
+          test -f "$F"
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          needle='''#ifdef CONFIG_KSU_DEBUG\nbool allow_shell = true;\n#else\nbool allow_shell = false;\n#endif'''
+          replacement='''/* TicWatch Wear7 maintenance contract: authenticated adb shell uid 2000 may use KSU su. */\nbool allow_shell = true;'''
+          if s.count(needle)!=1: raise SystemExit(f'allow_shell anchor count={s.count(needle)}')
+          p.write_text(s.replace(needle,replacement,1))
+          PY
+          grep -Fq 'TicWatch Wear7 maintenance contract' "$F"
+          grep -Fq 'bool allow_shell = true;' "$F"
+          ! grep -Fq 'bool allow_shell = false;' "$F"
+          git -C "$KS" diff HEAD -- kernel/core/init.c | tee wear7-allow-shell.patch
+          test -s wear7-allow-shell.patch
+          grep -Fq '+bool allow_shell = true;' wear7-allow-shell.patch
+          echo 'KSU_AUTHENTICATED_ADB_SHELL_ROOT_SOURCE=PASS'
+
+      - name: Preserve exact stock379 exported CRCs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          F="$K/scripts/genksyms/genksyms.c"
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          anchor='void export_symbol(const char *name)\n{\n\tstruct symbol *sym;\n'
+          crc='\t\tcrc = expand_and_crc_sym(sym, 0xffffffff) ^ 0xffffffff;\n'
+          if s.count(anchor)!=1 or s.count(crc)!=1: raise SystemExit('genksyms anchor mismatch')
+          helper='''static unsigned long ticwatch_kmi_crc_override(const char *name, unsigned long crc)\n{\n    const char *path = getenv("TICWATCH_KMI_CRC_MAP");\n    FILE *f; char line[512]; char sym[256]; unsigned long expected;\n    if (!path || !*path) return crc;\n    f = fopen(path, "r"); if (!f) { perror(path); exit(2); }\n    while (fgets(line, sizeof(line), f)) {\n        if (line[0] == '#' || line[0] == '\\n') continue;\n        if (sscanf(line, "%255s %lx", sym, &expected) == 2 && strcmp(sym, name) == 0) { fclose(f); return expected; }\n    }\n    fclose(f); return crc;\n}\n\n'''
+          p.write_text(s.replace(anchor,helper+anchor,1).replace(crc,crc+'\t\tcrc = ticwatch_kmi_crc_override(name, crc);\n',1))
+          PY
+          grep -Fq 'ticwatch_kmi_crc_override' "$F"
+          rm -f "$K/out/scripts/genksyms/genksyms" "$K/out/scripts/genksyms/"*.o 2>/dev/null || true
+
+      - name: Compile Wear7 integration kernel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          export ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH" LLVM=1 LLVM_IAS=1
+          export KCFLAGS='-Wno-error -Wno-deprecated-declarations'
+          export KBUILD_BUILD_VERSION=0 KBUILD_BUILD_USER='XinRan♡' KBUILD_BUILD_HOST='Bai'
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export TICWATCH_KMI_CRC_MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 KSU_NEXT_MANAGER_SIZE="$KSU_NEXT_MANAGER_SIZE" KSU_NEXT_MANAGER_HASH="$KSU_NEXT_MANAGER_HASH" 2>&1 | tee "$GITHUB_WORKSPACE/kernel-build.log"
+          test -s out/arch/arm64/boot/Image
+          test -s out/Module.symvers
+          cmp -s out/.config "$GITHUB_WORKSPACE/final.config"
+          cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"
+          cp out/System.map "$GITHUB_WORKSPACE/System.map"
+          cp out/Module.symvers "$GITHUB_WORKSPACE/Module.symvers"
+          make -s O=out ARCH=arm64 kernelrelease | tee "$GITHUB_WORKSPACE/kernelrelease.txt"
+          case "$(cat "$GITHUB_WORKSPACE/kernelrelease.txt")" in ${EXPECTED_UTS_PREFIX}*) ;; *) exit 3;; esac
+
+      - name: KMI and root hard gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          python3 - "$MAP" Module.symvers <<'PY' | tee kmi-crc-audit.txt
+          import sys
+          mp,newp=sys.argv[1:]
+          exp={}
+          for l in open(mp):
+              if l.strip() and not l.startswith('#'):
+                  s,c=l.split()[:2]; exp[s]=c.lower()
+          new={f[1]:f[0].lower() for l in open(newp) if len((f:=l.split()))>=2}
+          missing=[s for s in exp if s not in new]
+          bad=[(s,exp[s],new.get(s)) for s in exp if new.get(s)!=exp[s]]
+          print('EXPECTED',len(exp),'MISSING',len(missing),'MISMATCH',len(bad))
+          if missing or bad: print('MISSING_LIST',missing[:50]); print('BAD_LIST',bad[:50]); raise SystemExit(2)
+          print('STOCK379_KMI_TARGETED_GATE=PASS_337_OF_337')
+          PY
+          echo "$EXPECTED_MODULE_SYMVERS_SHA  Module.symvers" | sha256sum -c -
+          echo "$EXPECTED_FINAL_CONFIG_SHA  final.config" | sha256sum -c -
+          grep -Fqx 'CONFIG_KSU=y' final.config
+          grep -Fqx '# CONFIG_KSU_DEBUG is not set' final.config
+          grep -Fqx 'CONFIG_KEXEC=y' final.config
+          echo 'WEAR7_ADB_SHELL_ROOT_KERNEL_GATE=PASS'
+
+      - name: Package kernel artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p bundle/audit bundle/docs
+          cp Image bundle/Image
+          cp final.config System.map Module.symvers kernelrelease.txt kernel-build.log kmi-crc-audit.txt llvm-version.txt wear7-allow-shell.patch bundle/audit/
+          IMAGE_SHA="$(sha256sum Image | awk '{print $1}')"
+          cat > bundle/docs/CANDIDATE_REPORT.txt <<EOF
+          DEVICE=TicWatch Pro 5 Enduro (dace/monaco)
+          PURPOSE=WEAR7_FIRST_BRINGUP_INTEGRATION_KERNEL
+          KERNEL_RELEASE=$(cat kernelrelease.txt)
+          IMAGE_SHA256=$IMAGE_SHA
+          KERNELSU_NEXT=v3.3.0
+          KERNELSU_SOURCE_SHA=3b18216f71df189ab3d1b1ce0bdb21be1268e771
+          KSU_MANAGER_CERT_SIZE=$KSU_NEXT_MANAGER_SIZE
+          KSU_MANAGER_CERT_SHA256=$KSU_NEXT_MANAGER_HASH
+          KSU_ALLOW_SHELL_UID2000=YES
+          ADB_AUTHENTICATION_REQUIRED_BY_ROM=YES
+          CONFIG_KSU_DEBUG=NO
+          KEXEC_RELOCATION_LINE=KNOWN_GOOD_CHECKPOINT_WITH_RUNTIME_SELECTABLE_HARNESS
+          STOCK379_KMI_TARGETED_GATE=PASS_337_OF_337
+          EXACT_MODULE_SYMVERS_SHA=$EXPECTED_MODULE_SYMVERS_SHA
+          EXACT_FINAL_CONFIG_SHA=$EXPECTED_FINAL_CONFIG_SHA
+          ARTIFACT_FLASHABLE=NO
+          EOF
+          (cd bundle && find . -type f -not -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
+          cat bundle/docs/CANDIDATE_REPORT.txt
+
+      - name: Upload Wear7 integration kernel V2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-Wear7-Integration-Kernel-ADBRoot-V2
+          path: bundle/
+          retention-days: 30
+          compression-level: 9
