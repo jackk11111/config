@@ -68,7 +68,7 @@ jobs:
           for idx,step in enumerate(steps,1):
               script=step.get('run'); name=step.get('name',f'step-{idx}')
               if not script: continue
-              if '${{' in script: raise SystemExit('unexpected expression in '+name)
+              if '$'+'{{' in script: raise SystemExit('unexpected expression in '+name)
               if name=='Generate exact filesystem metadata configs and contexts':
                   W=pathlib.Path(env['RUNNER_TEMP'])/'work'; stage=W/'stage-system'; mnt=W/'v5b-stock-system'; vmnt=W/'v5b-stock-vendor'
                   subprocess.run(['sudo','mkdir','-p',str(mnt),str(vmnt)],check=True)
