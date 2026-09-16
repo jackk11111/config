@@ -77,10 +77,13 @@ jobs:
             sudo mount -o loop,ro "$RUNNER_TEMP/parts/$p.img" "$RUNNER_TEMP/mnt/$p"
           done
           if test -d "$RUNNER_TEMP/mnt/system/system/etc/vintf"; then SYS="$RUNNER_TEMP/mnt/system/system"; else SYS="$RUNNER_TEMP/mnt/system"; fi
+          SX="$RUNNER_TEMP/mnt/system_ext"
+          PROD="$RUNNER_TEMP/mnt/product"
+          VEN="$RUNNER_TEMP/mnt/vendor"
           echo "SYS=$SYS" >> "$GITHUB_ENV"
-          echo "SX=$RUNNER_TEMP/mnt/system_ext" >> "$GITHUB_ENV"
-          echo "PROD=$RUNNER_TEMP/mnt/product" >> "$GITHUB_ENV"
-          echo "VEN=$RUNNER_TEMP/mnt/vendor" >> "$GITHUB_ENV"
+          echo "SX=$SX" >> "$GITHUB_ENV"
+          echo "PROD=$PROD" >> "$GITHUB_ENV"
+          echo "VEN=$VEN" >> "$GITHUB_ENV"
           grep -h '^ro.product.first_api_level=' "$SYS/build.prop" "$PROD/etc/build.prop" "$VEN/build.prop" 2>/dev/null | sort -u | tee report/FIRST_API_LEVEL.txt || true
           grep -q '^ro.product.first_api_level=30$' report/FIRST_API_LEVEL.txt
 
