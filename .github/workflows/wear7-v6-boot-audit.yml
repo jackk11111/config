@@ -1,0 +1,89 @@
+name: Wear7 V6 additional boot evidence (no rebuild)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-v6-offline-validation]
+    paths:
+      - '.github/workflows/wear7-v6-boot-audit.yml'
+      - 'wear7/boot-audit/collect.py'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Prepare read-only image inspection
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs android-sdk-libsparse-utils erofs-utils unzip curl python3-pyelftools >/dev/null
+          mkdir -p "$RUNNER_TEMP/boot-audit/input" "$RUNNER_TEMP/boot-audit/tools" "$RUNNER_TEMP/boot-audit/parts" wear7-boot-evidence
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V6-Bootchain
+          path: '${{ runner.temp }}/boot-audit/input'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35146642220'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V6-Super
+          path: '${{ runner.temp }}/boot-audit/input'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35146642220'
+      - name: Extract the existing images and collect new evidence
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/boot-audit"
+          echo '91b73fc444e51d68db7bfaca77615f8be9103407cd92f3e67a74500a0a22a30e  '"$W/input/super.img" | sha256sum -c -
+          curl -fL --retry 2 -sS -o "$W/tools/otatools.zip" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo 'f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  '"$W/tools/otatools.zip" | sha256sum -c -
+          python3 - "$W/tools/otatools.zip" "$W/tools/extracted" <<'PY'
+          import pathlib, sys, zipfile
+          out = pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              for name in archive.namelist():
+                  if name.startswith(('bin/', 'lib64/', 'lib/', 'framework/')):
+                      if not (out / name).resolve().is_relative_to(out):
+                          raise ValueError('Unsafe tool archive path')
+                      archive.extract(name, out)
+          PY
+          rm "$W/tools/otatools.zip"
+          T="$W/tools/extracted"
+          chmod +x "$T/bin/"*
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          simg2img "$W/input/super.img" "$W/super.raw"
+          lpunpack "$W/super.raw" "$W/parts"
+          rm "$W/super.raw"
+          cleanup() { for p in system system_ext product vendor vendor_dlkm system_dlkm; do sudo umount "$W/mnt/$p" 2>/dev/null || true; done; }
+          trap cleanup EXIT
+          for p in system system_ext product vendor vendor_dlkm system_dlkm; do
+            mkdir -p "$W/mnt/$p"
+            sudo mount -o loop,ro,noload "$W/parts/$p.img" "$W/mnt/$p"
+          done
+          mkdir -p "$W/apex"
+          # Expose APEX contents for the new inventory; do not rerun the closed
+          # APEX-signature, VINTF, SELinux, idmap or filesystem gates.
+          "$T/bin/apexd_host" --tool_path "$T" --apex_path "$W/apex" \
+            --system_path "$W/mnt/system/system" --system_ext_path "$W/mnt/system_ext" \
+            --product_path "$W/mnt/product" --vendor_path "$W/mnt/vendor" \
+            --odm_path "$W/mnt/vendor/odm" > wear7-boot-evidence/APEX_EXTRACTION.log 2>&1
+          sudo env LD_LIBRARY_PATH="$LD_LIBRARY_PATH" /usr/bin/python3 wear7/boot-audit/collect.py \
+            --mounts "$W/mnt" --apex "$W/apex" --tools "$T" --output "$GITHUB_WORKSPACE/wear7-boot-evidence"
+          cp "$W/input/CANDIDATE.json" wear7-boot-evidence/SOURCE_CANDIDATE.json
+      - name: Preserve evidence even if collection is incomplete
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V6-Boot-Evidence
+          path: wear7-boot-evidence/
+          retention-days: 90
+          if-no-files-found: error
+          compression-level: 6
