@@ -43,6 +43,14 @@ completare o ripristinare. Non viene impartito alcun riavvio automatico.
 
 ## Ciò che deve garantire la recovery
 
+Il confronto con la R7.2 è ora documentato nella
+[revisione preinstallazione](../PREINSTALL_REVIEW_2026-09-17.md): il bootstrap
+mantiene `vendor` e `vendor_dlkm` montati e ne usa i componenti Wi-Fi.
+Questa recovery, nella forma esaminata, non soddisfa il requisito di `super`
+inattiva. Restano aperti anche il recupero dopo un riavvio con `super` incompleta
+e la persistenza della recovery/configurazione dopo il reset. La revisione
+non abilita scritture e non sostituisce il collaudo hardware.
+
 Il backend richiede ADB Wi-Fi già autenticato e UID 0, identità dace/monaco
 single-slot, bootloader sbloccato, alias e dimensioni coerenti. Rifiuta target
 montati e **qualsiasi holder device-mapper delle partizioni da scrivere**.

@@ -66,6 +66,13 @@ l'integrazione con la recovery collaudata.
 
 ## Ciò che rimane aperto
 
+La [revisione preinstallazione del 17 settembre](PREINSTALL_REVIEW_2026-09-17.md)
+ha verificato la R7.2: il suo Wi-Fi dipende da `vendor`/`vendor_dlkm` attivi
+in `super`, incompatibili con la scrittura completa prevista dall'installer.
+Restano inoltre da completare reset/conservazione della configurazione rescue
+e protezione della recovery dopo il wipe. Sono lavori di integrazione prima
+del flash; non è sufficiente aspettare il primo avvio Wear7.
+
 Recovery Wi-Fi/root, backup fuori dal dispositivo e ripristino fisico non sono
 stati provati da questa build. Il preflight della recovery è in sola lettura.
 Il percorso di scrittura/streaming deve essere integrato con la recovery

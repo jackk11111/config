@@ -12,7 +12,7 @@ sections below describe its history, not outstanding image-build work.
 - [Results, artifact links and archive checksums](V6_OFFLINE_STATUS.md).
 - [Recovery preparation tools and their limits](v6/README.md).
 - [Draft PR #1](https://github.com/jackk11111/config/pull/1) targets `wear7-rom-staging`; the candidate remains on `wear7-v6-offline-validation`.
-- Wear7 kernel remains `5.15.220-Xinran_StarBai-Test+`. Recovery revisions R6/R7/R7.1 are a separate workstream.
+- Wear7 kernel remains `5.15.220-Xinran_StarBai-Test+`. Recovery revisions through R7.2 are a separate workstream.
 
 The existing run closed the signed VNDK33 APEX bridge, official VINTF,
 combined SELinux compilation, real Fast Pair idmap2 mapping, filesystem/AVB
@@ -20,7 +20,12 @@ reconstruction, final super extraction/comparison and package preflight.
 All 12 preparation-tool tests passed. These results come from the completed
 run and its downloaded report; no rebuild or test rerun is needed to resume.
 
-**Resume at the hardware recovery/rollback gate.** The [installer development kit](installer/README.md)
+**Resolve the recovery/installer integration before the first flash.** The
+[17 September pre-install review](PREINSTALL_REVIEW_2026-09-17.md) identifies
+R7.2's active `super` dependency, reset/configuration preservation and recovery
+persistence after a clean wipe as open integration work. These are not checks
+that must wait for the first Wear7 boot. Hardware qualification remains required.
+The [installer development kit](installer/README.md)
 now implements bounded transfer, readback, interruption recovery and image rollback;
 21 local file-simulation tests passed. The ADB backend still needs physical recovery
 validation and writes remain blocked. Userdata/metadata are excluded from the
