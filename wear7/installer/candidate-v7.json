@@ -1,0 +1,139 @@
+{
+  "format": 1,
+  "candidate": "Wear7-V7",
+  "device": "dace",
+  "platform": "monaco",
+  "ab": false,
+  "super_expanded_bytes": 4294967296,
+  "super_expanded_sha256": "f8fd0557983de6f5f9806ac1582bfc7d0e9fce59bfcbc7793b8af83884ac76bd",
+  "partitions": {
+    "system": 1741303808,
+    "system_ext": 283598848,
+    "product": 1613258752,
+    "vendor": 297361408,
+    "vendor_dlkm": 63889408,
+    "system_dlkm": 348160
+  },
+  "images": {
+    "boot.img": {
+      "sha256": "f5173a192b1d1e335198aa04ef8f47928d87b26d793fd9621737f211143c8353",
+      "bytes": 100663296
+    },
+    "dtbo.img": {
+      "sha256": "eb2a8d0028b6e22898b26e4bc71419190a4ea3431a2b66c6c57d9e280ade4c96",
+      "bytes": 8388608
+    },
+    "init_boot.img": {
+      "sha256": "c128f41b1e1fe4a2062b1b8464bf8e01650419f158ab7d412a3bf1f0099c9884",
+      "bytes": 8388608
+    },
+    "super.img": {
+      "sha256": "2a73517c4356dce6995641b4cf2ac82b50e1c0b0fec7ee46decbd4fe122399f6",
+      "bytes": 3837791156
+    },
+    "vbmeta.img": {
+      "sha256": "384106d0f635631f5e4ddd96cd7847965af4e0687fb517ecee1cb4096c007259",
+      "bytes": 8192
+    },
+    "vbmeta_system.img": {
+      "sha256": "22f24ebea86ea2dac15723449b477870133fac0703d9c07be32d89f2b7fe7a76",
+      "bytes": 4096
+    },
+    "vendor_boot.img": {
+      "sha256": "9d7cd2a5f7a21e9554552e94aaf89c2fdc6d036f59c8e8abe355456f8a5f18cf",
+      "bytes": 100663296
+    }
+  },
+  "kernel": "5.15.220-Xinran_StarBai-Test+",
+  "input_run": 35146642220,
+  "source_commit": "6125c80f798994ee53749f85a833c24da5940765",
+  "offline_gates": {
+    "APEX_INTEGRATION": {
+      "status": "PASS"
+    },
+    "OFFICIAL_VINTF": {
+      "status": "PASS"
+    },
+    "SELINUX_POLICY": {
+      "status": "PASS"
+    },
+    "FASTPAIR_IDMAP2": {
+      "status": "PASS"
+    },
+    "HARDWARE_RUNTIME": {
+      "status": "UNTESTED"
+    },
+    "RECOVERY_ROLLBACK": {
+      "status": "UNTESTED"
+    },
+    "NATIVE_STOCK32_COMPAT": {
+      "status": "PASS"
+    }
+  },
+  "flash_authorized": false,
+  "recovery_integration": "UNTESTED",
+  "hardware_runtime": "UNTESTED",
+  "userdata_migration": "UNTESTED",
+  "avb": "unlocked_first_bringup_flags_3",
+  "native_compat": {
+    "source": "TicWatch stock 379 system/lib ARM32",
+    "stock_ota_sha256": "ffa61d822a5c667c230ce2ba9426ce4eb282adcaa0891279ef002f65ca15a08d",
+    "libraries": {
+      "android.hardware.audio.common-V1-ndk.so": {
+        "sha256": "608fcd711c3f7f810381f9dea4bea4cb95c814d3a7798a7e0c39543b85be875a",
+        "stock_sha256": "608fcd711c3f7f810381f9dea4bea4cb95c814d3a7798a7e0c39543b85be875a",
+        "selinux": "u:object_r:system_lib_file:s0"
+      },
+      "android.hardware.bluetooth.audio-V2-ndk.so": {
+        "sha256": "df9cc6835a5227fe1cd3f31ad54589f68fd9353e130f44d3aa586dcf567226ca",
+        "stock_sha256": "df9cc6835a5227fe1cd3f31ad54589f68fd9353e130f44d3aa586dcf567226ca",
+        "selinux": "u:object_r:system_lib_file:s0"
+      },
+      "android.hardware.security.keymint-V2-ndk.so": {
+        "sha256": "1f11769e7250b97d94fa7cc10f571a5b950308e9221bf7be2d854ccc54d0e52a",
+        "stock_sha256": "1f11769e7250b97d94fa7cc10f571a5b950308e9221bf7be2d854ccc54d0e52a",
+        "selinux": "u:object_r:system_lib_file:s0"
+      },
+      "android.hardware.soundtrigger@2.0-core.so": {
+        "sha256": "977234cdcf84bcb5a561d5bdcdbd8715d1b9f43f7ac2af27c0535db4502d14d8",
+        "stock_sha256": "977234cdcf84bcb5a561d5bdcdbd8715d1b9f43f7ac2af27c0535db4502d14d8",
+        "selinux": "u:object_r:system_lib_file:s0"
+      },
+      "android.hardware.soundtrigger@2.0.so": {
+        "sha256": "e9bef539dab7368eddc921637e00c480738d3510e9197d2278b620d2473eace8",
+        "stock_sha256": "e9bef539dab7368eddc921637e00c480738d3510e9197d2278b620d2473eace8",
+        "selinux": "u:object_r:system_lib_file:s0"
+      },
+      "android.media.audio.common.types-V1-ndk.so": {
+        "sha256": "544e7aac15c232c63a6e8d12f4ab9777dcf35f8d1847213a96595ba8e3852e36",
+        "stock_sha256": "544e7aac15c232c63a6e8d12f4ab9777dcf35f8d1847213a96595ba8e3852e36",
+        "selinux": "u:object_r:system_lib_file:s0"
+      },
+      "android.media.audio.common.types-V1-ndk_platform.so": {
+        "sha256": "a19013c9699f9bbcd62a34ffabfbd7417c591bb9c67a79df628b551a7b87a6d1",
+        "stock_sha256": "a19013c9699f9bbcd62a34ffabfbd7417c591bb9c67a79df628b551a7b87a6d1",
+        "selinux": "u:object_r:system_lib_file:s0"
+      },
+      "android.media.soundtrigger.types-V1-ndk.so": {
+        "sha256": "b632f5e071322d1f58854d532423388aa58d4a6ef7ae3566f075e00f26c2d4e4",
+        "stock_sha256": "b632f5e071322d1f58854d532423388aa58d4a6ef7ae3566f075e00f26c2d4e4",
+        "selinux": "u:object_r:system_lib_file:s0"
+      },
+      "android.media.soundtrigger.types-V1-ndk_platform.so": {
+        "sha256": "d8651609f48c9f28b3eee18be5d7ed1b5e4db182474b3c5108639de85ec92d36",
+        "stock_sha256": "d8651609f48c9f28b3eee18be5d7ed1b5e4db182474b3c5108639de85ec92d36",
+        "selinux": "u:object_r:system_lib_file:s0"
+      },
+      "libaudioroute.so": {
+        "sha256": "0fe7a17e4f1f9eefd5fd7f27affdb0b673748109b3f8fc4783ae8726427d6248",
+        "stock_sha256": "0fe7a17e4f1f9eefd5fd7f27affdb0b673748109b3f8fc4783ae8726427d6248",
+        "selinux": "u:object_r:system_lib_file:s0"
+      },
+      "libwifi-system-iface.so": {
+        "sha256": "795eab44506b8f9c307927e4bb68743fe38f9e7c5ebed92624aa1691674d9333",
+        "stock_sha256": "795eab44506b8f9c307927e4bb68743fe38f9e7c5ebed92624aa1691674d9333",
+        "selinux": "u:object_r:system_lib_file:s0"
+      }
+    }
+  }
+}
