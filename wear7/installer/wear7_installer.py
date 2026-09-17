@@ -306,16 +306,20 @@ def main(argv=None):
             raise RuntimeError("HARDWARE_WRITES_BLOCKED: no physically validated recovery profile yet")
     if args.command == "plan":
         manifest, images = candidate_images(args.package)
+        data_policy = json.loads((HERE / "userdata-policy.json").read_text())
         result = describe(images)
         result.update({"candidate": manifest["candidate"], "source_commit": manifest["source_commit"],
                        "userdata_action": "UNTOUCHED", "metadata_action": "UNTOUCHED",
-                       "first_boot_data_decision": "PENDING", "automatic_reboot": False,
+                       "first_boot_data_decision": data_policy.get("selected_first_bringup_strategy", "PENDING"),
+                       "user_reset_consent": data_policy["user_reset_consent"],
+                       "reset_implementation": data_policy["reset_implementation"], "automatic_reboot": False,
                        "hardware_install_validated": False})
         if args.session.exists() or args.session.is_symlink():
             raise ValueError("use a new session directory")
         args.session.mkdir(parents=True)
         atomic_json(args.session / "PLAN.json", result)
-        print("PLAN_READY; HARDWARE_INSTALL_VALIDATED=NO; FIRST_BOOT_DATA_DECISION=PENDING")
+        print("PLAN_READY; HARDWARE_INSTALL_VALIDATED=NO; FIRST_BOOT_DATA_DECISION="
+              + result["first_boot_data_decision"] + "; RESET_NOT_EXECUTED")
         return 0
     device = AdbDevice(args.serial, reference())
     if args.command == "probe":

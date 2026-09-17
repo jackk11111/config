@@ -1,0 +1,28 @@
+{
+  "format": 1,
+  "requirement_date": "2026-09-17",
+  "mandatory": true,
+  "requirement": "Gemini as the native Wear7 system assistant",
+  "accepted_integration": "Built-in Pixel Wear7 donor system assistant, including legitimate official system-app updates",
+  "legacy_wear4_gemini_module_or_bind_mount_accepted": false,
+  "static_evidence": {
+    "run_id": 35146642220,
+    "source_commit": "d160e4f6b32d29cbecc802f3d9443fe0d2b7de44",
+    "report_artifact_id": 10467159269,
+    "report": "system_final.tsv",
+    "assistant_package": "com.google.android.wearable.assistant",
+    "assistant_apk": "system/priv-app/AssistantWearPrebuilt/AssistantWearPrebuilt.apk",
+    "assistant_apk_sha256": "3434942e08ba875f53783ed4fbd2a2510bdcbc988430177df20247d23eeefecd",
+    "privapp_policy": "system/etc/permissions/privapp-permissions-pixel-watch-assistant.xml",
+    "privapp_policy_sha256": "b95661e7289689bcc6fd30f39f9aad6e9a32ff3b0b48880b281a717d6e5d8221",
+    "status": "NATIVE_DONOR_COMPONENT_PRESENT_IN_FINAL_IMAGE_REPORT"
+  },
+  "runtime_status": "UNTESTED",
+  "runtime_acceptance": [
+    "Gemini setup completes using the native system assistant",
+    "Native invocation opens Gemini and a real request receives a response",
+    "Functionality persists after reboot",
+    "No legacy Wear4 injection module or bind-mount is needed"
+  ],
+  "runtime_functionality_guaranteed": false
+}

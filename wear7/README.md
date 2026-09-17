@@ -24,8 +24,10 @@ run and its downloaded report; no rebuild or test rerun is needed to resume.
 now implements bounded transfer, readback, interruption recovery and image rollback;
 21 local file-simulation tests passed. The ADB backend still needs physical recovery
 validation and writes remain blocked. Userdata/metadata are excluded from the
-transport. A clean first setup is proposed; reset consent and its recovery-specific
-implementation remain open. Wi-Fi/ADB root in recovery, first Wear7
+transport. Clean setup and watch-local data reset for the first controlled test
+were authorized by the user on 2026-09-17; the recovery-specific reset implementation
+still needs completion and validation. Native Gemini is a mandatory runtime
+requirement; the donor system assistant is already present in the final V6 report. Wi-Fi/ADB root in recovery, first Wear7
 boot, pairing, hardware behavior and persistent ADB/root still require
 device evidence. GitHub Actions cannot close those runtime checks.
 

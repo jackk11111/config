@@ -15,7 +15,7 @@ Non serve ricompilarle per sviluppare l'installer.
 | Backup e ripristino delle sette partizioni ROM | Codice presente; ripristino su file simulati verificato |
 | Scrittura reale sul dispositivo | BLOCCATA: nessuna recovery qualificata nel registro |
 | Gestione dati durante il trasferimento | userdata, metadata e recovery esclusi da ogni scrittura |
-| Strategia per i dati al primo avvio | Installazione pulita proposta; consenso al reset assente |
+| Strategia per i dati al primo avvio | Installazione pulita scelta; reset dell'orologio autorizzato il 17/09/2026 per il primo test controllato |
 | Formattazione/reset e primo boot | NON implementati/abilitati; richiedono la recovery finale |
 
 ## Trasferimento
@@ -66,14 +66,16 @@ La regola del codice è già definita: non modifica `userdata`, `metadata`,
 `recovery`, `misc` o `persist`. Non contiene erase, mkfs, format o comandi di
 reset. Non passa automaticamente dal flash al primo avvio.
 
-Per il primo bring-up è proposta un'**installazione pulita**, per non aggiungere
-la migrazione dei dati della vecchia ROM alle variabili del primo test. È una
-scelta operativa proposta, non una necessità dimostrata né un'autorizzazione
-ricevuta. La conservazione con migrazione in-place non è supportata/collaudata.
+Il 17/09/2026 l'utente ha scelto e autorizzato l'**installazione pulita** per
+il primo test controllato, dichiarando di non avere dati dell'orologio da
+conservare e di avere backup di APK, moduli, KernelSU e altre personalizzazioni.
+La scelta sui dati è chiusa; non occorre richiedere nuovamente lo stesso consenso.
+Questa dichiarazione non attesta l'integrità dei backup ROM necessari al rollback.
+La migrazione in-place non viene perseguita.
 
-Per chiudere questa decisione serve il consenso dell'utente a cancellare i dati
-**dell'orologio**. Poi il reset va realizzato tramite la procedura corretta della
-recovery, coerente con fstab e cifratura del dispositivo. Non si presume che un
+Il reset non è stato eseguito. Avverrà solo quando recovery/rollback saranno
+collaudati e tramite la procedura corretta della recovery, coerente con fstab e
+cifratura del dispositivo. Non si presume che un
 generico `dd`, una cancellazione di file o la formattazione indiscriminata di
 metadata equivalgano a un reset corretto. La configurazione necessaria a rientrare
 via Wi-Fi deve sopravvivere al reset o essere ripristinabile dalla recovery.
@@ -87,6 +89,19 @@ Riferimenti: [FBE Android](https://source.android.com/docs/security/features/enc
 e [cifratura dei metadati](https://source.android.com/docs/security/features/encryption/metadata).
 Questi descrivono il legame con le chiavi; la configurazione concreta va letta
 nel fstab del TicWatch, senza dedurla da un altro dispositivo.
+
+## Gemini nativo — requisito confermato
+
+Gemini deve funzionare come assistente di sistema nativo di Wear7. Il requisito
+non è soddisfatto dal ripristino del vecchio modulo Wear4 o da bind-mount
+applicati al firmware precedente. I backup di APK/moduli dell'utente non
+vengono ripristinati automaticamente dall'installer.
+
+Il report del filesystem V6 contiene già AssistantWearPrebuilt in
+`system/priv-app` con lo stesso SHA256 del donor Pixel Wear7 e conserva la policy
+privilegiata relativa all'assistente. Questo verifica la presenza della base
+nativa, non l'attivazione effettiva di Gemini o la risposta sul TicWatch.
+I criteri completi sono nel [requisito Gemini](../manifests/GEMINI_NATIVE_REQUIREMENT_2026-09-17.json).
 
 ## Uso adesso
 

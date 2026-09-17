@@ -59,8 +59,10 @@ Le scritture reali restano bloccate in assenza di una recovery qualificata.
 Gli hash delle immagini V6 e i risultati della run sopra non cambiano.
 
 La gestione dati durante il trasporto è definita: userdata e metadata intatti,
-nessun wipe e nessun riavvio automatico. Per il primo avvio è proposta una
-configurazione pulita; consenso al reset e procedura effettiva restano aperti.
+nessun wipe e nessun riavvio automatico. Il 17/09/2026 l'utente ha autorizzato
+l'installazione pulita e la cancellazione dei dati dell'orologio per il primo
+test controllato. Il reset non è stato eseguito; la procedura effettiva attende
+l'integrazione con la recovery collaudata.
 
 ## Ciò che rimane aperto
 
@@ -69,9 +71,18 @@ stati provati da questa build. Il preflight della recovery è in sola lettura.
 Il percorso di scrittura/streaming deve essere integrato con la recovery
 collaudata e deve gestire interruzioni e verifica in lettura.
 
-Non è stata decisa o verificata la migrazione di userdata; nessun wipe è
-autorizzato. Primo avvio, companion/pairing, Wi-Fi e Bluetooth, display/touch,
+La strategia userdata è l'installazione pulita autorizzata il 17/09/2026;
+nessun wipe è stato eseguito. La migrazione in-place non viene perseguita. Primo avvio, companion/pairing, Wi-Fi e Bluetooth, display/touch,
 sensori, ricarica, sospensione e persistenza ADB/root restano **UNTESTED**.
 AVB è nella modalità di primo avvio con bootloader sbloccato, non ribloccabile.
 
 I comandi disponibili e i requisiti sono in [v6/README.md](v6/README.md).
+
+## Requisito Gemini aggiornato il 17 settembre 2026
+
+Gemini nativo è obbligatorio per considerare completa la ROM. La V6 conserva
+AssistantWearPrebuilt in system/priv-app, con SHA256
+`3434942e08ba875f53783ed4fbd2a2510bdcbc988430177df20247d23eeefecd`,
+e la policy privilegiata del donor. La presenza è documentata nel report finale
+già prodotto; attivazione, invocazione e risposta di Gemini restano da provare
+sul dispositivo. I vecchi moduli/bind-mount Wear4 non soddisfano questo requisito.

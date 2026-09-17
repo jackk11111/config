@@ -93,8 +93,10 @@ Il [kit installer](../installer/README.md) aggiunge il trasferimento a blocchi,
 la rilettura, il journal e il ripristino, con 21 test locali su file simulati.
 Il backend ADB deve essere collaudato contro la recovery finale: le scritture
 restano bloccate, userdata/metadata sono esclusi e nessun riavvio è automatico.
-L'installazione pulita è una proposta ancora priva di consenso al reset;
-nessuna prova sull'orologio è stata eseguita da questa pipeline.
+L'installazione pulita e il reset dei dati dell'orologio per il primo test
+sono autorizzati dal 17/09/2026; la procedura di reset attende la recovery
+collaudata. Gemini nativo è un requisito obbligatorio di funzionamento.
+Nessuna prova sull'orologio è stata eseguita da questa pipeline.
 
 Gli artifact GitHub Actions hanno conservazione di 90 giorni. Prima della loro
 scadenza occorre archiviare Bootchain, Super, report e bridge firmato insieme.
@@ -109,3 +111,4 @@ La conservazione non equivale a una release permanente.
 
 I test di `test_preflight.py` usano piccoli file artificiali: provano il rifiuto
 di input corrotti e stati ambigui, non un flash o un rollback reale.
+
