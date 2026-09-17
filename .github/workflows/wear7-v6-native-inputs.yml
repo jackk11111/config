@@ -59,7 +59,7 @@ jobs:
           done
           mkdir -p "$W/apex"
           "$T/bin/apexd_host" --tool_path "$T" --apex_path "$W/apex" --system_path "$W/mnt/system/system" --system_ext_path "$W/mnt/system_ext" --product_path "$W/mnt/product" --vendor_path "$W/mnt/vendor" --odm_path "$W/mnt/vendor/odm" > "$OUT/APEX_EXTRACTION.log" 2>&1
-          python3 - "$W" "$OUT" <<'PY'
+          sudo python3 - "$W" "$OUT" <<'PY'
           import pathlib, sys, tarfile
           w, out = map(pathlib.Path, sys.argv[1:])
           for name in ('system', 'system_ext', 'product', 'vendor', 'apex'):
