@@ -1,0 +1,27 @@
+{
+  "format": 1,
+  "transport_userdata_action": "UNTOUCHED",
+  "transport_metadata_action": "UNTOUCHED",
+  "transport_recovery_action": "UNTOUCHED",
+  "automatic_reboot": false,
+  "in_place_migration_supported": false,
+  "recommended_first_bringup_strategy": "CLEAN_SETUP_AFTER_EXPLICIT_USER_CONSENT",
+  "user_reset_consent": "GIVEN",
+  "reset_implementation": "PENDING_VALIDATED_RECOVERY_FSTAB_AND_ENCRYPTION_HANDLING",
+  "userdata_backup_inventory": "NOT_VERIFIED",
+  "metadata_backup_inventory": "NOT_VERIFIED",
+  "rom_image_rollback_restores_user_data": false,
+  "erase_or_format_commands_in_installer": false,
+  "selected_first_bringup_strategy": "CLEAN_SETUP",
+  "user_reset_consent_date": "2026-09-17",
+  "user_reset_consent_scope": "Erase watch-local apps, settings and user data for the first controlled Wear7 test, after recovery/rollback validation and a recovery-compatible reset procedure are ready.",
+  "user_reset_execution": "NOT_EXECUTED",
+  "user_reported_backups": [
+    "APKs",
+    "modules",
+    "KernelSU",
+    "other customizations"
+  ],
+  "user_reported_watch_data_to_preserve": "NONE",
+  "gemini_requirement": "NATIVE_WEAR7_SYSTEM_ASSISTANT"
+}

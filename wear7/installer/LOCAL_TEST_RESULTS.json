@@ -1,0 +1,30 @@
+{
+  "verified_at": "2026-09-16",
+  "scope": "new_installer_local_file_simulation_only",
+  "command": "python -m unittest discover -s wear7/installer -p 'test_transport.py' -v",
+  "tests_passed": 21,
+  "tests_failed": 0,
+  "rom_rebuilds": 0,
+  "closed_rom_tests_rerun": false,
+  "physical_device_access": false,
+  "hardware_transport": "UNTESTED",
+  "real_partition_writes": false,
+  "source_sha256": {
+    "transport.py": "d50e30eb94a70f2f95fae64b349ead4864e4b600dfd25b502cdc123fc1a329b3",
+    "wear7_installer.py": "cd707b39f81617160a057fadae9121838eda3c06d779e38c7a7a92a7cbe71d17",
+    "test_transport.py": "3911c5d81392fa62eb6963f1602357204bf637d8f73dd9b09acc521ef59af3b4",
+    "candidate-v6.json": "db446370bf906eaa8cda96e3055cd42af02ec386b2bfede5616c1a8b6316703d",
+    "validated-recoveries.json": "f2a369c28f6b804da630c0cce63def65a284831444364e38e9def44cf0700d5b",
+    "userdata-policy.json": "ba479ea0fcba5d033ad670ca7390fc7f15eb3adb95768c1ab10f42862e4715e9"
+  },
+  "user_reset_consent_at_test_time": "NOT_GIVEN",
+  "record_scope": "Historical local simulation result from 2026-09-16; source_sha256 identifies exactly the files tested then.",
+  "subsequent_status_update": {
+    "date": "2026-09-17",
+    "user_reset_consent_now": "GIVEN",
+    "gemini_native_required": true,
+    "plan_status_reads_current_userdata_policy": true,
+    "transport_or_write_gates_changed": false,
+    "tests_rerun": false
+  }
+}

@@ -51,3 +51,18 @@ FIRST_WEAR7_FLASH=FORBIDDEN until RECOVERY_ROLLBACK_READY_FOR_FIRST_WEAR7_FLASH=
 
 ROM completion policy:
 A build that boots but cannot pair to a phone or cannot provide persistent Wi-Fi ADB/root access is NOT considered complete.
+
+GEMINI NATIVE — REQUIREMENT ADDED 2026-09-17
+The following are required outcomes, not completed runtime checks.
+Observed runtime status remains UNTESTED.
+- GEMINI_NATIVE_SYSTEM_ASSISTANT=PASS
+- GEMINI_NATIVE_INVOCATION_AND_RESPONSE=PASS
+- GEMINI_WORKS_AFTER_REBOOT=PASS
+- GEMINI_WITHOUT_LEGACY_WEAR4_MODULE_OR_BIND_MOUNT=PASS
+The built-in donor assistant (or its official system-app update) must provide
+Gemini through the normal Wear OS assistant path. A standalone APK shortcut or
+the previous Wear4 injection module is not an accepted substitute.
+The final V6 filesystem report confirms the native donor app/permission files;
+it does not yet establish runtime activation or server-side availability.
+A ROM without working native Gemini does not satisfy the user's final goal.
+This acceptance requirement does not assert that first boot already passed.

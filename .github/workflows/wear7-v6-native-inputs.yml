@@ -1,0 +1,128 @@
+name: Wear7 V6 native inputs for dependency repair (no build)
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-v6-offline-validation]
+    paths: ['.github/workflows/wear7-v6-native-inputs.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  inputs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Prepare existing binary inspection tools
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs android-sdk-libsparse-utils erofs-utils curl unzip qemu-user-static >/dev/null
+          mkdir -p "$RUNNER_TEMP/native/input" "$RUNNER_TEMP/native/parts" "$RUNNER_TEMP/native/tools" wear7-native-inputs
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V6-Super
+          path: '${{ runner.temp }}/native/input'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35146642220'
+      - name: Export exact candidate and stock native binaries
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/native"
+          OUT="$GITHUB_WORKSPACE/wear7-native-inputs"
+          curl -fL --retry 2 -sS -o "$W/tools/otatools.zip" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo 'f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  '"$W/tools/otatools.zip" | sha256sum -c -
+          python3 - "$W/tools/otatools.zip" "$W/tools/extracted" <<'PY'
+          import pathlib, sys, zipfile
+          out = pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/', 'lib/', 'lib64/')):
+                      if not (out / n).resolve().is_relative_to(out):
+                          raise ValueError('unsafe tool path')
+                      z.extract(n, out)
+          PY
+          rm "$W/tools/otatools.zip"
+          T="$W/tools/extracted"
+          chmod +x "$T/bin/"*
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          echo '91b73fc444e51d68db7bfaca77615f8be9103407cd92f3e67a74500a0a22a30e  '"$W/input/super.img" | sha256sum -c -
+          simg2img "$W/input/super.img" "$W/super.raw"
+          lpunpack "$W/super.raw" "$W/parts"
+          rm "$W/super.raw" "$W/input/super.img"
+          cleanup() { for p in system system_ext product vendor stock-system stock-system_ext; do sudo umount "$W/mnt/$p" 2>/dev/null || true; done; }
+          trap cleanup EXIT
+          for p in system system_ext product vendor; do
+            mkdir -p "$W/mnt/$p"
+            sudo mount -o loop,ro,noload "$W/parts/$p.img" "$W/mnt/$p"
+          done
+          mkdir -p "$W/apex"
+          "$T/bin/apexd_host" --tool_path "$T" --apex_path "$W/apex" --system_path "$W/mnt/system/system" --system_ext_path "$W/mnt/system_ext" --product_path "$W/mnt/product" --vendor_path "$W/mnt/vendor" --odm_path "$W/mnt/vendor/odm" > "$OUT/APEX_EXTRACTION.log" 2>&1
+          sudo python3 - "$W" "$OUT" <<'PY'
+          import pathlib, sys, tarfile
+          w, out = map(pathlib.Path, sys.argv[1:])
+          for name in ('system', 'system_ext', 'product', 'vendor', 'apex'):
+              root = w / 'apex' if name == 'apex' else w / 'mnt' / name
+              if name == 'system':
+                  root /= 'system'
+              with tarfile.open(out / (name + '-native.tar.gz'), 'w:gz') as archive:
+                  if name == 'apex':
+                      for module in root.iterdir():
+                          if module.is_symlink() or not module.is_dir():
+                              archive.add(module, arcname='apex/' + module.name, recursive=False)
+                              continue
+                          for child in module.iterdir():
+                              if child.name in ('bin', 'lib', 'lib64', 'etc', 'apex_manifest.pb', 'apex_manifest.json'):
+                                  archive.add(child, arcname='apex/' + module.name + '/' + child.name)
+                  else:
+                      for child in root.iterdir():
+                          if child.name in ('bin', 'lib', 'lib64', 'etc', 'build.prop'):
+                              archive.add(child, arcname=name + '/' + child.name)
+                      if name == 'system':
+                          for child in root.parent.iterdir():
+                              if child.is_symlink() or (child.is_file() and child.name.endswith('.rc')):
+                                  archive.add(child, arcname=child.name, recursive=False)
+          PY
+          for p in system system_ext product vendor; do sudo umount "$W/mnt/$p"; done
+          rm "$W/parts/"*.img
+          curl -fL --retry 2 -sS -o "$W/stock.zip" https://android.googleapis.com/packages/data/ota-api/package/2269bd24a774cae37adc720d3d97bd1b76846e2b.zip
+          echo 'ffa61d822a5c667c230ce2ba9426ce4eb282adcaa0891279ef002f65ca15a08d  '"$W/stock.zip" | sha256sum -c -
+          for p in system system_ext; do
+            python3 wear7/scripts/reconstruct_block_ota.py "$W/stock.zip" "$p" "$W/$p.stock.img"
+            mkdir -p "$W/mnt/stock-$p"
+            sudo mount -o loop,ro,noload "$W/$p.stock.img" "$W/mnt/stock-$p"
+          done
+          sudo tar --xattrs --xattrs-include='security.selinux' -czf "$OUT/stock-system-native.tar.gz" -C "$W/mnt/stock-system" system/lib system/etc
+          sudo tar --xattrs --xattrs-include='security.selinux' -czf "$OUT/stock-system_ext-native.tar.gz" -C "$W/mnt/stock-system_ext" lib etc
+          cp /usr/bin/qemu-arm-static "$OUT/"
+          tar -czf "$OUT/host-tools.tar.gz" -C "$T" bin/host_init_verifier lib64
+          sudo chown -R "$(id -u):$(id -g)" "$OUT"
+          sha256sum "$OUT/"* > "$OUT/SHA256SUMS.txt"
+          du -h "$OUT/"*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V6-Native-Platform
+          path: |
+            wear7-native-inputs/system-native.tar.gz
+            wear7-native-inputs/system_ext-native.tar.gz
+            wear7-native-inputs/product-native.tar.gz
+            wear7-native-inputs/vendor-native.tar.gz
+          retention-days: 90
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V6-Native-APEX
+          path: wear7-native-inputs/apex-native.tar.gz
+          retention-days: 90
+          compression-level: 0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-Stock379-Native-Repair-Sources
+          path: |
+            wear7-native-inputs/stock-*-native.tar.gz
+            wear7-native-inputs/host-tools.tar.gz
+            wear7-native-inputs/qemu-arm-static
+            wear7-native-inputs/SHA256SUMS.txt
+          retention-days: 90
+          compression-level: 0

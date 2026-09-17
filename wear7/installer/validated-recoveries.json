@@ -1,0 +1,6 @@
+{
+  "format": 1,
+  "profiles": {},
+  "status": "NO_PHYSICALLY_VALIDATED_RECOVERY_TRANSPORT",
+  "note": "Populate only from actual recovery/transport/rollback evidence. No command-line override exists. Local file simulations cannot qualify a recovery."
+}

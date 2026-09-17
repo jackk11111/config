@@ -1,0 +1,111 @@
+name: Wear7 V7 final offline readiness
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-v6-offline-validation]
+    paths:
+      - '.github/workflows/wear7-v7-final-readiness.yml'
+      - 'wear7/v7/final_readiness.py'
+      - 'wear7/installer/**'
+      - 'wear7/manifests/GEMINI_NATIVE_REQUIREMENT_2026-09-17.json'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  final-offline-readiness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare workspace
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/wear7-v7-final"
+          mkdir -p "$RUNNER_TEMP/wear7-v7-final/package" "$RUNNER_TEMP/wear7-v7-final/analysis"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V7-Bootchain
+          path: '${{ runner.temp }}/wear7-v7-final/package'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35198609607'
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V7-Super
+          path: '${{ runner.temp }}/wear7-v7-final/package'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35198609607'
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V7-Offline-Analysis
+          path: '${{ runner.temp }}/wear7-v7-final/analysis'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35198609607'
+
+      - name: Verify exact V7 artifact checksums and frozen manifest
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/wear7-v7-final/package"
+          sha256sum -c SHA256SUMS.txt
+          python3 - "$GITHUB_WORKSPACE/wear7/installer/candidate-v7.json" CANDIDATE.json <<'PY'
+          import json, pathlib, sys
+          frozen=json.loads(pathlib.Path(sys.argv[1]).read_text())
+          artifact=json.loads(pathlib.Path(sys.argv[2]).read_text())
+          if frozen != artifact:
+              raise SystemExit('frozen V7 installer manifest differs from artifact')
+          if artifact.get('candidate') != 'Wear7-V7':
+              raise SystemExit('wrong candidate identity')
+          print('V7_FROZEN_MANIFEST=PASS')
+          PY
+
+      - name: Re-run installer transport regression tests
+        run: |
+          set -Eeuo pipefail
+          cd wear7/installer
+          python3 -m unittest -v test_transport.py
+
+      - name: Exercise installer plan against the real V7 images
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$RUNNER_TEMP/wear7-v7-final/session"
+          python3 wear7/installer/wear7_installer_v7.py plan \
+            --package "$RUNNER_TEMP/wear7-v7-final/package" \
+            --session "$RUNNER_TEMP/wear7-v7-final/session"
+          python3 - "$RUNNER_TEMP/wear7-v7-final/session/PLAN.json" <<'PY'
+          import json, pathlib, sys
+          p=json.loads(pathlib.Path(sys.argv[1]).read_text())
+          assert p['candidate']=='Wear7-V7'
+          assert p['hardware_install_validated'] is False
+          assert p['automatic_reboot'] is False
+          assert p['userdata_action']=='UNTOUCHED'
+          assert p['metadata_action']=='UNTOUCHED'
+          print('V7_INSTALLER_REAL_PACKAGE_PLAN=PASS')
+          PY
+
+      - name: Gate final software-side readiness
+        run: |
+          set -Eeuo pipefail
+          python3 wear7/v7/final_readiness.py \
+            --package "$RUNNER_TEMP/wear7-v7-final/package" \
+            --analysis "$RUNNER_TEMP/wear7-v7-final/analysis" \
+            --reference wear7/installer/candidate-v7.json \
+            --output "$RUNNER_TEMP/wear7-v7-final/FINAL_READINESS.json"
+
+      - name: Preserve final readiness evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V7-Final-Offline-Readiness
+          path: |
+            ${{ runner.temp }}/wear7-v7-final/FINAL_READINESS.json
+            ${{ runner.temp }}/wear7-v7-final/session/PLAN.json
+          if-no-files-found: error
+          retention-days: 90

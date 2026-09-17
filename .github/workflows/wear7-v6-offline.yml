@@ -1,0 +1,87 @@
+name: Wear7 V6 final-image offline validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-v6-offline-validation]
+    paths:
+      - '.github/workflows/wear7-v6-offline.yml'
+      - 'wear7/v6/*.py'
+      - 'wear7/v6/*.sh'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Verify package rejection tests
+        run: python3 -m unittest discover -s wear7/v6 -p 'test_*.py'
+      - name: Prepare isolated image analysis
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs android-sdk-libsparse-utils erofs-utils unzip curl python3-yaml secilc qemu-user-static apksigner > /dev/null
+          mkdir -p "$RUNNER_TEMP/v6/input" "$RUNNER_TEMP/v6/tools" "$RUNNER_TEMP/v6/parts" "$RUNNER_TEMP/v6/mnt" wear7-v6-report
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-Final-V5B-Bootchain
+          path: '${{ runner.temp }}/v6/input'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35094447396'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-Final-V5B-Super
+          path: '${{ runner.temp }}/v6/input'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35094447396'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-Final-V5B-Reports
+          path: '${{ runner.temp }}/v6/prior-report'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          repository: '${{ github.repository }}'
+          run-id: '35094447396'
+      - name: Verify inputs and inspect the exact final-image integration
+        run: sudo env RUNNER_TEMP="$RUNNER_TEMP" GITHUB_WORKSPACE="$GITHUB_WORKSPACE" GITHUB_SHA="$GITHUB_SHA" bash wear7/v6/inspect-images.sh
+      - name: Preserve analysis
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V6-Offline-Analysis
+          path: wear7-v6-report/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Preserve gated candidate bootchain
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V6-Bootchain
+          path: |
+            wear7-v6-candidate/boot.img
+            wear7-v6-candidate/init_boot.img
+            wear7-v6-candidate/vendor_boot.img
+            wear7-v6-candidate/dtbo.img
+            wear7-v6-candidate/vbmeta.img
+            wear7-v6-candidate/vbmeta_system.img
+            wear7-v6-candidate/CANDIDATE.json
+            wear7-v6-candidate/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 90
+      - name: Preserve gated candidate super
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V6-Super
+          path: wear7-v6-candidate/super.img
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
