@@ -1,0 +1,320 @@
+name: Wear7 V9 direct Android17 first-stage hybrid
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wear7-rom-staging]
+    paths:
+      - '.github/workflows/wear7-v9-hybrid-boot.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PIXEL_FILE: solios-cp2a.260603.001.s1-factory-d203665c.zip
+  PIXEL_SHA256: d203665c90bc06bf175dbb3cbd7fcc9d212c056a030f9c51b541129e8651fb7d
+  BUILD_TOOLS_SHA: 010d8a83d84ced4beef7779453766350db8c08cd
+  V7_RUN: '35198609607'
+  RESCUE_RUN: '35357655482'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: wear7-rom-staging
+          fetch-depth: 1
+
+      - name: Install host tools
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq curl unzip zip cpio qemu-user-static file >/dev/null
+          mkdir -p "$RUNNER_TEMP/v9"/{v7,rescue,pixel,ticvb,pixvb,ticrd,pixrd,merged,tools} Wear7-V9-DIRECT
+
+      - name: Download frozen V7 bootchain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V7-Bootchain
+          path: ${{ runner.temp }}/v9/v7
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.V7_RUN }}
+
+      - name: Download proven TicWatch 5.15.220 kernel and magiskboot
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: TicWatch-ROOT-RESCUE-5.15.220-SHELL-GRANT
+          path: ${{ runner.temp }}/v9/rescue
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.RESCUE_RUN }}
+
+      - name: Pin avbtool
+        run: |
+          set -Eeuo pipefail
+          git clone --filter=blob:none --no-checkout https://android.googlesource.com/kernel/prebuilts/build-tools "$RUNNER_TEMP/v9/build-tools"
+          git -C "$RUNNER_TEMP/v9/build-tools" fetch --depth=1 origin "$BUILD_TOOLS_SHA"
+          git -C "$RUNNER_TEMP/v9/build-tools" checkout --detach FETCH_HEAD
+          B="$RUNNER_TEMP/v9/build-tools/linux-x86/bin"
+          test -x "$B/avbtool"
+          echo "AVBTOOL=$B/avbtool" >> "$GITHUB_ENV"
+
+      - name: Download exact Pixel Watch 3 Android17 factory
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/v9/pixel"
+          curl -fL --retry 3 --retry-delay 2 -o "$PIXEL_FILE" "https://dl.google.com/dl/android/aosp/$PIXEL_FILE"
+          echo "$PIXEL_SHA256  $PIXEL_FILE" | sha256sum -c -
+          nested=$(unzip -Z1 "$PIXEL_FILE" | grep -E '(^|/)image-[^/]+\.zip$' | head -n1)
+          test -n "$nested"
+          unzip -p "$PIXEL_FILE" "$nested" > inner.zip
+          unzip -p inner.zip init_boot.img > init_boot.pixel.img
+          unzip -p inner.zip vendor_boot.img > vendor_boot.pixel.img
+          test -s init_boot.pixel.img
+          test -s vendor_boot.pixel.img
+
+      - name: Build V8 proven-kernel boot deterministically
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v9"
+          V7="$W/v7"
+          K=$(find "$W/rescue" -maxdepth 2 -type f -name Image -print | head -n1)
+          test -n "$K"
+          test "$(stat -c %s "$K")" = 42842624
+          cp "$V7/boot.img" "$W/boot.v8.img"
+          "$AVBTOOL" erase_footer --image "$W/boot.v8.img"
+          python3 - "$W/boot.v8.img" "$K" <<'PY'
+import pathlib,struct,sys
+p=pathlib.Path(sys.argv[1]); k=pathlib.Path(sys.argv[2]).read_bytes()
+b=bytearray(p.read_bytes())
+assert b[:8]==b'ANDROID!'
+assert struct.unpack_from('<I',b,8)[0]==42842624
+assert struct.unpack_from('<I',b,12)[0]==0
+assert struct.unpack_from('<I',b,20)[0]==1584
+assert struct.unpack_from('<I',b,40)[0]==4
+b[4096:4096+len(k)]=k
+p.write_bytes(b)
+PY
+          "$AVBTOOL" add_hash_footer --image "$W/boot.v8.img" --partition_name boot --partition_size 100663296 --algorithm NONE --salt 8078f56b41ac2e6ebea1f428d5b574f02f57d480d916879b2b28628caed0e616
+          test "$(stat -c %s "$W/boot.v8.img")" = 100663296
+
+      - name: Normalize Pixel Android17 init_boot to Dace partition
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v9"
+          cp "$W/pixel/init_boot.pixel.img" "$W/init_boot.v9.img"
+          "$AVBTOOL" erase_footer --image "$W/init_boot.v9.img"
+          "$AVBTOOL" add_hash_footer --image "$W/init_boot.v9.img" --partition_name init_boot --partition_size 8388608 --algorithm NONE --salt 4f1ecfc7d66d5e594345ff4cf83e858bb9a6bf98115562734dc4d5fa2d5e15b0
+          test "$(stat -c %s "$W/init_boot.v9.img")" = 8388608
+
+      - name: Build Pixel17 plus Dace hybrid vendor_boot
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v9"
+          MB=$(find "$W/rescue" -type f -name magiskboot -print | head -n1)
+          test -n "$MB"
+          chmod +x "$MB"
+          runmb() { qemu-aarch64-static "$MB" "$@"; }
+
+          cd "$W/ticvb"
+          set +e; runmb unpack -h "$W/v7/vendor_boot.img"; rc=$?; set -e
+          test "$rc" = 3
+          TIC_CPIO=$(find "$W/ticvb" -type f -name '*.cpio' -print | head -n1)
+          test -n "$TIC_CPIO"
+
+          cd "$W/pixvb"
+          set +e; runmb unpack -h "$W/pixel/vendor_boot.pixel.img"; rc=$?; set -e
+          test "$rc" = 3
+          PIX_CPIO=$(find "$W/pixvb" -type f -name '*.cpio' -print | head -n1)
+          test -n "$PIX_CPIO"
+
+          cd "$W/ticrd"; runmb cpio "$TIC_CPIO" extract
+          cd "$W/pixrd"; runmb cpio "$PIX_CPIO" extract
+
+          # Android17/Pixel ramdisk is the generic base. Strip donor-specific
+          # hardware pieces, then overlay Dace/Monaco hardware contract.
+          sudo cp -a "$W/pixrd/." "$W/merged/"
+          sudo find "$W/merged" -depth \( -iname '*solios*' -o -iname '*pixel*' \) -exec rm -rf {} + 2>/dev/null || true
+
+          # Hardware module set must be exactly TicWatch.
+          sudo rm -rf "$W/merged/lib/modules"
+          if test -d "$W/ticrd/lib/modules"; then
+            sudo mkdir -p "$W/merged/lib"
+            sudo cp -a "$W/ticrd/lib/modules" "$W/merged/lib/"
+          fi
+
+          # Preserve all Dace first-stage files while retaining any new generic
+          # Android17 files absent from the TicWatch ramdisk.
+          if test -d "$W/ticrd/first_stage_ramdisk"; then
+            sudo mkdir -p "$W/merged/first_stage_ramdisk"
+            sudo cp -a "$W/ticrd/first_stage_ramdisk/." "$W/merged/first_stage_ramdisk/"
+          fi
+
+          # Keep generic Android17 init fragments but overwrite/add the complete
+          # TicWatch hardware init contract.
+          if test -d "$W/ticrd/etc/init"; then
+            sudo mkdir -p "$W/merged/etc/init"
+            sudo cp -a "$W/ticrd/etc/init/." "$W/merged/etc/init/"
+          fi
+
+          # Root-level Dace hardware descriptors.
+          cd "$W/ticrd"
+          while IFS= read -r -d '' f; do
+            rel=${f#./}
+            case "$rel" in
+              *fstab*|*dace*|*monaco*|*ueventd*|*modules.load*|*modules.blocklist*)
+                sudo mkdir -p "$W/merged/$(dirname "$rel")"
+                sudo cp -a "$f" "$W/merged/$rel"
+                ;;
+            esac
+          done < <(find . -type f -print0)
+
+          # Rebuild the single PLATFORM cpio expected by Dace vendor_boot.
+          NEWCPIO="$W/vendor_ramdisk.v9.cpio"
+          cd "$W/merged"
+          sudo find . -print0 | sudo cpio --null -o -H newc --owner=0:0 > "$NEWCPIO" 2>/dev/null
+          sudo chown "$(id -u):$(id -g)" "$NEWCPIO"
+
+          cp "$NEWCPIO" "$TIC_CPIO"
+          cd "$W/ticvb"
+          set +e; runmb repack "$W/v7/vendor_boot.img" "$W/vendor_boot.v9.raw.img"; rc=$?; set -e
+          test "$rc" = 0
+          test -s "$W/vendor_boot.v9.raw.img"
+
+          cp "$W/vendor_boot.v9.raw.img" "$W/vendor_boot.v9.img"
+          "$AVBTOOL" erase_footer --image "$W/vendor_boot.v9.img" || true
+          "$AVBTOOL" add_hash_footer --image "$W/vendor_boot.v9.img" --partition_name vendor_boot --partition_size 100663296 --algorithm NONE --salt 85cf673acfd8846b8d91930276b3b3f26c5fc94e9fd9ee8df67581308cac574b
+          test "$(stat -c %s "$W/vendor_boot.v9.img")" = 100663296
+
+          {
+            echo '=== TIC VENDOR RAMDISK ==='
+            find "$W/ticrd" -maxdepth 3 -type f | sed "s#$W/ticrd/##" | sort
+            echo '=== PIXEL VENDOR RAMDISK ==='
+            find "$W/pixrd" -maxdepth 3 -type f | sed "s#$W/pixrd/##" | sort
+            echo '=== MERGED V9 RAMDISK ==='
+            find "$W/merged" -maxdepth 3 -type f | sed "s#$W/merged/##" | sort
+          } > "$GITHUB_WORKSPACE/Wear7-V9-DIRECT/VENDOR_RAMDISK_MERGE.txt"
+
+      - name: Patch root vbmeta descriptors for V9 images
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v9"
+          python3 - "$W/v7/vbmeta.img" "$W/boot.v8.img" "$W/init_boot.v9.img" "$W/vendor_boot.v9.img" "$W/vbmeta.v9.img" <<'PY'
+import pathlib,struct,sys
+
+def avb_region(img):
+    b=pathlib.Path(img).read_bytes()
+    if b[:4]==b'AVB0':
+        return b,0,len(b)
+    if b[-64:-60]!=b'AVBf':
+        raise SystemExit(f'no AVB footer: {img}')
+    _,maj,minv,orig,off,size,_=struct.unpack('>4sIIQQQ28s',b[-64:])
+    return b,off,size
+
+def descriptors(img):
+    b,off,size=avb_region(img)
+    h=b[off:off+256]
+    if h[:4]!=b'AVB0': raise SystemExit('bad AVB0')
+    auth=struct.unpack_from('>Q',h,12)[0]
+    aux=struct.unpack_from('>Q',h,20)[0]
+    doff=struct.unpack_from('>Q',h,96)[0]
+    dsize=struct.unpack_from('>Q',h,104)[0]
+    base=off+256+auth+doff
+    end=base+dsize
+    out={}
+    p=base
+    while p<end:
+        tag,n=struct.unpack_from('>QQ',b,p)
+        block=b[p:p+16+n]
+        if tag==2:
+            pnl=struct.unpack_from('>I',block,56)[0]
+            name=block[132:132+pnl].decode(errors='replace')
+            out[name]=block
+        p+=16+n
+    return out
+
+root=bytearray(pathlib.Path(sys.argv[1]).read_bytes())
+new={}
+for p in sys.argv[2:5]:
+    new.update(descriptors(p))
+
+# Root vbmeta has no footer; descriptors live in auxiliary block.
+h=root[:256]
+auth=struct.unpack_from('>Q',h,12)[0]
+doff=struct.unpack_from('>Q',h,96)[0]
+dsize=struct.unpack_from('>Q',h,104)[0]
+base=256+auth+doff
+end=base+dsize
+p=base
+seen=set()
+while p<end:
+    tag,n=struct.unpack_from('>QQ',root,p)
+    total=16+n
+    if tag==2:
+        block=bytes(root[p:p+total])
+        pnl=struct.unpack_from('>I',block,56)[0]
+        name=block[132:132+pnl].decode(errors='replace')
+        if name in new:
+            if len(new[name])!=total:
+                raise SystemExit(f'descriptor size changed for {name}')
+            root[p:p+total]=new[name]
+            seen.add(name)
+    p+=total
+need={'boot','init_boot','vendor_boot'}
+if seen!=need:
+    raise SystemExit(f'descriptors patched {seen}, expected {need}')
+pathlib.Path(sys.argv[5]).write_bytes(root)
+print('VBMETA_PATCHED',','.join(sorted(seen)))
+PY
+          test "$(stat -c %s "$W/vbmeta.v9.img")" = 8192
+          "$AVBTOOL" info_image --image "$W/vbmeta.v9.img" > Wear7-V9-DIRECT/VBMETA_V9.txt
+          grep -q 'Flags:                    3' Wear7-V9-DIRECT/VBMETA_V9.txt
+
+      - name: Assemble direct V9 flash package
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v9"; O="$GITHUB_WORKSPACE/Wear7-V9-DIRECT"
+          cp "$W/boot.v8.img" "$O/boot.img"
+          cp "$W/init_boot.v9.img" "$O/init_boot.img"
+          cp "$W/vendor_boot.v9.img" "$O/vendor_boot.img"
+          cp "$W/v7/dtbo.img" "$O/dtbo.img"
+          cp "$W/v7/vbmeta_system.img" "$O/vbmeta_system.img"
+          cp "$W/vbmeta.v9.img" "$O/vbmeta.img"
+          cat > "$O/README.txt" <<'EOF'
+Wear7 V9 DIRECT
+- super V7 already installed: DO NOT FLASH
+- boot: proven TicWatch 5.15.220 kernel in V7 Dace layout
+- init_boot: Pixel Watch 3 Android17 first-stage normalized to Dace 8 MiB
+- vendor_boot: Pixel Android17 generic ramdisk + Dace fstab/modules/init/DTB contract
+- dtbo and vbmeta_system: canonical V7
+- vbmeta: V7 flags=3 with boot/init_boot/vendor_boot descriptors updated
+EOF
+          (cd "$O" && sha256sum boot.img init_boot.img vendor_boot.img dtbo.img vbmeta_system.img vbmeta.img > SHA256SUMS.txt)
+          cat > "$O/FLASH_V9_NOW.bat" <<'EOF'
+@echo off
+setlocal
+fastboot devices
+fastboot flash vendor_boot vendor_boot.img || goto :fail
+fastboot flash init_boot init_boot.img || goto :fail
+fastboot flash dtbo dtbo.img || goto :fail
+fastboot flash boot boot.img || goto :fail
+fastboot flash vbmeta_system vbmeta_system.img || goto :fail
+fastboot flash vbmeta vbmeta.img || goto :fail
+fastboot reboot
+exit /b 0
+:fail
+echo FLASH FAILED - NOT REBOOTING
+exit /b 1
+EOF
+          sha256sum "$O"/* > "$O/PACKAGE_SHA256.txt"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-Wear7-V9-DIRECT
+          path: Wear7-V9-DIRECT/
+          retention-days: 30
+          compression-level: 0
