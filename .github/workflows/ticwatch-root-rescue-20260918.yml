@@ -1,0 +1,281 @@
+name: TicWatch ROOT RESCUE - 5.15.220 Shell Grant
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-root-rescue-20260918]
+    paths:
+      - '.github/workflows/ticwatch-root-rescue-20260918.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ticwatch-root-rescue-20260918
+  cancel-in-progress: true
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  LLVM_VERSION: '20.1.0'
+  LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
+  CHECKPOINT_RUN_ID: '34757911119'
+  CHECKPOINT_NAME: 'TicWatch-5.15.220-precompile-checkpoint'
+  PREVIOUS_ANYKERNEL: 'TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter.zip'
+  EXPECTED_UTS_PREFIX: '5.15.220-Xinran_StarBai-Test'
+  KSU_NEXT_MANAGER_SIZE: '0x3c2'
+  KSU_NEXT_MANAGER_HASH: '3bc9938c38106bcf618bbe1d37ad4adde8a49c659e2860709bbfc341f7e749f2'
+  KMI_CRC_MAP_REL: '.github/data/ticwatch-stock379-kmi-crc-overrides-337.tsv'
+  BASE_KERNEL_SHA: '3929c55fbc7559af6df290d2c0f66dc551af161a'
+  AOSP_ASB_TIP: '56cdb4d13a91efb666d571084ab82de351cc4900'
+  UPLIFT_ORCHESTRATOR_SHA: 'ba33c66c36981cd024e48326b459684605c667a9'
+
+jobs:
+  final:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-max-lts-220
+          fetch-depth: 1
+
+      - name: Install dependencies and LLVM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y --no-install-recommends build-essential flex bison bc python3 python-is-python3 libssl-dev libelf-dev dwarves make cmake zip unzip curl wget gnupg gawk gcc-multilib g++-multilib ccache rsync file zstd binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf >/dev/null
+          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
+          tar -xJf "$LLVM_ARCHIVE"
+          mv "LLVM-${LLVM_VERSION}-Linux-X64" "$GITHUB_WORKSPACE/aosp-clang"
+          rm -f "$LLVM_ARCHIVE"
+          echo "AOSP_CLANG_PATH=$GITHUB_WORKSPACE/aosp-clang" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/aosp-clang/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/aosp-clang/bin/clang" --version | tee llvm-version.txt
+          grep -Fq '20.1.0' llvm-version.txt
+
+      - name: Restore verified precompile checkpoint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir checkpoint
+          gh run download "$CHECKPOINT_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_NAME" --dir checkpoint
+          cp checkpoint/precompile-checkpoint.tar.zst .
+          cp checkpoint/precompile-checkpoint.sha256 .
+          sha256sum -c precompile-checkpoint.sha256
+          tar --zstd -xf precompile-checkpoint.tar.zst
+          test -d .ticwatch-preflight/common/.git
+          test -s .ticwatch-preflight/common/out/.config
+          test -s previous/audit/Module.symvers
+          test -s previous/"$PREVIOUS_ANYKERNEL"
+          test -s previous/wireless-flasher/flash.sh
+          cmp -s final.config .ticwatch-preflight/common/out/.config
+          grep -Fqx 'CONFIG_MODVERSIONS=y' final.config
+
+      - name: Verify stock379 KMI map against known-good 5.15.211
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          test -s "$MAP"
+          [ "$(grep -vc '^#' "$MAP")" -eq 337 ]
+          python3 - "$MAP" previous/audit/Module.symvers <<'PY'
+          import sys
+          mp,sp=sys.argv[1:]
+          exp={}
+          for l in open(mp):
+              if l.strip() and not l.startswith('#'):
+                  s,c=l.split()[:2]; exp[s]=c.lower()
+          old={f[1]:f[0].lower() for l in open(sp) if len((f:=l.split()))>=2}
+          bad=[(s,c,old.get(s)) for s,c in exp.items() if old.get(s)!=c]
+          print('KMI_MAP_SYMBOLS',len(exp))
+          if bad:
+              print(bad[:30]); raise SystemExit(2)
+          print('KMI_MAP_VS_211=PASS')
+          PY
+          sha256sum "$MAP" | tee kmi-crc-map.sha256
+
+      - name: Apply compile compatibility fixes
+        run: bash .github/scripts/ticwatch-5.15.220-compile-compat.sh .ticwatch-preflight/common
+
+      - name: Apply TicWatch KEXEC BT541 shutdown quirk
+        run: bash .github/scripts/ticwatch-kexec-zinitix-quirk.sh .ticwatch-preflight/common
+
+      - name: Install targeted genksyms CRC preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          F="$K/scripts/genksyms/genksyms.c"
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          anchor='void export_symbol(const char *name)\n{\n\tstruct symbol *sym;\n'
+          crc='\t\tcrc = expand_and_crc_sym(sym, 0xffffffff) ^ 0xffffffff;\n'
+          if s.count(anchor)!=1 or s.count(crc)!=1:
+              raise SystemExit('genksyms anchor mismatch')
+          helper='''static unsigned long ticwatch_kmi_crc_override(const char *name, unsigned long crc)\n{\n    const char *path = getenv("TICWATCH_KMI_CRC_MAP");\n    FILE *f;\n    char line[512];\n    char sym[256];\n    unsigned long expected;\n\n    if (!path || !*path)\n        return crc;\n    f = fopen(path, "r");\n    if (!f) {\n        perror(path);\n        exit(2);\n    }\n    while (fgets(line, sizeof(line), f)) {\n        if (line[0] == '#' || line[0] == '\\n')\n            continue;\n        if (sscanf(line, "%255s %lx", sym, &expected) == 2 && strcmp(sym, name) == 0) {\n            fclose(f);\n            return expected;\n        }\n    }\n    fclose(f);\n    return crc;\n}\n\n'''
+          s=s.replace(anchor,helper+anchor,1)
+          s=s.replace(crc,crc+'\t\tcrc = ticwatch_kmi_crc_override(name, crc);\n',1)
+          p.write_text(s)
+          PY
+          grep -Fq 'ticwatch_kmi_crc_override' "$F"
+          git -C "$K" diff -- scripts/genksyms/genksyms.c > genksyms-kmi-preserve.patch
+          test -s genksyms-kmi-preserve.patch
+          rm -f "$K/out/scripts/genksyms/genksyms" "$K/out/scripts/genksyms/"*.o 2>/dev/null || true
+
+      - name: Apply temporary ADB shell root rescue gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F="$GITHUB_WORKSPACE/.ticwatch-preflight/common/KernelSU-Next/kernel/supercall/perm.c"
+          test -s "$F"
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1])
+          s=p.read_text()
+          old='''bool allowed_for_su(void)
+{
+    return is_manager() || ksu_is_allow_uid_for_current(current_uid().val);
+}
+'''
+          new='''bool allowed_for_su(void)
+{
+    /* TEMPORARY TICWATCH RESCUE: allow only Android shell UID 2000
+     * to invoke KSU GRANT_ROOT. This Image is for one-shot recovery only. */
+    if (unlikely(current_uid().val == 2000))
+        return true;
+    return is_manager() || ksu_is_allow_uid_for_current(current_uid().val);
+}
+'''
+          if s.count(old) != 1:
+              raise SystemExit('allowed_for_su anchor changed; refusing blind rescue patch')
+          p.write_text(s.replace(old,new,1))
+          PY
+          grep -Fq 'current_uid().val == 2000' "$F"
+          git -C "$GITHUB_WORKSPACE/.ticwatch-preflight/common/KernelSU-Next" diff -- kernel/supercall/perm.c | tee "$GITHUB_WORKSPACE/root-rescue-shell-grant.patch"
+          test -s "$GITHUB_WORKSPACE/root-rescue-shell-grant.patch"
+
+      - name: Compile final kernel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          export ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH" LLVM=1 LLVM_IAS=1
+          export KCFLAGS='-Wno-error -Wno-deprecated-declarations'
+          export KBUILD_BUILD_VERSION=0 KBUILD_BUILD_USER='XinRan♡' KBUILD_BUILD_HOST='Bai'
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export TICWATCH_KMI_CRC_MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 KSU_NEXT_MANAGER_SIZE="$KSU_NEXT_MANAGER_SIZE" KSU_NEXT_MANAGER_HASH="$KSU_NEXT_MANAGER_HASH" 2>&1 | tee "$GITHUB_WORKSPACE/kernel-build.log"
+          test -s out/arch/arm64/boot/Image
+          test -s out/vmlinux
+          test -s out/System.map
+          test -s out/Module.symvers
+          nm out/vmlinux > "$RUNNER_TEMP/vmlinux.nm"
+          grep -Fq 'slatecom_nowarn_init' "$RUNNER_TEMP/vmlinux.nm"
+          cmp -s out/.config "$GITHUB_WORKSPACE/final.config"
+          cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"
+          cp out/System.map "$GITHUB_WORKSPACE/System.map"
+          cp out/Module.symvers "$GITHUB_WORKSPACE/Module.symvers"
+          make -s O=out ARCH=arm64 kernelrelease | tee "$GITHUB_WORKSPACE/kernelrelease.txt"
+          case "$(cat "$GITHUB_WORKSPACE/kernelrelease.txt")" in ${EXPECTED_UTS_PREFIX}*) ;; *) exit 3;; esac
+
+      - name: KMI and config hard gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          python3 - "$MAP" Module.symvers previous/audit/Module.symvers <<'PY' | tee kmi-crc-audit.txt
+          import sys
+          mp,newp,oldp=sys.argv[1:]
+          def read(p):
+              return {f[1]:f[0].lower() for l in open(p) if len((f:=l.split()))>=2}
+          exp={}
+          for l in open(mp):
+              if l.strip() and not l.startswith('#'):
+                  s,c=l.split()[:2]; exp[s]=c.lower()
+          new,old=read(newp),read(oldp)
+          missing=[s for s in exp if s not in new]
+          bad=[(s,exp[s],new.get(s)) for s in exp if new.get(s)!=exp[s]]
+          print('EXPECTED',len(exp),'MISSING',len(missing),'MISMATCH',len(bad))
+          if missing or bad:
+              print('MISSING_LIST',missing[:50]); print('BAD_LIST',bad[:50]); raise SystemExit(2)
+          print('STOCK379_KMI_TARGETED_GATE=PASS')
+          PY
+          for x in 'CONFIG_ARM64=y' 'CONFIG_COMPAT=y' 'CONFIG_ANDROID_BINDER_IPC=y' 'CONFIG_ANDROID_BINDERFS=y' 'CONFIG_MODVERSIONS=y' 'CONFIG_KEXEC=y'; do grep -Fqx "$x" final.config; done
+          grep -Fqx '# CONFIG_KEXEC_FILE is not set' final.config
+          awk 'NF < 4 {bad=1} END{exit bad}' Module.symvers
+
+      - name: Package final candidate safely
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p bundle/wireless-flasher bundle/audit bundle/docs anykernel
+          cp Image bundle/wireless-flasher/Image
+          cp previous/wireless-flasher/busybox previous/wireless-flasher/magiskboot previous/wireless-flasher/flash.sh bundle/wireless-flasher/
+          chmod 0755 bundle/wireless-flasher/*
+          SHA="$(sha256sum Image | awk '{print $1}')"
+          python3 - "$SHA" <<'PY'
+          from pathlib import Path
+          import re,sys
+          p=Path('bundle/wireless-flasher/flash.sh'); s=p.read_text(); sha=sys.argv[1]
+          s,n=re.subn(r'^EXPECTED_IMAGE_SHA="[0-9a-f]+"$',f'EXPECTED_IMAGE_SHA="{sha}"',s,count=1,flags=re.M)
+          if n!=1: raise SystemExit('image sha anchor')
+          s,n=re.subn(r'^EXPECTED_RELEASE_PREFIX="[^"]+"$','EXPECTED_RELEASE_PREFIX="5.15.211-Xinran_StarBai-Test"',s,count=1,flags=re.M)
+          if n!=1: raise SystemExit('release guard anchor')
+          p.write_text(s)
+          PY
+          sh -n bundle/wireless-flasher/flash.sh
+          grep -Fqx 'EXPECTED_RELEASE_PREFIX="5.15.211-Xinran_StarBai-Test"' bundle/wireless-flasher/flash.sh
+          (cd bundle/wireless-flasher && sha256sum Image busybox magiskboot flash.sh > SHA256SUMS && sha256sum -c SHA256SUMS)
+          unzip -q "previous/$PREVIOUS_ANYKERNEL" -d anykernel
+          cp Image anykernel/Image
+          (cd anykernel && zip -qr9 "$GITHUB_WORKSPACE/TicWatch-MAX-LTS-5.15.220-KMI-PRESERVED.zip" .)
+          cmp -s Image <(unzip -p TicWatch-MAX-LTS-5.15.220-KMI-PRESERVED.zip Image)
+          cp Image TicWatch-MAX-LTS-5.15.220-KMI-PRESERVED.zip bundle/
+          cp final.config System.map Module.symvers kernelrelease.txt kernel-build.log kmi-crc-audit.txt llvm-version.txt genksyms-kmi-preserve.patch kmi-crc-map.sha256 lts-merged-head.txt root-rescue-shell-grant.patch bundle/audit/
+          cp "$KMI_CRC_MAP_REL" bundle/audit/
+          cp .github/scripts/ticwatch-kexec-zinitix-quirk.sh bundle/audit/
+          cat > bundle/docs/KERNEL_FINAL_REPORT.txt <<EOF
+          DEVICE=TicWatch Pro 5 Enduro (dace)
+          KERNEL_RELEASE=$(cat kernelrelease.txt)
+          UPLIFT_SOURCE_HEAD=$(cat lts-merged-head.txt)
+          ORCHESTRATION_HEAD=$GITHUB_SHA
+          BASE_KERNEL_SHA=$BASE_KERNEL_SHA
+          ANDROID_SECURITY_COMMIT=$AOSP_ASB_TIP
+          UPLIFT_ORCHESTRATOR_SHA=$UPLIFT_ORCHESTRATOR_SHA
+          CONFIG_MODVERSIONS=y
+          STOCK379_REQUIRED_CHANGED_CRCS_PRESERVED=337
+          STOCK379_KMI_TARGETED_GATE=PASS
+          KEXEC_BT541_SHUTDOWN_QUIRK=ENABLED_ONLY_WHEN_KEXEC_IN_PROGRESS
+          FLASH_ALLOWED_BASELINE=5.15.211-Xinran_StarBai-Test
+          VENDOR_BOOT_IMG=STOCK_379_UNCHANGED
+          INIT_BOOT_IMG=STOCK_379_UNCHANGED
+          DTBO_IMG=STOCK_379_UNCHANGED
+          FLASH_PERFORMED=NO
+          ROOT_RESCUE_SHELL_UID2000_GRANT=ENABLED_TEMPORARY
+          RUNTIME_MODULE_VALIDATION=PENDING_CONTROLLED_BOOT
+          EOF
+          cat > bundle/PROVENANCE.txt <<EOF
+          IMAGE_SHA256=$SHA
+          KERNEL_RELEASE=$(cat kernelrelease.txt)
+          UPLIFT_SOURCE_HEAD=$(cat lts-merged-head.txt)
+          KMI_REFERENCE=KNOWN_GOOD_5.15.211_MATCHING_STOCK379
+          KEXEC_BT541_SHUTDOWN_QUIRK=ENABLED_ONLY_WHEN_KEXEC_IN_PROGRESS
+          FLASH_PERFORMED=NO
+          ROOT_RESCUE_SHELL_UID2000_GRANT=ENABLED_TEMPORARY
+          EOF
+          (cd bundle && sha256sum Image TicWatch-MAX-LTS-5.15.220-KMI-PRESERVED.zip PROVENANCE.txt audit/final.config audit/System.map audit/Module.symvers docs/KERNEL_FINAL_REPORT.txt > SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
+
+      - name: Upload final artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-ROOT-RESCUE-5.15.220-SHELL-GRANT
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 90
