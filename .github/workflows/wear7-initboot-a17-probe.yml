@@ -1,0 +1,53 @@
+name: Wear7 Android17 init_boot probe
+
+on:
+  push:
+    branches: [wear7-initboot-a17-probe]
+    paths:
+      - '.github/workflows/wear7-initboot-a17-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Extract exact solios Android17 init_boot
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FACTORY=solios-cp2a.260603.001.s1-factory-d203665c.zip
+          URL=https://dl.google.com/dl/android/aosp/$FACTORY
+          WANT=d203665c90bc06bf175dbb3cbd7fcc9d212c056a030f9c51b541129e8651fb7d
+          curl -fL --retry 3 --retry-delay 3 -o "$FACTORY" "$URL"
+          echo "$WANT  $FACTORY" | sha256sum -c -
+          nested=$(unzip -Z1 "$FACTORY" | grep -E '(^|/)image-solios-[^/]+\.zip$' | head -n1)
+          test -n "$nested"
+          unzip -p "$FACTORY" "$nested" > image-solios.zip
+          mkdir -p out
+          unzip -p image-solios.zip init_boot.img > out/init_boot_ANDROID17_SOLIOS.img
+          unzip -p image-solios.zip vbmeta.img > out/vbmeta_SOLIOS_REFERENCE.img
+          test -s out/init_boot_ANDROID17_SOLIOS.img
+          {
+            echo "DONOR=Pixel Watch 3 solios"
+            echo "BUILD=CP2A.260603.001.S1"
+            echo "ANDROID=17"
+            echo "FACTORY_SHA256=$WANT"
+            stat -c 'INIT_BOOT_BYTES=%s' out/init_boot_ANDROID17_SOLIOS.img
+            sha256sum out/init_boot_ANDROID17_SOLIOS.img
+            stat -c 'VBMETA_REF_BYTES=%s' out/vbmeta_SOLIOS_REFERENCE.img
+            sha256sum out/vbmeta_SOLIOS_REFERENCE.img
+            file out/init_boot_ANDROID17_SOLIOS.img
+          } | tee out/PROBE_REPORT.txt
+
+      - name: Upload probe
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-Android17-InitBoot-Probe
+          path: out/
+          retention-days: 7
+          compression-level: 0
