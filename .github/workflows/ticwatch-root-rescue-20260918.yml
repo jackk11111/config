@@ -136,25 +136,21 @@ jobs:
           python3 - "$F" <<'PY'
           from pathlib import Path
           import sys
-          p=Path(sys.argv[1])
-          s=p.read_text()
-          old='''bool allowed_for_su(void)
-{
-    return is_manager() || ksu_is_allow_uid_for_current(current_uid().val);
-}
-'''
-          new='''bool allowed_for_su(void)
-{
-    /* TEMPORARY TICWATCH RESCUE: allow only Android shell UID 2000
-     * to invoke KSU GRANT_ROOT. This Image is for one-shot recovery only. */
-    if (unlikely(current_uid().val == 2000))
-        return true;
-    return is_manager() || ksu_is_allow_uid_for_current(current_uid().val);
-}
-'''
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          old = "bool allowed_for_su(void)\n{\n    return is_manager() || ksu_is_allow_uid_for_current(current_uid().val);\n}\n"
+          new = (
+              "bool allowed_for_su(void)\n"
+              "{\n"
+              "    /* TEMPORARY TICWATCH RESCUE: allow only Android shell UID 2000 */\n"
+              "    if (unlikely(current_uid().val == 2000))\n"
+              "        return true;\n"
+              "    return is_manager() || ksu_is_allow_uid_for_current(current_uid().val);\n"
+              "}\n"
+          )
           if s.count(old) != 1:
-              raise SystemExit('allowed_for_su anchor changed; refusing blind rescue patch')
-          p.write_text(s.replace(old,new,1))
+              raise SystemExit("allowed_for_su anchor changed; refusing blind rescue patch")
+          p.write_text(s.replace(old, new, 1))
           PY
           grep -Fq 'current_uid().val == 2000' "$F"
           git -C "$GITHUB_WORKSPACE/.ticwatch-preflight/common/KernelSU-Next" diff -- kernel/supercall/perm.c | tee "$GITHUB_WORKSPACE/root-rescue-shell-grant.patch"
