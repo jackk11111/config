@@ -6,6 +6,11 @@ on:
     branches: [wear7-rom-staging]
     paths:
       - '.github/workflows/wear7-v9-hybrid-boot.yml'
+  pull_request:
+    branches: [wear7-rom-staging]
+    paths:
+      - 'wear7/TRIGGER_V9'
+      - '.github/workflows/wear7-v9-hybrid-boot.yml'
 
 permissions:
   contents: read
