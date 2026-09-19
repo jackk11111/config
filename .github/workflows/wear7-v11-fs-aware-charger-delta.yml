@@ -53,7 +53,7 @@ jobs:
           curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
           echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
           mkdir -p "$W/tools/extracted"
-          unzip -q "$ZIP" 'bin/*' 'lib64/*' 'lib/*' -d "$W/tools/extracted"
+          unzip -q "$ZIP" 'bin/*' 'lib64/*' -d "$W/tools/extracted"
           rm "$ZIP"
           chmod +x "$W/tools/extracted/bin/"*
           export PATH="$W/tools/extracted/bin:$PATH"
