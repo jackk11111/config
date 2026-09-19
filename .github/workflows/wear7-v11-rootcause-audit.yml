@@ -5,6 +5,8 @@ on:
     branches: [wear7-v11-rootcause-audit]
     paths:
       - '.github/workflows/wear7-v11-rootcause-audit.yml'
+  pull_request:
+    branches: [wear7-v6-offline-validation]
   workflow_dispatch:
 
 permissions:
