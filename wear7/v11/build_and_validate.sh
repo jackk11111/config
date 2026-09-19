@@ -135,6 +135,10 @@ on property:sys.boot_completed=1
     write /metadata/wear7diag/16_BOOT_COMPLETED reached
 EOF
 cp "$W/stage-system_ext/etc/init/wear7-v11-stage-marker.rc" "$REP/WEAR7_V11_STAGE_MARKER.rc"
+python3 - "$W/stage-system_ext/etc/init/wear7-v11-stage-marker.rc" <<'PY'
+import os,sys
+os.setxattr(sys.argv[1], 'security.selinux', b'u:object_r:system_file:s0')
+PY
 
 run_host_init_gate() {
   local tag="$1" sx="$2"
