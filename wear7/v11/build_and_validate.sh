@@ -81,6 +81,61 @@ python3 wear7/v11/fix_property_context_collision.py \
   --vendor-root "$W/mnt/vendor" \
   --report "$REP"
 
+# V11-DIAG: add persistent, non-invasive init milestones.
+# Each write is best-effort; failure to write a marker must never alter boot control flow.
+cat > "$W/stage-system_ext/etc/init/wear7-v11-stage-marker.rc" <<'EOF'
+on late-init
+    mkdir /metadata/wear7diag 0700 root root
+    restorecon /metadata/wear7diag
+    write /metadata/wear7diag/01_LATE_INIT reached
+
+on property:init.svc.apexd-bootstrap=running
+    write /metadata/wear7diag/02_APEXD_BOOTSTRAP_RUNNING reached
+
+on property:init.svc.apexd-bootstrap=stopped
+    write /metadata/wear7diag/03_APEXD_BOOTSTRAP_STOPPED reached
+
+on property:init.svc.apexd=running
+    write /metadata/wear7diag/04_APEXD_RUNNING reached
+
+on property:apexd.status=ready
+    write /metadata/wear7diag/05_APEXD_READY reached
+
+on property:init.svc.vold=running
+    write /metadata/wear7diag/06_VOLD_RUNNING reached
+
+on post-fs
+    write /metadata/wear7diag/07_POST_FS reached
+
+on post-fs-data
+    write /metadata/wear7diag/08_POST_FS_DATA reached
+
+on property:init.svc.bpfloader=running
+    write /metadata/wear7diag/09_BPFLOADER_RUNNING reached
+
+on bpf-progs-loaded
+    write /metadata/wear7diag/10_BPF_PROGS_LOADED reached
+
+on property:init.svc.netd=running
+    write /metadata/wear7diag/11_NETD_RUNNING reached
+
+on zygote-start
+    write /metadata/wear7diag/12_ZYGOTE_START reached
+
+on property:init.svc.zygote=running
+    write /metadata/wear7diag/13_ZYGOTE_RUNNING reached
+
+on early-boot
+    write /metadata/wear7diag/14_EARLY_BOOT reached
+
+on boot
+    write /metadata/wear7diag/15_BOOT reached
+
+on property:sys.boot_completed=1
+    write /metadata/wear7diag/16_BOOT_COMPLETED reached
+EOF
+cp "$W/stage-system_ext/etc/init/wear7-v11-stage-marker.rc" "$REP/WEAR7_V11_STAGE_MARKER.rc"
+
 run_host_init_gate() {
   local tag="$1" sx="$2"
   local H="$T/bin/host_init_verifier"
