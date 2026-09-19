@@ -146,6 +146,14 @@ import os,sys
 os.setxattr(sys.argv[1], 'security.selinux', b'u:object_r:system_file:s0\x00')
 PY
 
+# Audit exact init-event actions/imports before any further rebuild.
+python3 wear7/v11/audit_init_actions.py \
+  "$W/mnt/system/system" \
+  "$W/stage-system_ext" \
+  "$W/mnt/product" \
+  "$W/mnt/vendor" \
+  "$REP"
+
 run_host_init_gate() {
   local tag="$1" sx="$2"
   local H="$T/bin/host_init_verifier"
