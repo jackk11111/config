@@ -81,58 +81,63 @@ python3 wear7/v11/fix_property_context_collision.py \
   --vendor-root "$W/mnt/vendor" \
   --report "$REP"
 
-# V11-DIAG: add persistent, non-invasive init milestones.
-# Each write is best-effort; failure to write a marker must never alter boot control flow.
+# V11-DIAG2: SELinux-valid persistent init milestones.
+# Recovery pre-creates /metadata/vold/wear7diag/* as vold_metadata_file directories, mode 0700.
+# Each trigger only chmods its own marker to 0777. Exact V11 policy grants init setattr/search on vold_metadata_file dirs.
 cat > "$W/stage-system_ext/etc/init/wear7-v11-stage-marker.rc" <<'EOF'
+on early-init
+    chmod 0777 /metadata/vold/wear7diag/00_EARLY_INIT
+
+on init
+    chmod 0777 /metadata/vold/wear7diag/01_INIT
+
 on late-init
-    mkdir /metadata/wear7diag 0700 root root
-    restorecon /metadata/wear7diag
-    write /metadata/wear7diag/01_LATE_INIT reached
+    chmod 0777 /metadata/vold/wear7diag/02_LATE_INIT
 
 on property:init.svc.apexd-bootstrap=running
-    write /metadata/wear7diag/02_APEXD_BOOTSTRAP_RUNNING reached
+    chmod 0777 /metadata/vold/wear7diag/03_APEXD_BOOTSTRAP_RUNNING
 
 on property:init.svc.apexd-bootstrap=stopped
-    write /metadata/wear7diag/03_APEXD_BOOTSTRAP_STOPPED reached
+    chmod 0777 /metadata/vold/wear7diag/04_APEXD_BOOTSTRAP_STOPPED
 
 on property:init.svc.apexd=running
-    write /metadata/wear7diag/04_APEXD_RUNNING reached
+    chmod 0777 /metadata/vold/wear7diag/05_APEXD_RUNNING
 
 on property:apexd.status=ready
-    write /metadata/wear7diag/05_APEXD_READY reached
+    chmod 0777 /metadata/vold/wear7diag/06_APEXD_READY
 
 on property:init.svc.vold=running
-    write /metadata/wear7diag/06_VOLD_RUNNING reached
+    chmod 0777 /metadata/vold/wear7diag/07_VOLD_RUNNING
 
 on post-fs
-    write /metadata/wear7diag/07_POST_FS reached
+    chmod 0777 /metadata/vold/wear7diag/08_POST_FS
 
 on post-fs-data
-    write /metadata/wear7diag/08_POST_FS_DATA reached
+    chmod 0777 /metadata/vold/wear7diag/09_POST_FS_DATA
 
 on property:init.svc.bpfloader=running
-    write /metadata/wear7diag/09_BPFLOADER_RUNNING reached
+    chmod 0777 /metadata/vold/wear7diag/10_BPFLOADER_RUNNING
 
 on bpf-progs-loaded
-    write /metadata/wear7diag/10_BPF_PROGS_LOADED reached
+    chmod 0777 /metadata/vold/wear7diag/11_BPF_PROGS_LOADED
 
 on property:init.svc.netd=running
-    write /metadata/wear7diag/11_NETD_RUNNING reached
+    chmod 0777 /metadata/vold/wear7diag/12_NETD_RUNNING
 
 on zygote-start
-    write /metadata/wear7diag/12_ZYGOTE_START reached
+    chmod 0777 /metadata/vold/wear7diag/13_ZYGOTE_START
 
 on property:init.svc.zygote=running
-    write /metadata/wear7diag/13_ZYGOTE_RUNNING reached
+    chmod 0777 /metadata/vold/wear7diag/14_ZYGOTE_RUNNING
 
 on early-boot
-    write /metadata/wear7diag/14_EARLY_BOOT reached
+    chmod 0777 /metadata/vold/wear7diag/15_EARLY_BOOT
 
 on boot
-    write /metadata/wear7diag/15_BOOT reached
+    chmod 0777 /metadata/vold/wear7diag/16_BOOT
 
 on property:sys.boot_completed=1
-    write /metadata/wear7diag/16_BOOT_COMPLETED reached
+    chmod 0777 /metadata/vold/wear7diag/17_BOOT_COMPLETED
 EOF
 cp "$W/stage-system_ext/etc/init/wear7-v11-stage-marker.rc" "$REP/WEAR7_V11_STAGE_MARKER.rc"
 python3 - "$W/stage-system_ext/etc/init/wear7-v11-stage-marker.rc" <<'PY'
