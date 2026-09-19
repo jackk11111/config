@@ -5,6 +5,7 @@ on:
     branches: [wear7-v11-fs-aware-charger]
     paths:
       - '.github/workflows/wear7-v11-fs-aware-charger-delta.yml'
+      - '.github/scripts/fs_charger_delta.py'
   workflow_dispatch:
 
 permissions:
@@ -43,7 +44,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: '35457375354'
 
-      - name: Expand, gate logical partitions, generate safe segments
+      - name: Expand and gate logical partitions
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -51,19 +52,12 @@ jobs:
           ZIP="$W/tools/otatools.zip"
           curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
           echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
-          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
-import pathlib,sys,zipfile
-out=pathlib.Path(sys.argv[2]).resolve()
-with zipfile.ZipFile(sys.argv[1]) as z:
-    for n in z.namelist():
-        if n.startswith(('bin/','lib64/','lib/')):
-            p=(out/n).resolve()
-            if not p.is_relative_to(out): raise SystemExit('unsafe')
-            z.extract(n,out)
-PY
+          mkdir -p "$W/tools/extracted"
+          unzip -q "$ZIP" 'bin/*' 'lib64/*' 'lib/*' -d "$W/tools/extracted"
           rm "$ZIP"
           chmod +x "$W/tools/extracted/bin/"*
-          export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
+          export PATH="$W/tools/extracted/bin:$PATH"
+          export LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
 
           simg2img "$W/base/super.img" "$W/base.raw"
           simg2img "$W/target/super.img" "$W/target.raw"
@@ -88,75 +82,13 @@ PY
           echo "system_ext DIFFERENT_AS_EXPECTED=PASS" >> out/LOGICAL_GATE.txt
           cat out/LOGICAL_GATE.txt
 
-          python3 - "$W/base.raw" "$W/target.raw" out <<'PY'
-import hashlib, json, mmap, pathlib, sys
-base=pathlib.Path(sys.argv[1]); target=pathlib.Path(sys.argv[2]); out=pathlib.Path(sys.argv[3])
-bs=4096
-if base.stat().st_size != target.stat().st_size: raise SystemExit('size mismatch')
-total=base.stat().st_size//bs
-runs=[]
-changed_blocks=0
-changed_bytes=0
-hb=hashlib.sha256(); ht=hashlib.sha256()
-with base.open('rb') as fb, target.open('rb') as ft:
-    mb=mmap.mmap(fb.fileno(),0,access=mmap.ACCESS_READ)
-    mt=mmap.mmap(ft.fileno(),0,access=mmap.ACCESS_READ)
-    try:
-        start=None; count=0
-        for i in range(total):
-            off=i*bs
-            b=mb[off:off+bs]; t=mt[off:off+bs]
-            if b!=t:
-                changed_blocks += 1
-                changed_bytes += sum(x!=y for x,y in zip(b,t))
-                if start is None:
-                    start=i; count=1
-                elif i==start+count:
-                    count += 1
-                else:
-                    runs.append((start,count)); start=i; count=1
-            elif start is not None:
-                runs.append((start,count)); start=None; count=0
-        if start is not None: runs.append((start,count))
-        hb.update(mb); ht.update(mt)
-        banned={904002,181710,181711}
-        touched=set()
-        for s,c in runs: touched.update(range(s,s+c))
-        bad=sorted(touched & banned)
-        if bad: raise SystemExit(f'BANNED BSSL BLOCKS TOUCHED: {bad}')
-        rows=[]
-        for idx,(s,c) in enumerate(runs):
-            off=s*bs; n=c*bs
-            bb=mb[off:off+n]; tt=mt[off:off+n]
-            bp=out/'base_segments'/f'seg{idx:03d}.bin'
-            tp=out/'target_segments'/f'seg{idx:03d}.bin'
-            bp.write_bytes(bb); tp.write_bytes(tt)
-            rows.append({
-                'index':idx,'start_block':s,'count':c,
-                'base_sha256':hashlib.sha256(bb).hexdigest(),
-                'target_sha256':hashlib.sha256(tt).hexdigest()
-            })
-    finally:
-        mb.close(); mt.close()
-report={
-  'base_raw_sha256':hb.hexdigest(),
-  'target_raw_sha256':ht.hexdigest(),
-  'changed_blocks':changed_blocks,
-  'changed_bytes_exact':changed_bytes,
-  'run_count':len(runs),
-  'banned_blocks_checked':[904002,181710,181711],
-  'banned_blocks_touched':[],
-  'segments':rows,
-}
-(out/'DELTA_REPORT.json').write_text(json.dumps(report,indent=2)+'\n')
-(out/'SEGMENTS.tsv').write_text('\n'.join(
-    f"{r['index']:03d}\t{r['start_block']}\t{r['count']}\t{r['base_sha256']}\t{r['target_sha256']}" for r in rows
-)+'\n')
-print(json.dumps(report,indent=2))
-PY
-
-          rm -rf "$W/baseparts" "$W/targetparts" "$W/base.raw" "$W/target.raw"
+      - name: Generate safe block segments
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 .github/scripts/fs_charger_delta.py "$RUNNER_TEMP/base.raw" "$RUNNER_TEMP/target.raw" out
           sha256sum out/target_segments/*.bin > out/TARGET_SEGMENTS_SHA256.txt
+          rm -rf "$RUNNER_TEMP/baseparts" "$RUNNER_TEMP/targetparts" "$RUNNER_TEMP/base.raw" "$RUNNER_TEMP/target.raw"
 
       - name: Upload compact safe delta
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
