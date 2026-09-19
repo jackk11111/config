@@ -87,6 +87,7 @@ python3 wear7/v11/fix_property_context_collision.py \
 cat > "$W/stage-system_ext/etc/init/wear7-v11-stage-marker.rc" <<'EOF'
 on early-init
     chmod 0777 /metadata/vold/wear7diag/00_EARLY_INIT
+    chmod 0777 /metadata/vold/wear7diag/BM_${ro.bootmode:-unset}
 
 on init
     chmod 0777 /metadata/vold/wear7diag/01_INIT
@@ -130,7 +131,7 @@ on zygote-start
 on property:init.svc.zygote=running
     chmod 0777 /metadata/vold/wear7diag/14_ZYGOTE_RUNNING
 
-on charger
+on early-boot
     chmod 0777 /metadata/vold/wear7diag/15_EARLY_BOOT
 
 on boot
