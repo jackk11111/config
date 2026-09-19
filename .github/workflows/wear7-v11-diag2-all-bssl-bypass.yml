@@ -149,7 +149,7 @@ jobs:
           lpunpack "$W/target.raw" "$W/parts_target"
           sudo mount -o loop,ro,noload "$W/parts_target/system.img" "$W/mnt_system"
           find "$W/mnt_system/system/etc/init/hw" -maxdepth 1 -name 'init.boringssl.*.rc' -type f -print -exec cat {} \; > out/BSSL_LOGICAL_FILES_AFTER.txt
-          if grep -R -n -E '^[[:space:]]*exec_start[[:space:]]+boringssl_self_test(32|64)[[:space:]]*
+          if grep -R -n -E '^[[:space:]]*exec_start[[:space:]]+boringssl_self_test(32|64)[[:space:]]*$' "$W/mnt_system/system/etc/init/hw"/init.boringssl.*.rc; then
             echo "ACTIVE SYSTEM BORINGSSL exec_start REMAINS" >&2
             sudo umount "$W/mnt_system"
             exit 1
