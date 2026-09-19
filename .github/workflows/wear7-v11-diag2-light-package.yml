@@ -1,0 +1,84 @@
+name: Wear7 V11 DIAG2 light package
+
+on:
+  push:
+    branches: [wear7-v11-diag2-light-package]
+    paths: ['.github/workflows/wear7-v11-diag2-light-package.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq android-sdk-libsparse-utils unzip curl >/dev/null
+          mkdir -p "$RUNNER_TEMP/light/super" "$RUNNER_TEMP/light/bootchain" "$RUNNER_TEMP/light/parts" "$RUNNER_TEMP/light/tools" out
+
+      - name: Download exact DIAG2 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG2-Super
+          path: ${{ runner.temp }}/light/super
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35444837392'
+
+      - name: Download exact DIAG2 bootchain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG2-Bootchain
+          path: ${{ runner.temp }}/light/bootchain
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35444837392'
+
+      - name: Extract only system_ext and package matching vbmeta
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/light"
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for name in z.namelist():
+                  if name.startswith(('bin/','lib64/','lib/')):
+                      dst=(out/name).resolve()
+                      if not dst.is_relative_to(out): raise SystemExit('unsafe')
+                      z.extract(name,out)
+          PY
+          rm "$ZIP"
+          chmod +x "$W/tools/extracted/bin/"*
+          export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
+
+          simg2img "$W/super/super.img" "$W/super.raw"
+          lpunpack "$W/super.raw" "$W/parts"
+
+          cp "$W/parts/system_ext.img" out/system_ext.img
+          cp "$W/bootchain/vbmeta_system.img" out/vbmeta_system.img
+          cp "$W/bootchain/vbmeta.img" out/vbmeta.img
+
+          sha256sum out/system_ext.img out/vbmeta_system.img out/vbmeta.img > out/SHA256SUMS.txt
+          stat -c '%n %s bytes' out/system_ext.img out/vbmeta_system.img out/vbmeta.img | tee out/SIZES.txt
+
+      - name: Upload light package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V11-DIAG2-Light
+          path: out/
+          if-no-files-found: error
+          retention-days: 60
+          compression-level: 1
