@@ -1,0 +1,256 @@
+name: Wear7 V11 exact early-init rootcause audit
+
+on:
+  push:
+    branches: [wear7-v11-rootcause-audit]
+    paths:
+      - '.github/workflows/wear7-v11-rootcause-audit.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare exact audit tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /opt/ghc /usr/share/dotnet /usr/local/share/boost /usr/local/lib/android/sdk/ndk || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs android-sdk-libsparse-utils unzip curl python3 file >/dev/null
+          W="$RUNNER_TEMP/v11audit"; mkdir -p "$W/input" "$W/tools" "$W/parts" "$W/mnt" audit-report
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/','lib64/','lib/','framework/')):
+                      d=(out/n).resolve()
+                      if not d.is_relative_to(out): raise SystemExit('unsafe path')
+                      z.extract(n,out)
+          PY
+          chmod +x "$W/tools/extracted/bin/"*
+          echo "$W/tools/extracted/bin" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$W/tools/extracted/lib64:$W/tools/extracted/lib" >> "$GITHUB_ENV"
+
+      - name: Download exact V7 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V7-Super
+          path: ${{ runner.temp }}/v11audit/input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35198609607'
+
+      - name: Extract exact V7 logical partitions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11audit"
+          echo "2a73517c4356dce6995641b4cf2ac82b50e1c0b0fec7ee46decbd4fe122399f6  $W/input/super.img" | sha256sum -c -
+          simg2img "$W/input/super.img" "$W/super.raw"
+          test "$(stat -c %s "$W/super.raw")" = 4294967296
+          lpunpack "$W/super.raw" "$W/parts"
+          for p in system system_ext product vendor vendor_dlkm system_dlkm; do
+            mkdir -p "$W/mnt/$p"
+            sudo mount -o loop,ro,noload "$W/parts/$p.img" "$W/mnt/$p"
+          done
+          sha256sum "$W/parts/"*.img > audit-report/V7_LOGICAL_SHA256.txt
+
+      - name: Reconstruct stock379 product and system_ext for differential
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11audit"
+          curl -fL --retry 2 -sS -o "$W/stock379.zip" https://android.googleapis.com/packages/data/ota-api/package/2269bd24a774cae37adc720d3d97bd1b76846e2b.zip
+          echo "ffa61d822a5c667c230ce2ba9426ce4eb282adcaa0891279ef002f65ca15a08d  $W/stock379.zip" | sha256sum -c -
+          python3 wear7/scripts/reconstruct_block_ota.py "$W/stock379.zip" product "$W/stock-product.img"
+          python3 wear7/scripts/reconstruct_block_ota.py "$W/stock379.zip" system_ext "$W/stock-system_ext.img"
+          mkdir -p "$W/mnt/stock-product" "$W/mnt/stock-system_ext"
+          sudo mount -o loop,ro,noload "$W/stock-product.img" "$W/mnt/stock-product"
+          sudo mount -o loop,ro,noload "$W/stock-system_ext.img" "$W/mnt/stock-system_ext"
+
+      - name: Audit init graph and fatal paths
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11audit"
+          sudo python3 - "$W/mnt" "$GITHUB_WORKSPACE/audit-report" <<'PY'
+          import os,re,sys,json,hashlib
+          from pathlib import Path
+          m=Path(sys.argv[1]); out=Path(sys.argv[2]); out.mkdir(parents=True,exist_ok=True)
+
+          roots={
+            'system':m/'system/system',
+            'system_ext':m/'system_ext',
+            'product':m/'product',
+            'vendor':m/'vendor',
+          }
+          stock={'stock_system_ext':m/'stock-system_ext','stock_product':m/'stock-product'}
+
+          def init_files(root):
+              d=root/'etc/init'
+              return sorted(d.rglob('*.rc')) if d.is_dir() else []
+
+          allrc=[]
+          for part,root in roots.items():
+              for p in init_files(root):
+                  allrc.append((part,p))
+
+          # Raw high-signal lines.
+          keys=re.compile(r'(^|\s)(critical|reboot_on_failure|shutdown\s+critical|reboot\s+bootloader|sys\.powerctl|init_fatal|exec_start|exec\s)',re.I)
+          with (out/'FATAL_REBOOT_INIT_LINES.txt').open('w') as f:
+              for part,p in allrc:
+                  for i,line in enumerate(p.read_text(errors='replace').splitlines(),1):
+                      if keys.search(line):
+                          f.write(f'{part}:{p.relative_to(roots[part])}:{i}: {line}\n')
+
+          # Parse service blocks enough to find boot-critical risks and missing executables.
+          services=[]
+          current=None
+          for part,p in allrc:
+              lines=p.read_text(errors='replace').splitlines()
+              current=None
+              for i,line in enumerate(lines,1):
+                  s=line.strip()
+                  if not s or s.startswith('#'): continue
+                  mm=re.match(r'^service\s+(\S+)\s+(\S+)(.*)$',s)
+                  if mm:
+                      current={'part':part,'file':str(p.relative_to(roots[part])),'line':i,'name':mm.group(1),'exe':mm.group(2),'tail':mm.group(3).strip(),'options':[]}
+                      services.append(current); continue
+                  if current and (line.startswith(' ') or line.startswith('\t')):
+                      current['options'].append((i,s))
+                  elif not line.startswith((' ','\t')):
+                      current=None
+
+          def resolve(abs_path):
+              if not abs_path.startswith('/'): return None
+              for prefix,part in [('/system_ext/','system_ext'),('/product/','product'),('/vendor/','vendor'),('/system/','system')]:
+                  if abs_path.startswith(prefix):
+                      rel=abs_path[len(prefix):]
+                      root=roots[part]
+                      # system root is mounted at system/system, so /system/foo -> root/foo
+                      return root/rel
+              return None
+
+          names={}
+          for s in services: names.setdefault(s['name'],[]).append(s)
+          duplicates={k:v for k,v in names.items() if len(v)>1}
+
+          risky=[]; missing=[]
+          for s in services:
+              opts=[x[1] for x in s['options']]
+              low=[x.lower() for x in opts]
+              flags={
+                'critical':any(x=='critical' or x.startswith('critical ') for x in low),
+                'reboot_on_failure':any(x.startswith('reboot_on_failure') for x in low),
+                'shutdown_critical':any(x=='shutdown critical' for x in low),
+                'core':any(x=='class core' for x in low),
+                'early_hal':any(x=='class early_hal' for x in low),
+                'override':any(x=='override' for x in low),
+                'disabled':any(x=='disabled' for x in low),
+              }
+              if flags['critical'] or flags['reboot_on_failure'] or flags['core'] or flags['early_hal']:
+                  risky.append({'service':s,'flags':flags})
+              rp=resolve(s['exe'])
+              if rp is not None and not rp.exists():
+                  missing.append({'service':s,'resolved':str(rp)})
+          (out/'SERVICES_RISKY.json').write_text(json.dumps(risky,indent=2))
+          (out/'SERVICES_MISSING_EXECUTABLE.json').write_text(json.dumps(missing,indent=2))
+          (out/'DUPLICATE_SERVICE_NAMES.json').write_text(json.dumps(duplicates,indent=2))
+
+          # Exact init file inventories and Pixel-vs-Dace differential.
+          def relset(root):
+              return {str(p.relative_to(root/'etc/init')) for p in init_files(root)}
+          for part in ('system_ext','product'):
+              a=relset(roots[part]); b=relset(stock['stock_'+part])
+              (out/f'{part.upper()}_INIT_V7_ONLY.txt').write_text('\n'.join(sorted(a-b))+'\n')
+              (out/f'{part.upper()}_INIT_STOCK_ONLY.txt').write_text('\n'.join(sorted(b-a))+'\n')
+              (out/f'{part.upper()}_INIT_COMMON.txt').write_text('\n'.join(sorted(a&b))+'\n')
+
+          # Preserve all tiny init files from V7 + stock for direct human diff.
+          for label,root in {**roots,**stock}.items():
+              d=out/'init-dumps'/label; d.mkdir(parents=True,exist_ok=True)
+              for p in init_files(root):
+                  rel=p.relative_to(root/'etc/init')
+                  q=d/rel; q.parent.mkdir(parents=True,exist_ok=True)
+                  q.write_bytes(p.read_bytes())
+
+          # Build/product identity and KSU modifications.
+          props=[]
+          for label,root in roots.items():
+              for rel in ('build.prop','etc/build.prop'):
+                  p=root/rel
+                  if p.is_file():
+                      for line in p.read_text(errors='replace').splitlines():
+                          if re.match(r'ro\.(product|build|vendor|system|system_ext|oem|board|hardware)|persist\.adb',line):
+                              props.append(f'{label}:{rel}: {line}')
+          (out/'IDENTITY_PROPS.txt').write_text('\n'.join(props)+'\n')
+
+          initrc=roots['system']/'etc/init/hw/init.rc'
+          text=initrc.read_text(errors='replace') if initrc.is_file() else ''
+          markers=[x for x in ('TICWATCH_WEAR7_CLEAN_WIPE_KSU_BOOTSTRAP','/system_ext/bin/ksud','/data/adb/service.d') if x in text]
+          (out/'KSU_INIT_MODIFICATIONS.txt').write_text('\n'.join(markers)+'\n')
+          print('AUDIT_SERVICES',len(services))
+          print('AUDIT_RISKY',len(risky))
+          print('AUDIT_MISSING_EXEC',len(missing))
+          print('AUDIT_DUPLICATE_NAMES',len(duplicates))
+          print('KSU_INIT_MARKERS',markers)
+          PY
+
+      - name: Produce compact verdict
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,pathlib,re
+          r=pathlib.Path('audit-report')
+          risky=json.loads((r/'SERVICES_RISKY.json').read_text())
+          missing=json.loads((r/'SERVICES_MISSING_EXECUTABLE.json').read_text())
+          dup=json.loads((r/'DUPLICATE_SERVICE_NAMES.json').read_text())
+          fatal=(r/'FATAL_REBOOT_INIT_LINES.txt').read_text()
+          def fmt(x):
+              s=x['service']; fl=[k for k,v in x['flags'].items() if v]
+              return f"{s['part']}:{s['file']}:{s['line']} service={s['name']} exe={s['exe']} flags={','.join(fl)}"
+          lines=[
+              'WEAR7_V11_ROOTCAUSE_AUDIT=COMPLETE',
+              f'SERVICES_HIGH_SIGNAL={len(risky)}',
+              f'MISSING_EXECUTABLES={len(missing)}',
+              f'DUPLICATE_SERVICE_NAMES={len(dup)}',
+              f'NORMAL_CRITICAL_SERVICE_OPTIONS={sum(1 for x in risky if x["flags"]["critical"])}',
+              f'REBOOT_ON_FAILURE_OPTIONS={sum(1 for x in risky if x["flags"]["reboot_on_failure"])}',
+              '',
+              '=== NORMAL CRITICAL / REBOOT_ON_FAILURE ===',
+          ]
+          lines += [fmt(x) for x in risky if x['flags']['critical'] or x['flags']['reboot_on_failure']]
+          lines += ['', '=== MISSING EXECUTABLES ===']
+          for x in missing:
+              s=x['service']; lines.append(f"{s['part']}:{s['file']}:{s['line']} {s['name']} -> {s['exe']}")
+          lines += ['', '=== KSU INIT MODIFICATIONS ===',(r/'KSU_INIT_MODIFICATIONS.txt').read_text().strip()]
+          lines += ['', '=== PRODUCT V7-ONLY INIT ===',(r/'PRODUCT_INIT_V7_ONLY.txt').read_text().strip()]
+          lines += ['', '=== PRODUCT STOCK-ONLY INIT ===',(r/'PRODUCT_INIT_STOCK_ONLY.txt').read_text().strip()]
+          lines += ['', '=== SYSTEM_EXT V7-ONLY INIT ===',(r/'SYSTEM_EXT_INIT_V7_ONLY.txt').read_text().strip()]
+          lines += ['', '=== SYSTEM_EXT STOCK-ONLY INIT ===',(r/'SYSTEM_EXT_INIT_STOCK_ONLY.txt').read_text().strip()]
+          (r/'VERDICT.txt').write_text('\n'.join(lines)+'\n')
+          print((r/'VERDICT.txt').read_text())
+          PY
+
+      - name: Upload audit
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V11-Rootcause-Audit
+          path: audit-report/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
