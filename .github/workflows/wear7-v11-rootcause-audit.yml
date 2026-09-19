@@ -69,18 +69,88 @@ jobs:
           done
           sha256sum "$W/parts/"*.img > audit-report/V7_LOGICAL_SHA256.txt
 
-      - name: Reconstruct stock379 product and system_ext for differential
+      - name: Reconstruct stock379 system product and system_ext for differential
         shell: bash
         run: |
           set -Eeuo pipefail
           W="$RUNNER_TEMP/v11audit"
           curl -fL --retry 2 -sS -o "$W/stock379.zip" https://android.googleapis.com/packages/data/ota-api/package/2269bd24a774cae37adc720d3d97bd1b76846e2b.zip
           echo "ffa61d822a5c667c230ce2ba9426ce4eb282adcaa0891279ef002f65ca15a08d  $W/stock379.zip" | sha256sum -c -
+          python3 wear7/scripts/reconstruct_block_ota.py "$W/stock379.zip" system "$W/stock-system.img"
           python3 wear7/scripts/reconstruct_block_ota.py "$W/stock379.zip" product "$W/stock-product.img"
           python3 wear7/scripts/reconstruct_block_ota.py "$W/stock379.zip" system_ext "$W/stock-system_ext.img"
-          mkdir -p "$W/mnt/stock-product" "$W/mnt/stock-system_ext"
+          mkdir -p "$W/mnt/stock-system" "$W/mnt/stock-product" "$W/mnt/stock-system_ext"
+          sudo mount -o loop,ro,noload "$W/stock-system.img" "$W/mnt/stock-system"
           sudo mount -o loop,ro,noload "$W/stock-product.img" "$W/mnt/stock-product"
           sudo mount -o loop,ro,noload "$W/stock-system_ext.img" "$W/mnt/stock-system_ext"
+
+      - name: Verify complete init grammar with Android 17 host_init_verifier
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11audit"
+          H="$W/tools/extracted/bin/host_init_verifier"
+          test -x "$H"
+          "$H" --help > audit-report/HOST_INIT_VERIFIER_HELP.txt 2>&1 || true
+
+          pick_system_root() {
+            local base="$1"
+            if [ -d "$base/system/etc/init" ]; then
+              printf '%s\n' "$base/system"
+            else
+              printf '%s\n' "$base"
+            fi
+          }
+
+          run_hiv() {
+            local tag="$1"; shift
+            local sys="$1" sx="$2" prod="$3" vend="$4"
+            local -a cmd=("$H"
+              --out_system "$sys"
+              --out_system_ext "$sx"
+              --out_product "$prod"
+              --out_vendor "$vend")
+            local part path pc
+            for part in system system_ext product vendor; do
+              case "$part" in
+                system) path="$sys"; pc="plat_property_contexts" ;;
+                system_ext) path="$sx"; pc="system_ext_property_contexts" ;;
+                product) path="$prod"; pc="product_property_contexts" ;;
+                vendor) path="$vend"; pc="vendor_property_contexts" ;;
+              esac
+              if [ -f "$path/etc/selinux/$pc" ]; then
+                cmd+=("--property-contexts=$path/etc/selinux/$pc")
+              fi
+              if [ -f "$path/etc/passwd" ]; then
+                cmd+=(-p "$path/etc/passwd")
+              fi
+            done
+            printf '%q ' "${cmd[@]}" > "audit-report/HOST_INIT_${tag}_CMD.txt"
+            printf '\n' >> "audit-report/HOST_INIT_${tag}_CMD.txt"
+            set +e
+            "${cmd[@]}" > "audit-report/HOST_INIT_${tag}.log" 2>&1
+            local rc=$?
+            set -e
+            echo "$rc" > "audit-report/HOST_INIT_${tag}_RC.txt"
+            echo "HOST_INIT_${tag}_RC=$rc"
+            cat "audit-report/HOST_INIT_${tag}.log"
+          }
+
+          VSYS="$(pick_system_root "$W/mnt/system")"
+          SSYS="$(pick_system_root "$W/mnt/stock-system")"
+
+          run_hiv V7 "$VSYS" "$W/mnt/system_ext" "$W/mnt/product" "$W/mnt/vendor"
+          run_hiv STOCK379 "$SSYS" "$W/mnt/stock-system_ext" "$W/mnt/stock-product" "$W/mnt/vendor"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import difflib
+          r=Path('audit-report')
+          a=(r/'HOST_INIT_STOCK379.log').read_text(errors='replace').splitlines()
+          b=(r/'HOST_INIT_V7.log').read_text(errors='replace').splitlines()
+          diff=difflib.unified_diff(a,b,fromfile='STOCK379',tofile='V7',lineterm='')
+          (r/'HOST_INIT_STOCK379_VS_V7.diff').write_text('\n'.join(diff)+'\n')
+          PY
 
       - name: Audit init graph and fatal paths
         shell: bash
@@ -226,6 +296,8 @@ jobs:
               return f"{s['part']}:{s['file']}:{s['line']} service={s['name']} exe={s['exe']} flags={','.join(fl)}"
           lines=[
               'WEAR7_V11_ROOTCAUSE_AUDIT=COMPLETE',
+              f'HOST_INIT_V7_RC={(r/"HOST_INIT_V7_RC.txt").read_text().strip()}',
+              f'HOST_INIT_STOCK379_RC={(r/"HOST_INIT_STOCK379_RC.txt").read_text().strip()}',
               f'SERVICES_HIGH_SIGNAL={len(risky)}',
               f'MISSING_EXECUTABLES={len(missing)}',
               f'DUPLICATE_SERVICE_NAMES={len(dup)}',
@@ -243,6 +315,9 @@ jobs:
           lines += ['', '=== PRODUCT STOCK-ONLY INIT ===',(r/'PRODUCT_INIT_STOCK_ONLY.txt').read_text().strip()]
           lines += ['', '=== SYSTEM_EXT V7-ONLY INIT ===',(r/'SYSTEM_EXT_INIT_V7_ONLY.txt').read_text().strip()]
           lines += ['', '=== SYSTEM_EXT STOCK-ONLY INIT ===',(r/'SYSTEM_EXT_INIT_STOCK_ONLY.txt').read_text().strip()]
+          lines += ['', '=== HOST INIT V7 ===', (r/'HOST_INIT_V7.log').read_text(errors='replace').strip()]
+          lines += ['', '=== HOST INIT STOCK379 ===', (r/'HOST_INIT_STOCK379.log').read_text(errors='replace').strip()]
+          lines += ['', '=== HOST INIT DIFFERENTIAL ===', (r/'HOST_INIT_STOCK379_VS_V7.diff').read_text(errors='replace').strip()]
           (r/'VERDICT.txt').write_text('\n'.join(lines)+'\n')
           print((r/'VERDICT.txt').read_text())
           PY
