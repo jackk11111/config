@@ -1,0 +1,222 @@
+name: Wear7 V11 current-state all BoringSSL bypass
+
+on:
+  push:
+    branches: [wear7-v11-diag2-all-bssl-bypass]
+    paths: ['.github/workflows/wear7-v11-diag2-all-bssl-bypass.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          mkdir -p "$RUNNER_TEMP/w7/base" "$RUNNER_TEMP/w7/tools" out/segments
+
+      - name: Download exact DIAG2 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG2-Super
+          path: ${{ runner.temp }}/w7/base
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35444837392'
+
+      - name: Reconstruct exact current watch state and build all-system-BoringSSL bypass
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/','lib64/','lib/')):
+                      p=(out/n).resolve()
+                      if not p.is_relative_to(out): raise SystemExit('unsafe')
+                      z.extract(n,out)
+          PY
+          rm "$ZIP"
+          chmod +x "$W/tools/extracted/bin/"*
+          export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
+
+          simg2img "$W/base/super.img" "$W/diag2.raw"
+          test "$(stat -c %s "$W/diag2.raw")" = 4294967296
+          cp --reflink=auto "$W/diag2.raw" "$W/current.raw"
+
+          # Reproduce the exact 2-byte vendor BoringSSL bypass already on the watch.
+          python3 - "$W/current.raw" <<'PY'
+          import mmap,sys,hashlib,pathlib
+          p=pathlib.Path(sys.argv[1])
+          edits=[
+            (3702792344,b'e',b'#'),
+            (3702792441,b'e',b'#'),
+          ]
+          with p.open('r+b') as f:
+              mm=mmap.mmap(f.fileno(),0)
+              try:
+                  for off,old,new in edits:
+                      if mm[off:off+1] != old:
+                          raise SystemExit(f'current-base byte mismatch at {off}: {mm[off:off+1]!r}')
+                      mm[off:off+1]=new
+                  mm.flush()
+              finally:
+                  mm.close()
+          h=hashlib.sha256(p.read_bytes()).hexdigest()
+          expected='7258b92b65fdfb0b830625bb82e444ca5aaf03f35066431f45c3a4a51e0f8db7'
+          if h!=expected:
+              raise SystemExit(f'current reconstructed SHA mismatch {h} != {expected}')
+          print('CURRENT_WATCH_BASE_SHA256='+h)
+          PY
+
+          cp --reflink=auto "$W/current.raw" "$W/target.raw"
+
+          # Disable every system init.boringssl.* exec_start in one shot.
+          python3 - "$W/target.raw" out/SYSTEM_BSSL_EDITS.txt <<'PY'
+          import mmap,sys,pathlib,hashlib
+          p=pathlib.Path(sys.argv[1]); report=pathlib.Path(sys.argv[2])
+          pats=[
+              b'exec_start boringssl_self_test32',
+              b'exec_start boringssl_self_test64',
+          ]
+          rows=[]; total=0
+          with p.open('r+b') as f:
+              mm=mmap.mmap(f.fileno(),0)
+              try:
+                  for pat in pats:
+                      hits=[]; pos=0
+                      while True:
+                          i=mm.find(pat,pos)
+                          if i<0: break
+                          hits.append(i); pos=i+1
+                      rows.append(f'{pat.decode()} hits={len(hits)} offsets={hits}')
+                      for i in hits:
+                          before=mm[i:i+len(pat)]
+                          mm[i:i+1]=b'#'
+                          after=mm[i:i+len(pat)]
+                          rows.append(f'  offset={i} block={i//4096} inblock={i%4096}')
+                          rows.append(f'  before={before.decode()}')
+                          rows.append(f'  after={after.decode()}')
+                          total+=1
+                  if total!=7:
+                      raise SystemExit(f'expected exactly 7 system BoringSSL exec_start edits, got {total}')
+                  mm.flush()
+              finally:
+                  mm.close()
+          report.write_text('\n'.join(rows)+f'\nTOTAL_EDITS={total}\n')
+          print(report.read_text())
+          PY
+
+          # Prove current -> target differs by exactly seven bytes.
+          python3 - "$W/current.raw" "$W/target.raw" out/DIFF_PROOF.txt <<'PY'
+          import sys,pathlib,hashlib
+          a=pathlib.Path(sys.argv[1]); b=pathlib.Path(sys.argv[2]); out=pathlib.Path(sys.argv[3])
+          diffs=[]; off=0; ha=hashlib.sha256(); hb=hashlib.sha256()
+          with a.open('rb',buffering=0) as fa,b.open('rb',buffering=0) as fb:
+              while True:
+                  x=fa.read(8*1024*1024); y=fb.read(8*1024*1024)
+                  if not x and not y: break
+                  if len(x)!=len(y): raise SystemExit('length mismatch')
+                  ha.update(x); hb.update(y)
+                  if x!=y:
+                      diffs.extend((off+i,u,v) for i,(u,v) in enumerate(zip(x,y)) if u!=v)
+                  off+=len(x)
+          if len(diffs)!=7:
+              raise SystemExit(f'expected exactly 7 changed bytes, got {len(diffs)}')
+          rows=[f'current_sha256={ha.hexdigest()}',f'target_sha256={hb.hexdigest()}',f'changed_bytes={len(diffs)}']
+          rows += [f'offset={o} old=0x{x:02x} new=0x{y:02x} block={o//4096}' for o,x,y in diffs]
+          out.write_text('\n'.join(rows)+'\n')
+          print(out.read_text())
+          PY
+
+          # Make exact sparse delta from CURRENT WATCH state to target.
+          python3 wear7/v11/make_sparse_delta.py             --base "$W/current.raw" --target "$W/target.raw"             --output out/super_CURRENT_to_ALL_SYSTEM_BSSL_BYPASS_DELTA.img             --report out/DELTA_REPORT.json
+
+          # Convert RAW chunks to tiny recovery patch segments.
+          python3 - out/super_CURRENT_to_ALL_SYSTEM_BSSL_BYPASS_DELTA.img out/segments out/SEGMENTS.tsv <<'PY'
+          import pathlib,struct,sys,hashlib
+          src=pathlib.Path(sys.argv[1]); od=pathlib.Path(sys.argv[2]); man=pathlib.Path(sys.argv[3])
+          with src.open('rb') as f:
+              h=f.read(28)
+              magic,maj,minv,fhs,chs,bs,total,nchunks,ck=struct.unpack('<IHHHHIIII',h)
+              if (magic,bs,fhs,chs)!=(0xED26FF3A,4096,28,12): raise SystemExit('unexpected sparse')
+              blk=0; seg=0; rows=[]
+              for _ in range(nchunks):
+                  typ,res,count,total_sz=struct.unpack('<HHII',f.read(12))
+                  if typ==0xCAC1:
+                      data=f.read(count*bs)
+                      name=f'seg{seg:02d}.bin'; (od/name).write_bytes(data)
+                      rows.append((name,blk,count,hashlib.sha256(data).hexdigest()))
+                      seg+=1
+                  elif typ==0xCAC3:
+                      if total_sz!=12: raise SystemExit('bad DONT_CARE')
+                  else:
+                      raise SystemExit(f'unexpected chunk {typ:#x}')
+                  blk+=count
+              if blk!=total: raise SystemExit('block count mismatch')
+          man.write_text('\n'.join(f'{n}\t{b}\t{c}\t{s}' for n,b,c,s in rows)+'\n')
+          print(man.read_text())
+          PY
+
+          python3 - out/SEGMENTS.tsv out <<'PY'
+          import pathlib,sys
+          man=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          rows=[x.split('\t') for x in man.read_text().splitlines() if x.strip()]
+          adb=r'C:\1\platform-tools-new\platform-tools\adb.exe'
+          apply=['@echo off','setlocal EnableExtensions','set ROOT=%~dp0','set ADB='+adb,'set DEV=/dev/block/by-name/super','',
+                 'echo [1/4] Verifico recovery e resetto marker...',
+                 '%ADB% shell "test -b %DEV% || exit 91; test $(blockdev --getsize64 %DEV%) -eq 4294967296 || exit 92; for d in /metadata/vold/wear7diag/*; do [ -d \"$d\" ] && chmod 0700 \"$d\"; done; sync" || exit /b 1',
+                 'if not exist "%ROOT%backup_current" mkdir "%ROOT%backup_current"',
+                 'echo [2/4] Backup blocchi correnti...']
+          for i,(name,blk,count,sha) in enumerate(rows):
+              apply += [f'%ADB% shell "dd if=%DEV% of=/tmp/w7c{i:02d}.bin bs=4096 skip={blk} count={count} 2>/dev/null" || exit /b 1',
+                        f'%ADB% pull /tmp/w7c{i:02d}.bin "%ROOT%backup_current\base_{i:02d}.bin" >nul || exit /b 1']
+          apply += ['echo [3/4] Disabilito TUTTI i BoringSSL system self-test della finestra init...']
+          for i,(name,blk,count,sha) in enumerate(rows):
+              apply += [f'echo Patch blocco {blk} count {count}',
+                        f'%ADB% push "%ROOT%segments\{name}" /tmp/w7p{i:02d}.bin >nul || exit /b 1',
+                        f'%ADB% shell "dd if=/tmp/w7p{i:02d}.bin of=%DEV% bs=4096 seek={blk} count={count} conv=notrunc,fsync 2>/dev/null" || exit /b 1',
+                        f'%ADB% shell "dd if=%DEV% of=/tmp/w7v{i:02d}.bin bs=4096 skip={blk} count={count} 2>/dev/null" || exit /b 1',
+                        f'%ADB% pull /tmp/w7v{i:02d}.bin "%ROOT%verify_{i:02d}.bin" >nul || exit /b 1',
+                        f'certutil -hashfile "%ROOT%verify_{i:02d}.bin" SHA256 | find /i "{sha}" >nul || (echo VERIFY FAILED segment {i:02d} & exit /b 1)']
+          apply += ['echo [4/4] ALL SYSTEM BSSL BYPASS OK.','echo Riavvio Android normale...','%ADB% reboot','endlocal']
+          (out/'APPLY_ALL_SYSTEM_BSSL_AND_BOOT.cmd').write_text('\r\n'.join(apply)+'\r\n')
+
+          read=['@echo off','set ADB='+adb,
+                '%ADB% shell "echo === MARKERS ===; ls -ld /metadata/vold/wear7diag/* 2>/dev/null"']
+          (out/'READ_MARKERS.cmd').write_text('\r\n'.join(read)+'\r\n')
+
+          restore=['@echo off','setlocal EnableExtensions','set ROOT=%~dp0','set ADB='+adb,'set DEV=/dev/block/by-name/super','echo Ripristino blocchi...']
+          for i,(name,blk,count,sha) in enumerate(rows):
+              restore += [f'if not exist "%ROOT%backup_current\base_{i:02d}.bin" (echo Manca backup base_{i:02d}.bin & exit /b 1)',
+                          f'%ADB% push "%ROOT%backup_current\base_{i:02d}.bin" /tmp/w7r{i:02d}.bin >nul || exit /b 1',
+                          f'%ADB% shell "dd if=/tmp/w7r{i:02d}.bin of=%DEV% bs=4096 seek={blk} count={count} conv=notrunc,fsync 2>/dev/null" || exit /b 1']
+          restore += ['%ADB% shell sync','echo RESTORE OK','endlocal']
+          (out/'RESTORE_FROM_RECOVERY.cmd').write_text('\r\n'.join(restore)+'\r\n')
+
+          sha256sum out/segments/*.bin out/*.cmd out/super_CURRENT_to_ALL_SYSTEM_BSSL_BYPASS_DELTA.img > out/SHA256SUMS.txt
+          rm -f "$W/diag2.raw" "$W/current.raw" "$W/target.raw"
+
+      - name: Upload tiny package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V11-All-System-BSSL-Bypass
+          path: out/
+          if-no-files-found: error
+          retention-days: 60
+          compression-level: 9
