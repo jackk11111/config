@@ -113,8 +113,8 @@ jobs:
                           rows.append(f'  before={before.decode()}')
                           rows.append(f'  after={after.decode()}')
                           total+=1
-                  if total!=7:
-                      raise SystemExit(f'expected exactly 7 system BoringSSL exec_start edits, got {total}')
+                  if total!=3:
+                      raise SystemExit(f'expected exactly 3 physical BoringSSL exec_start edits (shared ext4 blocks), got {total}')
                   mm.flush()
               finally:
                   mm.close()
@@ -136,8 +136,8 @@ jobs:
                   if x!=y:
                       diffs.extend((off+i,u,v) for i,(u,v) in enumerate(zip(x,y)) if u!=v)
                   off+=len(x)
-          if len(diffs)!=7:
-              raise SystemExit(f'expected exactly 7 changed bytes, got {len(diffs)}')
+          if len(diffs)!=3:
+              raise SystemExit(f'expected exactly 3 changed bytes, got {len(diffs)}')
           rows=[f'current_sha256={ha.hexdigest()}',f'target_sha256={hb.hexdigest()}',f'changed_bytes={len(diffs)}']
           rows += [f'offset={o} old=0x{x:02x} new=0x{y:02x} block={o//4096}' for o,x,y in diffs]
           out.write_text('\n'.join(rows)+'\n')
