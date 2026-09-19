@@ -149,7 +149,92 @@ jobs:
           lpunpack "$W/target.raw" "$W/parts_target"
           sudo mount -o loop,ro,noload "$W/parts_target/system.img" "$W/mnt_system"
           find "$W/mnt_system/system/etc/init/hw" -maxdepth 1 -name 'init.boringssl.*.rc' -type f -print -exec cat {} \; > out/BSSL_LOGICAL_FILES_AFTER.txt
-          if grep -R -n '^[[:space:]]*exec_start[[:space:]]\+boringssl_self_test' "$W/mnt_system/system/etc/init/hw"/init.boringssl.*.rc; then
+          if grep -R -n -E '^[[:space:]]*exec_start[[:space:]]+boringssl_self_test(32|64)[[:space:]]*
+            echo "ACTIVE SYSTEM BORINGSSL exec_start REMAINS" >&2
+            sudo umount "$W/mnt_system"
+            exit 1
+          fi
+          sudo umount "$W/mnt_system"
+          rm -rf "$W/parts_target" "$W/mnt_system"
+          echo "ALL_LOGICAL_SYSTEM_BSSL_EXEC_START_BYPASSED=PASS" >> out/SYSTEM_BSSL_EDITS.txt
+
+          # Make exact sparse delta from CURRENT WATCH state to target.
+          python3 wear7/v11/make_sparse_delta.py             --base "$W/current.raw" --target "$W/target.raw"             --output out/super_CURRENT_to_ALL_SYSTEM_BSSL_BYPASS_DELTA.img             --report out/DELTA_REPORT.json
+
+          # Convert RAW chunks to tiny recovery patch segments.
+          python3 - out/super_CURRENT_to_ALL_SYSTEM_BSSL_BYPASS_DELTA.img out/segments out/SEGMENTS.tsv <<'PY'
+          import pathlib,struct,sys,hashlib
+          src=pathlib.Path(sys.argv[1]); od=pathlib.Path(sys.argv[2]); man=pathlib.Path(sys.argv[3])
+          with src.open('rb') as f:
+              h=f.read(28)
+              magic,maj,minv,fhs,chs,bs,total,nchunks,ck=struct.unpack('<IHHHHIIII',h)
+              if (magic,bs,fhs,chs)!=(0xED26FF3A,4096,28,12): raise SystemExit('unexpected sparse')
+              blk=0; seg=0; rows=[]
+              for _ in range(nchunks):
+                  typ,res,count,total_sz=struct.unpack('<HHII',f.read(12))
+                  if typ==0xCAC1:
+                      data=f.read(count*bs)
+                      name=f'seg{seg:02d}.bin'; (od/name).write_bytes(data)
+                      rows.append((name,blk,count,hashlib.sha256(data).hexdigest()))
+                      seg+=1
+                  elif typ==0xCAC3:
+                      if total_sz!=12: raise SystemExit('bad DONT_CARE')
+                  else:
+                      raise SystemExit(f'unexpected chunk {typ:#x}')
+                  blk+=count
+              if blk!=total: raise SystemExit('block count mismatch')
+          man.write_text('\n'.join(f'{n}\t{b}\t{c}\t{s}' for n,b,c,s in rows)+'\n')
+          print(man.read_text())
+          PY
+
+          python3 - out/SEGMENTS.tsv out <<'PY'
+          import pathlib,sys
+          man=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          rows=[x.split('\t') for x in man.read_text().splitlines() if x.strip()]
+          adb=r'C:\1\platform-tools-new\platform-tools\adb.exe'
+          apply=['@echo off','setlocal EnableExtensions','set ROOT=%~dp0','set ADB='+adb,'set DEV=/dev/block/by-name/super','',
+                 'echo [1/4] Verifico recovery e resetto marker...',
+                 '%ADB% shell "test -b %DEV% || exit 91; test $(blockdev --getsize64 %DEV%) -eq 4294967296 || exit 92; for d in /metadata/vold/wear7diag/*; do [ -d \"$d\" ] && chmod 0700 \"$d\"; done; sync" || exit /b 1',
+                 'if not exist "%ROOT%backup_current" mkdir "%ROOT%backup_current"',
+                 'echo [2/4] Backup blocchi correnti...']
+          for i,(name,blk,count,sha) in enumerate(rows):
+              apply += [f'%ADB% shell "dd if=%DEV% of=/tmp/w7c{i:02d}.bin bs=4096 skip={blk} count={count} 2>/dev/null" || exit /b 1',
+                        f'%ADB% pull /tmp/w7c{i:02d}.bin "%ROOT%backup_current\base_{i:02d}.bin" >nul || exit /b 1']
+          apply += ['echo [3/4] Disabilito TUTTI i BoringSSL system self-test della finestra init...']
+          for i,(name,blk,count,sha) in enumerate(rows):
+              apply += [f'echo Patch blocco {blk} count {count}',
+                        f'%ADB% push "%ROOT%segments\{name}" /tmp/w7p{i:02d}.bin >nul || exit /b 1',
+                        f'%ADB% shell "dd if=/tmp/w7p{i:02d}.bin of=%DEV% bs=4096 seek={blk} count={count} conv=notrunc,fsync 2>/dev/null" || exit /b 1',
+                        f'%ADB% shell "dd if=%DEV% of=/tmp/w7v{i:02d}.bin bs=4096 skip={blk} count={count} 2>/dev/null" || exit /b 1',
+                        f'%ADB% pull /tmp/w7v{i:02d}.bin "%ROOT%verify_{i:02d}.bin" >nul || exit /b 1',
+                        f'certutil -hashfile "%ROOT%verify_{i:02d}.bin" SHA256 | find /i "{sha}" >nul || (echo VERIFY FAILED segment {i:02d} & exit /b 1)']
+          apply += ['echo [4/4] ALL SYSTEM BSSL BYPASS OK.','echo Riavvio Android normale...','%ADB% reboot','endlocal']
+          (out/'APPLY_ALL_SYSTEM_BSSL_AND_BOOT.cmd').write_text('\r\n'.join(apply)+'\r\n')
+
+          read=['@echo off','set ADB='+adb,
+                '%ADB% shell "echo === MARKERS ===; ls -ld /metadata/vold/wear7diag/* 2>/dev/null"']
+          (out/'READ_MARKERS.cmd').write_text('\r\n'.join(read)+'\r\n')
+
+          restore=['@echo off','setlocal EnableExtensions','set ROOT=%~dp0','set ADB='+adb,'set DEV=/dev/block/by-name/super','echo Ripristino blocchi...']
+          for i,(name,blk,count,sha) in enumerate(rows):
+              restore += [f'if not exist "%ROOT%backup_current\base_{i:02d}.bin" (echo Manca backup base_{i:02d}.bin & exit /b 1)',
+                          f'%ADB% push "%ROOT%backup_current\base_{i:02d}.bin" /tmp/w7r{i:02d}.bin >nul || exit /b 1',
+                          f'%ADB% shell "dd if=/tmp/w7r{i:02d}.bin of=%DEV% bs=4096 seek={blk} count={count} conv=notrunc,fsync 2>/dev/null" || exit /b 1']
+          restore += ['%ADB% shell sync','echo RESTORE OK','endlocal']
+          (out/'RESTORE_FROM_RECOVERY.cmd').write_text('\r\n'.join(restore)+'\r\n')
+
+          sha256sum out/segments/*.bin out/*.cmd out/super_CURRENT_to_ALL_SYSTEM_BSSL_BYPASS_DELTA.img > out/SHA256SUMS.txt
+          rm -f "$W/diag2.raw" "$W/current.raw" "$W/target.raw"
+
+      - name: Upload tiny package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V11-All-System-BSSL-Bypass
+          path: out/
+          if-no-files-found: error
+          retention-days: 60
+          compression-level: 9
+ "$W/mnt_system/system/etc/init/hw"/init.boringssl.*.rc; then
             echo "ACTIVE SYSTEM BORINGSSL exec_start REMAINS" >&2
             sudo umount "$W/mnt_system"
             exit 1
