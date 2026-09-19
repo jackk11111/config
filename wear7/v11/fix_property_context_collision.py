@@ -67,17 +67,17 @@ def main():
         if any(x['tail']!=v['tail'] for x in donors):
             detail=' | '.join(f"{x['part']}:{x['line']}:{' '.join(x['tail'])}" for x in items)
             raise SystemExit(f'refusing V11: semantic mismatch for {name}: {detail}')
-        if any(x['part']!='system' for x in donors):
+        if any(x['part']!='system_ext' for x in donors):
             detail=' | '.join(f"{x['part']}:{x['line']}" for x in donors)
-            raise SystemExit(f'refusing V11: collision {name} requires rebuilding non-system partition: {detail}')
+            raise SystemExit(f'refusing V11: collision {name} is outside staged system_ext: {detail}')
         removals.extend(donors)
 
     # Current root-cause evidence requires this exact property to be among the fixed collisions.
     if 'ro.charger_mode_autoboot' not in dups:
         raise SystemExit('refusing V11: expected ro.charger_mode_autoboot collision absent')
 
-    # Remove exact duplicate donor rows from the writable staged system file only.
-    target=files['system']
+    # Remove exact duplicate donor rows from the writable staged system_ext file only.
+    target=files['system_ext']
     lines=target.read_text(errors='replace').splitlines()
     remove_lines={x['line'] for x in removals}
     kept=[line for i,line in enumerate(lines,1) if i not in remove_lines]
@@ -98,7 +98,7 @@ def main():
 
     report={
       'status':'PASS',
-      'policy':'preserve_stock_dace_vendor_mapping_remove_identical_donor_system_duplicate',
+      'policy':'preserve_stock_dace_vendor_mapping_remove_identical_donor_system_ext_duplicate',
       'removed':[{
         'name':x['name'],'part':x['part'],'line':x['line'],
         'context':x['context'],'tail':list(x['tail'])
