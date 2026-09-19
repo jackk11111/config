@@ -122,7 +122,7 @@ jobs:
           print(report.read_text())
           PY
 
-          # Prove current -> target differs by exactly seven bytes.
+          # Prove current -> target differs by exactly three physical bytes.
           python3 - "$W/current.raw" "$W/target.raw" out/DIFF_PROOF.txt <<'PY'
           import sys,pathlib,hashlib
           a=pathlib.Path(sys.argv[1]); b=pathlib.Path(sys.argv[2]); out=pathlib.Path(sys.argv[3])
@@ -143,6 +143,20 @@ jobs:
           out.write_text('\n'.join(rows)+'\n')
           print(out.read_text())
           PY
+
+          # Semantic proof after shared-block edit: all logical init.boringssl variants must be bypassed.
+          mkdir -p "$W/parts_target" "$W/mnt_system"
+          lpunpack "$W/target.raw" "$W/parts_target"
+          sudo mount -o loop,ro,noload "$W/parts_target/system.img" "$W/mnt_system"
+          find "$W/mnt_system/system/etc/init/hw" -maxdepth 1 -name 'init.boringssl.*.rc' -type f -print -exec cat {} \; > out/BSSL_LOGICAL_FILES_AFTER.txt
+          if grep -R -n '^[[:space:]]*exec_start[[:space:]]\+boringssl_self_test' "$W/mnt_system/system/etc/init/hw"/init.boringssl.*.rc; then
+            echo "ACTIVE SYSTEM BORINGSSL exec_start REMAINS" >&2
+            sudo umount "$W/mnt_system"
+            exit 1
+          fi
+          sudo umount "$W/mnt_system"
+          rm -rf "$W/parts_target" "$W/mnt_system"
+          echo "ALL_LOGICAL_SYSTEM_BSSL_EXEC_START_BYPASSED=PASS" >> out/SYSTEM_BSSL_EDITS.txt
 
           # Make exact sparse delta from CURRENT WATCH state to target.
           python3 wear7/v11/make_sparse_delta.py             --base "$W/current.raw" --target "$W/target.raw"             --output out/super_CURRENT_to_ALL_SYSTEM_BSSL_BYPASS_DELTA.img             --report out/DELTA_REPORT.json
