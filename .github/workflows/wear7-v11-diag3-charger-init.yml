@@ -3,7 +3,7 @@ name: Wear7 V11 DIAG3 charger-init micro-patch
 on:
   push:
     branches: [wear7-v11-current-diag3-charger-init]
-    paths: ['.github/workflows/wear7-v11-diag3-charger-init.yml']
+    paths: ['.github/workflows/wear7-v11-diag3-charger-init.yml', 'wear7/v11/make_sparse_delta.py']
   workflow_dispatch:
 
 permissions:
