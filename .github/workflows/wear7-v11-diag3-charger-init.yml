@@ -112,53 +112,60 @@ jobs:
           ("on boot","16_BOOT"),
           ("on property:sys.boot_completed=1","17_BOOT_COMPLETED"),
           ]
-          new_headers=[
-          "on early-init",
-          "on init",
-          "on late-init",
-          "on charger",
-          "on property:ro.bootmode=*",
-          "on property:ro.bootmode=charger",
-          "on property:ro.bootmode=normal",
-          "on property:ro.bootmode=unknown",
-          "on property:init.svc.lmkd=running",
-          "on property:init.svc.servicemanager=running",
-          "on property:init.svc.hwservicemanager=running",
-          "on property:init.svc.vndservicemanager=running",
-          "on property:init.svc.vendor.keymaster-4-1=running",
-          "on property:init.svc.vendor.qseecomd=running",
-          "on property:init.svc.qseecom-service=running",
-          "on property:init.svc.lmkd=restarting",
-          "on property:init.svc.servicemanager=restarting",
-          "on property:init.svc.hwservicemanager=restarting",
+          new_actions=[
+          ("EARLY_INIT","on early-init"),
+          ("INIT","on init"),
+          ("LATE_INIT","on late-init"),
+          ("CHARGER_EVENT","on charger"),
+          ("BOOTMODE_ANY","on property:ro.bootmode=*"),
+          ("BOOTMODE_CHARGER","on property:ro.bootmode=charger"),
+          ("BOOTMODE_NORMAL","on property:ro.bootmode=normal"),
+          ("BOOTMODE_UNKNOWN","on property:ro.bootmode=unknown"),
+          ("LMKD_RUNNING","on property:init.svc.lmkd=running"),
+          ("SERVICEMANAGER_RUNNING","on property:init.svc.servicemanager=running"),
+          ("HWSERVICEMANAGER_RUNNING","on property:init.svc.hwservicemanager=running"),
+          ("VNDSERVICEMANAGER_RUNNING","on property:init.svc.vndservicemanager=running"),
+          ("KEYMASTER_RUNNING","on property:init.svc.vendor.keymaster-4-1=running"),
+          ("QSEECOMD_RUNNING","on property:init.svc.vendor.qseecomd=running"),
+          ("QSEECOM_SERVICE_RUNNING","on property:init.svc.qseecom-service=running"),
+          ("LMKD_RESTARTING","on property:init.svc.lmkd=restarting"),
+          ("SERVICEMANAGER_RESTARTING","on property:init.svc.servicemanager=restarting"),
+          ("HWSERVICEMANAGER_RESTARTING","on property:init.svc.hwservicemanager=restarting"),
           ]
-          labels=[
-          "EARLY_INIT","INIT","LATE_INIT","CHARGER_EVENT","BOOTMODE_ANY",
-          "BOOTMODE_CHARGER","BOOTMODE_NORMAL","BOOTMODE_UNKNOWN",
-          "LMKD_RUNNING","SERVICEMANAGER_RUNNING","HWSERVICEMANAGER_RUNNING",
-          "VNDSERVICEMANAGER_RUNNING","KEYMASTER_RUNNING","QSEECOMD_RUNNING",
-          "QSEECOM_SERVICE_RUNNING","LMKD_RESTARTING","SERVICEMANAGER_RESTARTING",
-          "HWSERVICEMANAGER_RESTARTING"
-          ]
+          # Assign longest diagnostic triggers to the largest existing action blocks.
+          # This keeps the ext4 file byte-size EXACTLY unchanged.
+          old_entries=[]
+          for idx,(oldh,oldname) in enumerate(old_blocks):
+              old=(oldh+"\n    chmod 0777 /metadata/vold/wear7diag/"+oldname+"\n").encode()
+              old_entries.append((len(old),idx,oldh,oldname,old))
+          new_entries=[]
+          for label,newh in new_actions:
+              # marker path uses the OLD block index, filled after assignment
+              new_entries.append((label,newh))
+          old_entries.sort()
+          # Sort new actions by their minimum byte requirement; marker index length is always 2 digits.
+          def need(item):
+              label,h=item
+              return len((h+"\n    chmod 0777 /metadata/vold/d/00\n").encode())
+          new_entries.sort(key=need)
           rows=[]
           with p.open('r+b') as f:
               mm=mmap.mmap(f.fileno(),0)
               try:
-                  for i,((oldh,oldname),newh,label) in enumerate(zip(old_blocks,new_headers,labels)):
-                      old=(oldh+"\n    chmod 0777 /metadata/vold/wear7diag/"+oldname+"\n").encode()
-                      new=(newh+"\n    chmod 0777 /metadata/vold/w7d/%02d\n"%i).encode()
+                  for (olen,idx,oldh,oldname,old),(label,newh) in zip(old_entries,new_entries):
+                      new=(newh+"\n    chmod 0777 /metadata/vold/d/%02d\n"%idx).encode()
                       if len(new)>len(old):
-                          raise SystemExit(f'replacement too long {i}: {len(new)}>{len(old)}')
+                          raise SystemExit(f'replacement too long oldblock={idx}: {len(new)}>{len(old)} label={label}')
                       pos=mm.find(old)
-                      if pos<0: raise SystemExit(f'old block {i} not found')
-                      if mm.find(old,pos+1)>=0: raise SystemExit(f'old block {i} not unique')
+                      if pos<0: raise SystemExit(f'old block {idx} not found')
+                      if mm.find(old,pos+1)>=0: raise SystemExit(f'old block {idx} not unique')
                       repl=new[:-1] + b' '*(len(old)-len(new)) + b'\n'
                       mm[pos:pos+len(old)]=repl
-                      rows.append(f'{i:02d} {label}: {newh} @raw={pos} block={pos//4096}')
-                  # End-of-main-system-on-init marker: turn the long BoringSSL comment
+                      rows.append(f'{idx:02d} {label}: {newh} @raw={pos} block={pos//4096}')
+          # End-of-main-system-on-init marker: turn the long BoringSSL comment
                   # into a harmless chmod command inside the same on-init action.
                   old=b'    # Run boringssl self test for each ABI.  Any failures trigger reboot to firmware.\n'
-                  new=b'    chmod 0777 /metadata/vold/w7d/EI\n'
+                  new=b'    chmod 0777 /metadata/vold/d/EI\n'
                   pos=mm.find(old)
                   if pos<0: raise SystemExit('end-init comment not found')
                   if mm.find(old,pos+1)>=0: raise SystemExit('end-init comment not unique')
