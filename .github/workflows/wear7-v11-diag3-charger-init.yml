@@ -1,0 +1,231 @@
+name: Wear7 V11 DIAG3 charger-init micro-patch
+
+on:
+  push:
+    branches: [wear7-v11-current-diag3-charger-init]
+    paths: ['.github/workflows/wear7-v11-diag3-charger-init.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          mkdir -p "$RUNNER_TEMP/w7/base" "$RUNNER_TEMP/w7/tools" out/segments
+
+      - name: Download exact DIAG2 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG2-Super
+          path: ${{ runner.temp }}/w7/base
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35444837392'
+
+      - name: Build DIAG3 from exact CURRENT watch state
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/','lib64/','lib/')):
+                      p=(out/n).resolve()
+                      if not p.is_relative_to(out): raise SystemExit('unsafe')
+                      z.extract(n,out)
+          PY
+          rm "$ZIP"
+          chmod +x "$W/tools/extracted/bin/"*
+          export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
+
+          simg2img "$W/base/super.img" "$W/diag2.raw"
+          cp --reflink=auto "$W/diag2.raw" "$W/current.raw"
+
+          # Reconstruct exact watch state:
+          # DIAG2 + vendor BSSL bypass (2 bytes) + system BSSL bypass (3 bytes).
+          python3 - "$W/current.raw" <<'PY'
+          import mmap,sys,hashlib,pathlib
+          p=pathlib.Path(sys.argv[1])
+          edits=[
+            (3702792344,b'e',b'#'),
+            (3702792441,b'e',b'#'),
+            (744284211,b'e',b'#'),
+            (744288307,b'e',b'#'),
+            (744288391,b'e',b'#'),
+          ]
+          with p.open('r+b') as f:
+              mm=mmap.mmap(f.fileno(),0)
+              try:
+                  for off,old,new in edits:
+                      if mm[off:off+1] != old:
+                          raise SystemExit(f'base mismatch at {off}: {mm[off:off+1]!r}')
+                      mm[off:off+1]=new
+                  mm.flush()
+              finally:
+                  mm.close()
+          h=hashlib.sha256(p.read_bytes()).hexdigest()
+          expected='0298d8676c8e6e4de81ad100f3b74dbc6795046eebfb39951a339dc485547cfb'
+          if h!=expected: raise SystemExit(f'CURRENT SHA mismatch {h}')
+          print('CURRENT_SHA256='+h)
+          PY
+
+          cp --reflink=auto "$W/current.raw" "$W/target.raw"
+
+          python3 - "$W/target.raw" out/DIAG3_MAPPING.txt <<'PY'
+          import mmap,sys,pathlib,hashlib
+          p=pathlib.Path(sys.argv[1]); report=pathlib.Path(sys.argv[2])
+
+          old_blocks=[
+          ("on early-init","00_EARLY_INIT"),
+          ("on init","01_INIT"),
+          ("on late-init","02_LATE_INIT"),
+          ("on property:init.svc.apexd-bootstrap=running","03_APEXD_BOOTSTRAP_RUNNING"),
+          ("on property:init.svc.apexd-bootstrap=stopped","04_APEXD_BOOTSTRAP_STOPPED"),
+          ("on property:init.svc.apexd=running","05_APEXD_RUNNING"),
+          ("on property:apexd.status=ready","06_APEXD_READY"),
+          ("on property:init.svc.vold=running","07_VOLD_RUNNING"),
+          ("on post-fs","08_POST_FS"),
+          ("on post-fs-data","09_POST_FS_DATA"),
+          ("on property:init.svc.bpfloader=running","10_BPFLOADER_RUNNING"),
+          ("on bpf-progs-loaded","11_BPF_PROGS_LOADED"),
+          ("on property:init.svc.netd=running","12_NETD_RUNNING"),
+          ("on zygote-start","13_ZYGOTE_START"),
+          ("on property:init.svc.zygote=running","14_ZYGOTE_RUNNING"),
+          ("on early-boot","15_EARLY_BOOT"),
+          ("on boot","16_BOOT"),
+          ("on property:sys.boot_completed=1","17_BOOT_COMPLETED"),
+          ]
+          new_headers=[
+          "on early-init",
+          "on init",
+          "on late-init",
+          "on charger",
+          "on property:ro.bootmode=*",
+          "on property:ro.bootmode=charger",
+          "on property:ro.bootmode=normal",
+          "on property:ro.bootmode=unknown",
+          "on property:init.svc.lmkd=running",
+          "on property:init.svc.servicemanager=running",
+          "on property:init.svc.hwservicemanager=running",
+          "on property:init.svc.vndservicemanager=running",
+          "on property:init.svc.vendor.keymaster-4-1=running",
+          "on property:init.svc.vendor.qseecomd=running",
+          "on property:init.svc.qseecom-service=running",
+          "on property:init.svc.lmkd=restarting",
+          "on property:init.svc.servicemanager=restarting",
+          "on property:init.svc.hwservicemanager=restarting",
+          ]
+          labels=[
+          "EARLY_INIT","INIT","LATE_INIT","CHARGER_EVENT","BOOTMODE_ANY",
+          "BOOTMODE_CHARGER","BOOTMODE_NORMAL","BOOTMODE_UNKNOWN",
+          "LMKD_RUNNING","SERVICEMANAGER_RUNNING","HWSERVICEMANAGER_RUNNING",
+          "VNDSERVICEMANAGER_RUNNING","KEYMASTER_RUNNING","QSEECOMD_RUNNING",
+          "QSEECOM_SERVICE_RUNNING","LMKD_RESTARTING","SERVICEMANAGER_RESTARTING",
+          "HWSERVICEMANAGER_RESTARTING"
+          ]
+          rows=[]
+          with p.open('r+b') as f:
+              mm=mmap.mmap(f.fileno(),0)
+              try:
+                  for i,((oldh,oldname),newh,label) in enumerate(zip(old_blocks,new_headers,labels)):
+                      old=(oldh+"\n    chmod 0777 /metadata/vold/wear7diag/"+oldname+"\n").encode()
+                      new=(newh+"\n    chmod 0777 /metadata/vold/w7d/%02d\n"%i).encode()
+                      if len(new)>len(old):
+                          raise SystemExit(f'replacement too long {i}: {len(new)}>{len(old)}')
+                      pos=mm.find(old)
+                      if pos<0: raise SystemExit(f'old block {i} not found')
+                      if mm.find(old,pos+1)>=0: raise SystemExit(f'old block {i} not unique')
+                      repl=new[:-1] + b' '*(len(old)-len(new)) + b'\n'
+                      mm[pos:pos+len(old)]=repl
+                      rows.append(f'{i:02d} {label}: {newh} @raw={pos} block={pos//4096}')
+                  # End-of-main-system-on-init marker: turn the long BoringSSL comment
+                  # into a harmless chmod command inside the same on-init action.
+                  old=b'    # Run boringssl self test for each ABI.  Any failures trigger reboot to firmware.\n'
+                  new=b'    chmod 0777 /metadata/vold/w7d/EI\n'
+                  pos=mm.find(old)
+                  if pos<0: raise SystemExit('end-init comment not found')
+                  if mm.find(old,pos+1)>=0: raise SystemExit('end-init comment not unique')
+                  if len(new)>len(old): raise SystemExit('end-init replacement too long')
+                  repl=new[:-1]+b' '*(len(old)-len(new))+b'\n'
+                  mm[pos:pos+len(old)]=repl
+                  rows.append(f'EI END_MAIN_SYSTEM_ON_INIT @raw={pos} block={pos//4096}')
+                  mm.flush()
+              finally:
+                  mm.close()
+          report.write_text('\n'.join(rows)+'\n')
+          print(report.read_text())
+          PY
+
+          python3 - "$W/current.raw" "$W/target.raw" out/DIFF_PROOF.txt <<'PY'
+          import sys,pathlib,hashlib
+          a=pathlib.Path(sys.argv[1]); b=pathlib.Path(sys.argv[2]); o=pathlib.Path(sys.argv[3])
+          diffs=[]; off=0; ha=hashlib.sha256(); hb=hashlib.sha256()
+          with a.open('rb',buffering=0) as fa,b.open('rb',buffering=0) as fb:
+              while True:
+                  x=fa.read(8*1024*1024); y=fb.read(8*1024*1024)
+                  if not x and not y: break
+                  if len(x)!=len(y): raise SystemExit('length mismatch')
+                  ha.update(x); hb.update(y)
+                  if x!=y:
+                      diffs.extend((off+i,u,v) for i,(u,v) in enumerate(zip(x,y)) if u!=v)
+                  off+=len(x)
+          rows=[f'base_sha256={ha.hexdigest()}',f'target_sha256={hb.hexdigest()}',f'changed_bytes={len(diffs)}',
+                f'changed_blocks={len(set(x[0]//4096 for x in diffs))}']
+          rows += [f'offset={p} old=0x{x:02x} new=0x{y:02x} block={p//4096}' for p,x,y in diffs[:200]]
+          o.write_text('\n'.join(rows)+'\n')
+          print('\n'.join(rows[:4]))
+          PY
+
+          python3 wear7/v11/make_sparse_delta.py             --base "$W/current.raw" --target "$W/target.raw"             --output out/super_CURRENT_to_DIAG3_DELTA.img             --report out/DELTA_REPORT.json
+
+          python3 - out/super_CURRENT_to_DIAG3_DELTA.img out/segments out/SEGMENTS.tsv <<'PY'
+          import pathlib,struct,sys,hashlib
+          src=pathlib.Path(sys.argv[1]); od=pathlib.Path(sys.argv[2]); man=pathlib.Path(sys.argv[3])
+          with src.open('rb') as f:
+              h=f.read(28)
+              magic,maj,minv,fhs,chs,bs,total,nchunks,ck=struct.unpack('<IHHHHIIII',h)
+              if (magic,bs,fhs,chs)!=(0xED26FF3A,4096,28,12): raise SystemExit('unexpected sparse')
+              blk=0; seg=0; rows=[]
+              for _ in range(nchunks):
+                  typ,res,count,total_sz=struct.unpack('<HHII',f.read(12))
+                  if typ==0xCAC1:
+                      data=f.read(count*bs)
+                      name=f'seg{seg:02d}.bin'; (od/name).write_bytes(data)
+                      rows.append((name,blk,count,hashlib.sha256(data).hexdigest()))
+                      seg+=1
+                  elif typ==0xCAC3:
+                      if total_sz!=12: raise SystemExit('bad dontcare')
+                  else:
+                      raise SystemExit(f'unexpected chunk {typ:#x}')
+                  blk+=count
+          man.write_text('\n'.join(f'{n}\t{b}\t{c}\t{s}' for n,b,c,s in rows)+'\n')
+          print(man.read_text())
+          PY
+
+          sha256sum out/segments/*.bin out/super_CURRENT_to_DIAG3_DELTA.img > out/SHA256SUMS.txt
+
+      - name: Upload compact DIAG3 package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V11-DIAG3-ChargerInit
+          path: out/
+          if-no-files-found: error
+          retention-days: 60
+          compression-level: 9
