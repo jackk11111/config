@@ -59,7 +59,8 @@ jobs:
           export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
           simg2img "$W/base/super.img" "$W/base.raw"
           test "$(stat -c %s "$W/base.raw")" = 4294967296
-          lpdump "$W/base.raw" > "$W/base.lpdump"
+          mkdir -p "$W/baseparts"
+          lpunpack "$W/base.raw" "$W/baseparts"
           rm -f "$W/base/super.img"
           df -h /
 
@@ -72,7 +73,7 @@ jobs:
           repository: ${{ github.repository }}
           run-id: '35444837392'
 
-      - name: Expand target and prove identical LP geometry
+      - name: Expand target and prove only system_ext differs
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -80,12 +81,25 @@ jobs:
           export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
           simg2img "$W/target/super.img" "$W/target.raw"
           test "$(stat -c %s "$W/target.raw")" = 4294967296
-          lpdump "$W/target.raw" > "$W/target.lpdump"
+          mkdir -p "$W/targetparts"
+          lpunpack "$W/target.raw" "$W/targetparts"
           rm -f "$W/target/super.img"
-          diff -u "$W/base.lpdump" "$W/target.lpdump" | tee out/LP_GEOMETRY_DIFF.txt
-          test ! -s out/LP_GEOMETRY_DIFF.txt
-          cp "$W/target.lpdump" out/LP_GEOMETRY.txt
-          echo "LP_GEOMETRY_EXACT_MATCH=PASS" | tee out/LP_GEOMETRY_GATE.txt
+          : > out/LOGICAL_PARTITION_GATE.txt
+          for p in system product vendor vendor_dlkm system_dlkm; do
+            test -f "$W/baseparts/$p.img" && test -f "$W/targetparts/$p.img"
+            test "$(stat -c %s "$W/baseparts/$p.img")" = "$(stat -c %s "$W/targetparts/$p.img")"
+            cmp -s "$W/baseparts/$p.img" "$W/targetparts/$p.img"
+            echo "$p EXACT_MATCH=PASS sha256=$(sha256sum "$W/targetparts/$p.img" | awk '{print $1}')" >> out/LOGICAL_PARTITION_GATE.txt
+          done
+          test -f "$W/baseparts/system_ext.img" && test -f "$W/targetparts/system_ext.img"
+          test "$(stat -c %s "$W/baseparts/system_ext.img")" = "$(stat -c %s "$W/targetparts/system_ext.img")"
+          if cmp -s "$W/baseparts/system_ext.img" "$W/targetparts/system_ext.img"; then
+            echo "system_ext unexpectedly identical" >&2; exit 1
+          fi
+          echo "system_ext DIFFERENT_AS_EXPECTED=PASS" >> out/LOGICAL_PARTITION_GATE.txt
+          sha256sum "$W/baseparts/system_ext.img" "$W/targetparts/system_ext.img" >> out/LOGICAL_PARTITION_GATE.txt
+          cat out/LOGICAL_PARTITION_GATE.txt
+          rm -rf "$W/baseparts" "$W/targetparts"
 
       - name: Generate exact sparse delta
         shell: bash
