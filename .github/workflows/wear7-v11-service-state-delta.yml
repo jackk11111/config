@@ -1,0 +1,99 @@
+name: Wear7 V11 service-state safe delta
+
+on:
+  push:
+    branches: [wear7-v11-service-state-diag]
+    paths:
+      - '.github/workflows/wear7-v11-service-state-delta.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  delta:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          mkdir -p "$RUNNER_TEMP/base" "$RUNNER_TEMP/target" "$RUNNER_TEMP/tools" out/base_segments out/target_segments
+
+      - name: Download current FS-aware base super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-FSCharger-Super
+          path: ${{ runner.temp }}/base
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35458148029'
+
+      - name: Download service-state target super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-ServiceState-Super
+          path: ${{ runner.temp }}/target
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35459763710'
+
+      - name: Expand and gate logical partitions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP"
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          mkdir -p "$W/tools/extracted"
+          unzip -q "$ZIP" 'bin/*' 'lib64/*' -d "$W/tools/extracted"
+          rm "$ZIP"
+          chmod +x "$W/tools/extracted/bin/"*
+          export PATH="$W/tools/extracted/bin:$PATH"
+          export LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
+
+          simg2img "$W/base/super.img" "$W/base.raw"
+          simg2img "$W/target/super.img" "$W/target.raw"
+          test "$(stat -c %s "$W/base.raw")" = 4294967296
+          test "$(stat -c %s "$W/target.raw")" = 4294967296
+
+          mkdir -p "$W/baseparts" "$W/targetparts"
+          lpunpack "$W/base.raw" "$W/baseparts"
+          lpunpack "$W/target.raw" "$W/targetparts"
+
+          : > out/LOGICAL_GATE.txt
+          for p in system product vendor vendor_dlkm system_dlkm; do
+            test "$(stat -c %s "$W/baseparts/$p.img")" = "$(stat -c %s "$W/targetparts/$p.img")"
+            cmp -s "$W/baseparts/$p.img" "$W/targetparts/$p.img"
+            echo "$p EXACT_MATCH=PASS" >> out/LOGICAL_GATE.txt
+          done
+          test "$(stat -c %s "$W/baseparts/system_ext.img")" = "$(stat -c %s "$W/targetparts/system_ext.img")"
+          if cmp -s "$W/baseparts/system_ext.img" "$W/targetparts/system_ext.img"; then
+            echo "system_ext unexpectedly identical" >&2
+            exit 1
+          fi
+          echo "system_ext DIFFERENT_AS_EXPECTED=PASS" >> out/LOGICAL_GATE.txt
+          cat out/LOGICAL_GATE.txt
+
+      - name: Generate safe block segments
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 .github/scripts/fs_charger_delta.py "$RUNNER_TEMP/base.raw" "$RUNNER_TEMP/target.raw" out
+          sha256sum out/target_segments/*.bin > out/TARGET_SEGMENTS_SHA256.txt
+          rm -rf "$RUNNER_TEMP/baseparts" "$RUNNER_TEMP/targetparts" "$RUNNER_TEMP/base.raw" "$RUNNER_TEMP/target.raw"
+
+      - name: Upload compact safe delta
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V11-ServiceState-SafeDelta
+          path: out/
+          if-no-files-found: error
+          retention-days: 60
+          compression-level: 9
