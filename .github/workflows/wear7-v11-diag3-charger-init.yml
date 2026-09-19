@@ -162,7 +162,7 @@ jobs:
                       repl=new[:-1] + b' '*(len(old)-len(new)) + b'\n'
                       mm[pos:pos+len(old)]=repl
                       rows.append(f'{idx:02d} {label}: {newh} @raw={pos} block={pos//4096}')
-          # End-of-main-system-on-init marker: turn the long BoringSSL comment
+                  # End-of-main-system-on-init marker: turn the long BoringSSL comment
                   # into a harmless chmod command inside the same on-init action.
                   old=b'    # Run boringssl self test for each ABI.  Any failures trigger reboot to firmware.\n'
                   new=b'    chmod 0777 /metadata/vold/d/EI\n'
