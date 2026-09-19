@@ -84,6 +84,55 @@ jobs:
           sudo mount -o loop,ro,noload "$W/stock-product.img" "$W/mnt/stock-product"
           sudo mount -o loop,ro,noload "$W/stock-system_ext.img" "$W/mnt/stock-system_ext"
 
+      - name: Audit all cross-partition property-context collisions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11audit"
+          python3 - "$W/mnt" "$GITHUB_WORKSPACE/audit-report" <<'PY'
+          from pathlib import Path
+          import sys,json,re
+          m=Path(sys.argv[1]); out=Path(sys.argv[2])
+          roots={
+            'system': m/'system/system',
+            'system_ext': m/'system_ext',
+            'product': m/'product',
+            'vendor': m/'vendor',
+          }
+          files={
+            'system': roots['system']/'etc/selinux/plat_property_contexts',
+            'system_ext': roots['system_ext']/'etc/selinux/system_ext_property_contexts',
+            'product': roots['product']/'etc/selinux/product_property_contexts',
+            'vendor': roots['vendor']/'etc/selinux/vendor_property_contexts',
+          }
+          rows=[]
+          for part,p in files.items():
+              if not p.is_file(): continue
+              for n,line in enumerate(p.read_text(errors='replace').splitlines(),1):
+                  raw=line.strip()
+                  if not raw or raw.startswith('#'): continue
+                  toks=raw.split()
+                  if len(toks)<2: continue
+                  name=toks[0]
+                  mode='exact' if 'exact' in toks[2:] else 'prefix'
+                  rows.append({'name':name,'part':part,'file':str(p),'line':n,'context':toks[1],'mode':mode,'raw':raw})
+          by={}
+          for r in rows:
+              if r['mode']=='exact':
+                  by.setdefault(r['name'],[]).append(r)
+          dups={k:v for k,v in by.items() if len(v)>1}
+          (out/'PROPERTY_CONTEXT_EXACT_DUPLICATES.json').write_text(json.dumps(dups,indent=2)+'\n')
+          with (out/'PROPERTY_CONTEXT_EXACT_DUPLICATES.txt').open('w') as f:
+              for name,items in sorted(dups.items()):
+                  f.write(f'=== {name} ({len(items)}) ===\n')
+                  for x in items:
+                      f.write(f"{x['part']}:{x['line']} {x['context']} :: {x['raw']}\n")
+          target=[r for r in rows if r['name']=='ro.charger_mode_autoboot']
+          (out/'CHARGER_MODE_AUTOBOOT_CONTEXTS.json').write_text(json.dumps(target,indent=2)+'\n')
+          print('PROPERTY_CONTEXT_EXACT_DUPLICATES',len(dups))
+          print((out/'PROPERTY_CONTEXT_EXACT_DUPLICATES.txt').read_text())
+          PY
+
       - name: Verify complete init grammar with Android 17 host_init_verifier
         shell: bash
         run: |
