@@ -137,7 +137,7 @@ EOF
 cp "$W/stage-system_ext/etc/init/wear7-v11-stage-marker.rc" "$REP/WEAR7_V11_STAGE_MARKER.rc"
 python3 - "$W/stage-system_ext/etc/init/wear7-v11-stage-marker.rc" <<'PY'
 import os,sys
-os.setxattr(sys.argv[1], 'security.selinux', b'u:object_r:system_file:s0')
+os.setxattr(sys.argv[1], 'security.selinux', b'u:object_r:system_file:s0\x00')
 PY
 
 run_host_init_gate() {
