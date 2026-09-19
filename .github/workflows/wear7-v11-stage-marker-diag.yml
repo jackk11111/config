@@ -1,4 +1,5 @@
 name: Wear7 V11 stage-marker diagnostic
+# diagnostic-only branch
 
 on:
   push:
