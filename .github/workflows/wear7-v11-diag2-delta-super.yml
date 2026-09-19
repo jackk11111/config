@@ -1,0 +1,133 @@
+name: Wear7 V11 DIAG2 delta super
+
+on:
+  push:
+    branches: [wear7-v11-diag2-delta-super]
+    paths:
+      - '.github/workflows/wear7-v11-diag2-delta-super.yml'
+      - 'wear7/v11/make_sparse_delta.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  delta:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Free runner space and prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          mkdir -p "$RUNNER_TEMP/base" "$RUNNER_TEMP/target" "$RUNNER_TEMP/bootchain" "$RUNNER_TEMP/tools" out
+          df -h /
+
+      - name: Download installed DIAG1 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG-Super
+          path: ${{ runner.temp }}/base
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35439690416'
+
+      - name: Prepare tools and expand base
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP"
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/','lib64/','lib/')):
+                      d=(out/n).resolve()
+                      if not d.is_relative_to(out): raise SystemExit('unsafe')
+                      z.extract(n,out)
+          PY
+          rm "$ZIP"
+          chmod +x "$W/tools/extracted/bin/"*
+          export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
+          simg2img "$W/base/super.img" "$W/base.raw"
+          test "$(stat -c %s "$W/base.raw")" = 4294967296
+          lpdump "$W/base.raw" > "$W/base.lpdump"
+          rm -f "$W/base/super.img"
+          df -h /
+
+      - name: Download target DIAG2 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG2-Super
+          path: ${{ runner.temp }}/target
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35444837392'
+
+      - name: Expand target and prove identical LP geometry
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP"
+          export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
+          simg2img "$W/target/super.img" "$W/target.raw"
+          test "$(stat -c %s "$W/target.raw")" = 4294967296
+          lpdump "$W/target.raw" > "$W/target.lpdump"
+          rm -f "$W/target/super.img"
+          diff -u "$W/base.lpdump" "$W/target.lpdump" | tee out/LP_GEOMETRY_DIFF.txt
+          test ! -s out/LP_GEOMETRY_DIFF.txt
+          cp "$W/target.lpdump" out/LP_GEOMETRY.txt
+          echo "LP_GEOMETRY_EXACT_MATCH=PASS" | tee out/LP_GEOMETRY_GATE.txt
+
+      - name: Generate exact sparse delta
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 wear7/v11/make_sparse_delta.py             --base "$RUNNER_TEMP/base.raw"             --target "$RUNNER_TEMP/target.raw"             --output out/super_DIAG1_to_DIAG2_DELTA.img             --report out/DELTA_REPORT.json
+          sha256sum out/super_DIAG1_to_DIAG2_DELTA.img > out/SHA256_DELTA.txt
+          rm -f "$RUNNER_TEMP/base.raw" "$RUNNER_TEMP/target.raw"
+          df -h /
+
+      - name: Download exact DIAG2 bootchain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG2-Bootchain
+          path: ${{ runner.temp }}/bootchain
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35444837392'
+
+      - name: Package matching vbmeta only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp "$RUNNER_TEMP/bootchain/vbmeta_system.img" out/vbmeta_system.img
+          cp "$RUNNER_TEMP/bootchain/vbmeta.img" out/vbmeta.img
+          sha256sum out/vbmeta_system.img out/vbmeta.img > out/SHA256_VBMETA.txt
+          cat > out/README.txt <<'EOF'
+          Target: TicWatch Pro 5 Enduro dace
+          Base installed super: V11-DIAG run 35439690416 only.
+          Target: V11-DIAG2 run 35444837392.
+          The delta is an Android sparse image whose RAW blocks are exactly the bytes
+          that differ between the two 4 GiB raw super images; unchanged blocks are
+          DONT_CARE. DELTA_REPORT.json proves overlay(base,delta)==target SHA256.
+          Flash only when the installed base is still V11-DIAG.
+          EOF
+          rm -rf "$RUNNER_TEMP/bootchain" || true
+
+      - name: Upload compact diagnostic patch
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V11-DIAG2-Delta
+          path: out/
+          if-no-files-found: error
+          retention-days: 60
+          compression-level: 1
