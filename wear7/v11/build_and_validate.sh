@@ -92,6 +92,50 @@ on early-init
 on init
     chmod 0777 /metadata/vold/wear7diag/01_INIT
 
+# Filesystem-aware service-state diagnostic.  These actions only chmod
+# pre-created persistent markers when init publishes service state changes.
+on property:init.svc.servicemanager=running
+    chmod 0777 /metadata/vold/wear7diag/S_SM_RUNNING
+
+on property:init.svc.servicemanager=restarting
+    chmod 0777 /metadata/vold/wear7diag/S_SM_RESTARTING
+
+on property:init.svc.hwservicemanager=running
+    chmod 0777 /metadata/vold/wear7diag/S_HWSM_RUNNING
+
+on property:init.svc.hwservicemanager=restarting
+    chmod 0777 /metadata/vold/wear7diag/S_HWSM_RESTARTING
+
+on property:init.svc.vndservicemanager=running
+    chmod 0777 /metadata/vold/wear7diag/S_VNDSM_RUNNING
+
+on property:init.svc.vndservicemanager=restarting
+    chmod 0777 /metadata/vold/wear7diag/S_VNDSM_RESTARTING
+
+on property:init.svc.lmkd=running
+    chmod 0777 /metadata/vold/wear7diag/S_LMKD_RUNNING
+
+on property:init.svc.lmkd=restarting
+    chmod 0777 /metadata/vold/wear7diag/S_LMKD_RESTARTING
+
+on property:init.svc.vendor.keymaster-4-1=running
+    chmod 0777 /metadata/vold/wear7diag/S_KEYMASTER_RUNNING
+
+on property:init.svc.vendor.keymaster-4-1=restarting
+    chmod 0777 /metadata/vold/wear7diag/S_KEYMASTER_RESTARTING
+
+on property:init.svc.vendor.qseecomd=running
+    chmod 0777 /metadata/vold/wear7diag/S_QSEECOMD_RUNNING
+
+on property:init.svc.vendor.qseecomd=restarting
+    chmod 0777 /metadata/vold/wear7diag/S_QSEECOMD_RESTARTING
+
+on property:init.svc.qseecom-service=running
+    chmod 0777 /metadata/vold/wear7diag/S_QSEECOM_SERVICE_RUNNING
+
+on property:init.svc.qseecom-service=restarting
+    chmod 0777 /metadata/vold/wear7diag/S_QSEECOM_SERVICE_RESTARTING
+
 on late-init
     chmod 0777 /metadata/vold/wear7diag/02_LATE_INIT
 
