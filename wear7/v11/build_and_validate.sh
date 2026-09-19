@@ -130,7 +130,7 @@ on zygote-start
 on property:init.svc.zygote=running
     chmod 0777 /metadata/vold/wear7diag/14_ZYGOTE_RUNNING
 
-on early-boot
+on charger
     chmod 0777 /metadata/vold/wear7diag/15_EARLY_BOOT
 
 on boot
