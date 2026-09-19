@@ -22,7 +22,23 @@ jobs:
           set -Eeuo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq android-sdk-libsparse-utils unzip curl secilc setools >/dev/null
-          mkdir -p "$RUNNER_TEMP/v11pol/input" "$RUNNER_TEMP/v11pol/parts" "$RUNNER_TEMP/v11pol/mnt" report
+          mkdir -p "$RUNNER_TEMP/v11pol/input" "$RUNNER_TEMP/v11pol/parts" "$RUNNER_TEMP/v11pol/mnt" "$RUNNER_TEMP/v11pol/tools" report
+          ZIP="$RUNNER_TEMP/v11pol/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$RUNNER_TEMP/v11pol/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for name in z.namelist():
+                  if name.startswith(('bin/','lib64/','lib/','framework/')):
+                      dst=(out/name).resolve()
+                      if not dst.is_relative_to(out):
+                          raise SystemExit('unsafe path')
+                      z.extract(name,out)
+          PY
+          rm "$ZIP"
+          chmod +x "$RUNNER_TEMP/v11pol/tools/extracted/bin/"*
 
       - name: Download exact V11 super
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -38,6 +54,8 @@ jobs:
         run: |
           set -Eeuo pipefail
           W="$RUNNER_TEMP/v11pol"
+          T="$W/tools/extracted"
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
           simg2img "$W/input/super.img" "$W/super.raw"
           lpunpack "$W/super.raw" "$W/parts"
           rm "$W/super.raw"
