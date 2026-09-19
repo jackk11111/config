@@ -52,22 +52,22 @@ lpunpack "$W/super.raw" "$W/parts"
 rm "$W/super.raw"
 
 cleanup() {
-  for p in final-system system system_ext product vendor; do
-    sudo umount "$W/mnt/$p" 2>/dev/null || true
+  for p in final-system_ext system system_ext product vendor; do
+    umount "$W/mnt/$p" 2>/dev/null || true
   done
 }
 trap cleanup EXIT
 
 for p in system system_ext product vendor; do
   mkdir -p "$W/mnt/$p"
-  sudo mount -o loop,ro,noload "$W/parts/$p.img" "$W/mnt/$p"
+  mount -o loop,ro,noload "$W/parts/$p.img" "$W/mnt/$p"
 done
-mkdir -p "$W/stage-system"
-sudo cp -a "$W/mnt/system/." "$W/stage-system/"
-sudo chown -R "$(id -u):$(id -g)" "$W/stage-system"
 
-# Preserve the exact V7 native/APEX lock evidence. This V11 changes property
-# metadata only; no ELF/APEX payload is changed.
+# Stage ONLY system_ext: audit proved the sole collision is system_ext vs vendor.
+mkdir -p "$W/stage-system_ext"
+cp -a "$W/mnt/system_ext/." "$W/stage-system_ext/"
+
+# Preserve exact V7 native/APEX lock evidence. No ELF or APEX payload is changed.
 test -f "$W/prior-report/VNDK33_PAYLOAD_SHA256.json"
 cp "$W/prior-report/VNDK33_PAYLOAD_SHA256.json" "$REP/VNDK33_PAYLOAD_SHA256.json"
 if test -f "$W/prior-report/NATIVE_STOCK32_COMPAT.json"; then
@@ -75,32 +75,33 @@ if test -f "$W/prior-report/NATIVE_STOCK32_COMPAT.json"; then
 fi
 
 python3 wear7/v11/fix_property_context_collision.py \
-  --system-root "$W/stage-system/system" \
-  --system-ext-root "$W/mnt/system_ext" \
+  --system-root "$W/mnt/system/system" \
+  --system-ext-root "$W/stage-system_ext" \
   --product-root "$W/mnt/product" \
   --vendor-root "$W/mnt/vendor" \
   --report "$REP"
 
 run_host_init_gate() {
-  local tag="$1" sys="$2"
+  local tag="$1" sx="$2"
   local H="$T/bin/host_init_verifier"
+  local SYS="$W/mnt/system/system"
   local -a cmd=("$H"
-    --out_system "$sys"
-    --out_system_ext "$W/mnt/system_ext"
+    --out_system "$SYS"
+    --out_system_ext "$sx"
     --out_product "$W/mnt/product"
     --out_vendor "$W/mnt/vendor")
 
   local p
   for p in \
-    "$sys/etc/selinux/plat_property_contexts" \
-    "$W/mnt/system_ext/etc/selinux/system_ext_property_contexts" \
+    "$SYS/etc/selinux/plat_property_contexts" \
+    "$sx/etc/selinux/system_ext_property_contexts" \
     "$W/mnt/product/etc/selinux/product_property_contexts" \
     "$W/mnt/vendor/etc/selinux/vendor_property_contexts"; do
     test ! -f "$p" || cmd+=("--property-contexts=$p")
   done
   for p in \
-    "$sys/etc/passwd" \
-    "$W/mnt/system_ext/etc/passwd" \
+    "$SYS/etc/passwd" \
+    "$sx/etc/passwd" \
     "$W/mnt/product/etc/passwd" \
     "$W/mnt/vendor/etc/passwd"; do
     test ! -f "$p" || cmd+=(-p "$p")
@@ -115,18 +116,25 @@ run_host_init_gate() {
 
   python3 - "$REP/HOST_INIT_${tag}.log" <<'PY'
 import pathlib,sys,re
-p=pathlib.Path(sys.argv[1]); lines=p.read_text(errors='replace').splitlines()
-forbidden=('Unable to serialize property contexts','Duplicate exact match detected',
-           'Failed to load serialized property info file')
+lines=pathlib.Path(sys.argv[1]).read_text(errors='replace').splitlines()
+forbidden=(
+  'Unable to serialize property contexts',
+  'Duplicate exact match detected',
+  'Failed to load serialized property info file',
+)
 for x in forbidden:
     if any(x in line for line in lines):
         raise SystemExit('fatal host-init property failure remains: '+x)
+
+# host_init_verifier Android17 treats some Android13 Dace service declarations
+# as errors solely because they omit an explicit "user"; those same definitions
+# are present in stock379, which boots. Reject every OTHER parser error.
 errs=[]
 for line in lines:
-    if not line.startswith('host_init_verifier: '): continue
-    if re.search(r'Failed to parse init scripts with \d+ error\(s\)\.$',line): continue
-    # Android13 Dace vendor legacy definitions are known to boot stock and are
-    # the only verifier errors allowed in the Android17 parser differential.
+    if not line.startswith('host_init_verifier: '):
+        continue
+    if re.search(r'Failed to parse init scripts with \d+ error\(s\)\.$',line):
+        continue
     allowed=(
       '/vendor/etc/init/android.hardware.wifi.supplicant-service.rc:' in line or
       '/vendor/etc/init/boringssl_self_test.rc:' in line or
@@ -140,50 +148,62 @@ print('HOST_INIT_DIFFERENTIAL_GATE=PASS')
 PY
 }
 
-run_host_init_gate STAGED "$W/stage-system/system"
+# This is the key new gate that V7 never ran successfully.
+run_host_init_gate STAGED "$W/stage-system_ext"
 
-# Re-run the complete V7 structural gates before filesystem rebuild.
+# Re-run V7 Android17 structural gates against the corrected staged system_ext.
 python3 wear7/v6/validate-images.py \
-  --system "$W/stage-system/system" \
-  --system-ext "$W/mnt/system_ext" \
+  --system "$W/mnt/system/system" \
+  --system-ext "$W/stage-system_ext" \
   --product "$W/mnt/product" \
   --vendor "$W/mnt/vendor" \
   --tools "$T" --work "$W/prebuild-validation" --report "$REP"
 
-# Rebuild only system, regenerate vbmeta pair and super, then re-extract and
-# revalidate all unchanged logical partitions byte-for-byte.
-python3 wear7/v6/rebuild-final.py \
+# Rebuild ONLY system_ext, regenerate vbmeta pair and super, and hard-verify that
+# every other logical partition is byte-for-byte canonical V7.
+python3 wear7/v11/rebuild_system_ext.py \
   --work "$W" --tools "$T" --report "$REP" --output "$OUT"
 
-mkdir -p "$W/mnt/final-system"
-sudo mount -o loop,ro,noload "$W/final-parts/system.img" "$W/mnt/final-system"
-run_host_init_gate SHIPPED "$W/mnt/final-system/system"
-sudo umount "$W/mnt/final-system"
+# Validate the exact system_ext extracted back out of the final super.
+mkdir -p "$W/mnt/final-system_ext"
+mount -o loop,ro,noload "$W/final-parts/system_ext.img" "$W/mnt/final-system_ext"
+run_host_init_gate SHIPPED "$W/mnt/final-system_ext"
+
+mkdir -p "$REP/final"
+cp "$REP/VNDK33_PAYLOAD_SHA256.json" "$REP/final/VNDK33_PAYLOAD_SHA256.json"
+python3 wear7/v6/validate-images.py \
+  --system "$W/mnt/system/system" \
+  --system-ext "$W/mnt/final-system_ext" \
+  --product "$W/mnt/product" \
+  --vendor "$W/mnt/vendor" \
+  --tools "$T" --work "$W/final-validation" --report "$REP/final"
+
+umount "$W/mnt/final-system_ext"
 
 python3 - "$OUT" "$REP" <<'PY'
 import hashlib,json,pathlib,sys
 out=pathlib.Path(sys.argv[1]); rep=pathlib.Path(sys.argv[2])
 m=json.loads((out/'CANDIDATE.json').read_text())
-m['candidate']='Wear7-V11'
-m['input_run']=35198609607
-m['rootcause_fix']={
-  'class':'PID1_PROPERTY_CONTEXT_SERIALIZATION_FATAL',
-  'evidence':'Android17 host_init_verifier found exact duplicate ro.charger_mode_autoboot in V7 composition',
-  'policy':'preserve stock Dace vendor mapping and remove semantically identical donor system duplicate',
+m['rootcause_fix'].update({
+  'evidence':'exact V7 audit: the only duplicate exact property context is ro.charger_mode_autoboot, system_ext:92 vs vendor:20, with identical SELinux label/type',
+  'policy':'preserve exact stock Dace vendor mapping; remove only duplicate donor system_ext declaration',
   'host_init_staged':'PASS_DIFFERENTIAL',
   'host_init_shipped':'PASS_DIFFERENTIAL',
-}
+})
+m['offline_gates']=json.loads((rep/'final/GATES.json').read_text())
 m['flash_authorized']=False
 (out/'CANDIDATE.json').write_text(json.dumps(m,indent=2)+'\n')
+(rep/'FINAL_CANDIDATE_V11.json').write_text(json.dumps(m,indent=2)+'\n')
 def sha(p):
     with p.open('rb') as f: return hashlib.file_digest(f,'sha256').hexdigest()
 files=sorted(p for p in out.iterdir() if p.is_file() and p.name!='SHA256SUMS.txt')
 (out/'SHA256SUMS.txt').write_text('\n'.join(f'{sha(p)}  {p.name}' for p in files)+'\n')
-(rep/'FINAL_CANDIDATE_V11.json').write_text(json.dumps(m,indent=2)+'\n')
 PY
 
-python3 wear7/v6/recovery-preflight.py --package "$OUT" --report "$REP/PACKAGE_PREFLIGHT_V11.json"
+python3 wear7/v6/recovery-preflight.py \
+  --package "$OUT" --report "$REP/PACKAGE_PREFLIGHT_V11.json"
 
 echo 'WEAR7_V11_PROPERTY_FATAL_FIX=PASS'
+echo 'V11_CHANGED_LOGICAL_PARTITION=system_ext_ONLY'
 echo 'BOOTCHAIN_BASE=V7_CANONICAL'
 echo 'FLASH_AUTHORIZED=NO'
