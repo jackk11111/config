@@ -222,6 +222,7 @@ jobs:
                           f'%ADB% shell "dd if=/tmp/w7r{i:02d}.bin of=%DEV% bs=4096 seek={blk} count={count} conv=notrunc,fsync 2>/dev/null" || exit /b 1']
           restore += ['%ADB% shell sync','echo RESTORE OK','endlocal']
           (out/'RESTORE_FROM_RECOVERY.cmd').write_text('\r\n'.join(restore)+'\r\n')
+          PY
 
           sha256sum out/segments/*.bin out/*.cmd out/super_CURRENT_to_ALL_SYSTEM_BSSL_BYPASS_DELTA.img > out/SHA256SUMS.txt
           rm -f "$W/diag2.raw" "$W/current.raw" "$W/target.raw"
