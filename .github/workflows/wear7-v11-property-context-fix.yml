@@ -6,6 +6,8 @@ on:
     paths:
       - '.github/workflows/wear7-v11-property-context-fix.yml'
       - 'wear7/v11/**'
+  pull_request:
+    branches: [wear7-v6-offline-validation]
   workflow_dispatch:
 
 permissions:
