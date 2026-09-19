@@ -1,0 +1,121 @@
+name: Wear7 V11 marker policy audit
+
+on:
+  push:
+    branches: [wear7-v11-marker-policy-audit]
+    paths: ['.github/workflows/wear7-v11-marker-policy-audit.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install tools
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq android-sdk-libsparse-utils unzip curl secilc setools >/dev/null
+          mkdir -p "$RUNNER_TEMP/v11pol/input" "$RUNNER_TEMP/v11pol/parts" "$RUNNER_TEMP/v11pol/mnt" report
+
+      - name: Download exact V11 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-Super
+          path: ${{ runner.temp }}/v11pol/input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35422065073'
+
+      - name: Extract partitions and compile exact split policy
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11pol"
+          simg2img "$W/input/super.img" "$W/super.raw"
+          lpunpack "$W/super.raw" "$W/parts"
+          rm "$W/super.raw"
+          for p in system system_ext product vendor; do
+            mkdir -p "$W/mnt/$p"
+            sudo mount -o loop,ro,noload "$W/parts/$p.img" "$W/mnt/$p"
+          done
+          S="$W/mnt/system/system/etc/selinux"
+          SX="$W/mnt/system_ext/etc/selinux"
+          PR="$W/mnt/product/etc/selinux"
+          V="$W/mnt/vendor/etc/selinux"
+          vers="$(cat "$V/plat_sepolicy_vers.txt")"
+          inputs=("$S/plat_sepolicy.cil" "$S/mapping/$vers.cil")
+          [ ! -f "$S/mapping/$vers.compat.cil" ] || inputs+=("$S/mapping/$vers.compat.cil")
+          [ ! -f "$SX/system_ext_sepolicy.cil" ] || inputs+=("$SX/system_ext_sepolicy.cil")
+          [ ! -f "$SX/mapping/$vers.cil" ] || inputs+=("$SX/mapping/$vers.cil")
+          [ ! -f "$SX/mapping/$vers.compat.cil" ] || inputs+=("$SX/mapping/$vers.compat.cil")
+          [ ! -f "$PR/product_sepolicy.cil" ] || inputs+=("$PR/product_sepolicy.cil")
+          [ ! -f "$PR/mapping/$vers.cil" ] || inputs+=("$PR/mapping/$vers.cil")
+          inputs+=("$V/plat_pub_versioned.cil" "$V/vendor_sepolicy.cil")
+          [ ! -f "$V/../../odm/etc/selinux/odm_sepolicy.cil" ] || inputs+=("$V/../../odm/etc/selinux/odm_sepolicy.cil")
+          genfs_version="$(cat "$V/genfs_labels_version.txt" 2>/dev/null || echo 202404)"
+          [ ! -f "$S/plat_sepolicy_genfs_$genfs_version.cil" ] || inputs+=("$S/plat_sepolicy_genfs_$genfs_version.cil")
+          secilc "${inputs[@]}" -m -M true -G -N -c 30 -o "$W/combined.policy" -f "$W/file_contexts.bin"
+
+      - name: Audit init access to metadata
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11pol"
+          {
+            echo "=== FILE CONTEXTS FOR METADATA ==="
+            grep -R -n -E '(^|[[:space:]])/metadata|metadata_file'               "$W/mnt/system/system/etc/selinux"               "$W/mnt/system_ext/etc/selinux"               "$W/mnt/product/etc/selinux"               "$W/mnt/vendor/etc/selinux" 2>/dev/null | head -300 || true
+            echo
+            echo "=== INIT -> metadata_file DIR ==="
+            sesearch -A -s init -t metadata_file -c dir "$W/combined.policy" || true
+            echo
+            echo "=== INIT -> metadata_file FILE ==="
+            sesearch -A -s init -t metadata_file -c file "$W/combined.policy" || true
+            echo
+            echo "=== INIT ATTRIBUTE EXPANSION HINTS ==="
+            seinfo -t metadata_file -x "$W/combined.policy" || true
+          } > report/MARKER_POLICY_AUDIT.txt
+
+          python3 - "$W/combined.policy" report/MARKER_POLICY_AUDIT.txt <<'PY'
+          import subprocess,sys,pathlib
+          pol,out=sys.argv[1:]
+          def q(cls,perms):
+              r=subprocess.run(['sesearch','-A','-s','init','-t','metadata_file','-c',cls,'-p',perms,pol],
+                               text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+              return r.stdout
+          checks={
+            'dir_create_add_name_write':q('dir','create,add_name,write'),
+            'file_create_open_write':q('file','create,open,write'),
+          }
+          with open(out,'a') as f:
+              f.write('\n=== REQUIRED PERMISSION QUERIES ===\n')
+              for k,v in checks.items():
+                  f.write(k+'\n'+v+'\n')
+          missing=[k for k,v in checks.items() if 'allow init metadata_file' not in v]
+          pathlib.Path('report/VERDICT.txt').write_text(
+              ('INIT_CAN_CREATE_METADATA_MARKERS=YES\n' if not missing else 'INIT_CAN_CREATE_METADATA_MARKERS=NO_OR_NOT_PROVEN\n')+
+              'missing='+','.join(missing)+'\n')
+          PY
+          cat report/VERDICT.txt
+          cat report/MARKER_POLICY_AUDIT.txt
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V11-Marker-Policy-Audit
+          path: report/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: |
+          W="$RUNNER_TEMP/v11pol"
+          for p in system system_ext product vendor; do sudo umount "$W/mnt/$p" 2>/dev/null || true; done
