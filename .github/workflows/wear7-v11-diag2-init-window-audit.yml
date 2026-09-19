@@ -1,0 +1,166 @@
+name: Wear7 V11 DIAG2 init-window audit
+
+on:
+  push:
+    branches: [wear7-v11-diag2-init-window-audit]
+    paths: ['.github/workflows/wear7-v11-diag2-init-window-audit.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          mkdir -p "$RUNNER_TEMP/audit/super" "$RUNNER_TEMP/audit/tools" "$RUNNER_TEMP/audit/parts" "$RUNNER_TEMP/audit/mnt" out
+
+      - name: Download exact DIAG2 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG2-Super
+          path: ${{ runner.temp }}/audit/super
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35444837392'
+
+      - name: Extract init-window evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/audit"
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/','lib64/','lib/')):
+                      p=(out/n).resolve()
+                      if not p.is_relative_to(out): raise SystemExit('unsafe path')
+                      z.extract(n,out)
+          PY
+          rm "$ZIP"
+          chmod +x "$W/tools/extracted/bin/"*
+          export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
+
+          simg2img "$W/super/super.img" "$W/super.raw"
+          lpunpack "$W/super.raw" "$W/parts"
+          rm -f "$W/super.raw" "$W/super/super.img"
+
+          for p in system system_ext vendor product; do
+            mkdir -p "$W/mnt/$p"
+            sudo mount -o loop,ro,noload "$W/parts/$p.img" "$W/mnt/$p"
+          done
+
+          python3 - "$W/mnt" out/INIT_WINDOW_AUDIT.txt <<'PY'
+          import pathlib,re,sys,os
+          root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          parts=['system','system_ext','vendor','product']
+          lines=[]
+
+          def add(s=''): lines.append(s)
+
+          def init_dirs(part):
+              base=root/part
+              if part=='system':
+                  return [base/'system/etc/init/hw', base/'system/etc/init']
+              return [base/'etc/init']
+
+          def files_for(part):
+              base=root/part
+              arr=[]
+              seen=set()
+              for d in init_dirs(part):
+                  if not d.exists(): continue
+                  for f in sorted(d.glob('*.rc')):
+                      if f not in seen:
+                          seen.add(f); arr.append(f)
+              return arr
+
+          add('=== EXACT V11-DIAG2 INIT -> LATE-INIT WINDOW ===')
+          add('NOTE: current watch additionally has only the 2-byte BoringSSL exec_start bypass.')
+          add()
+
+          for trig in ('init','late-init'):
+              add(f'######## ACTIONS TRIGGER={trig} ########')
+              for part in parts:
+                  add(f'### {part.upper()} ###')
+                  found=0
+                  base=root/part
+                  for f in files_for(part):
+                      txt=f.read_text(errors='replace').splitlines()
+                      i=0
+                      while i<len(txt):
+                          s=txt[i].strip()
+                          # exact trigger or compound property trigger beginning with it
+                          if s==f'on {trig}' or s.startswith(f'on {trig} &&'):
+                              found+=1
+                              add(f'FILE={part}/{f.relative_to(base)} LINE={i+1}')
+                              j=i
+                              while j<len(txt):
+                                  st=txt[j].strip()
+                                  if j>i and (st.startswith('on ') or st.startswith('service ') or st.startswith('import ')):
+                                      break
+                                  add(txt[j])
+                                  j+=1
+                              add('---')
+                              i=j
+                          else:
+                              i+=1
+                  if not found: add('(none)')
+                  add()
+
+          add('######## REBOOT/FATAL SERVICE DEFINITIONS ########')
+          for part in parts:
+              base=root/part
+              for f in files_for(part):
+                  txt=f.read_text(errors='replace').splitlines()
+                  i=0
+                  while i<len(txt):
+                      if txt[i].lstrip().startswith('service '):
+                          j=i+1
+                          block=[txt[i]]
+                          while j<len(txt):
+                              st=txt[j].strip()
+                              if st.startswith('service ') or st.startswith('on ') or st.startswith('import '):
+                                  break
+                              block.append(txt[j]); j+=1
+                          joined='\n'.join(block)
+                          if 'reboot_on_failure' in joined or re.search(r'^\s*critical\s*$',joined,re.M):
+                              add(f'FILE={part}/{f.relative_to(base)} LINE={i+1}')
+                              add(joined)
+                              add('---')
+                          i=j
+                      else:
+                          i+=1
+
+          add('######## MARKER FILE ########')
+          mf=root/'system_ext/etc/init/wear7-v11-stage-marker.rc'
+          if mf.is_file(): add(mf.read_text(errors='replace'))
+
+          out.write_text('\n'.join(lines)+'\n')
+          PY
+
+          for p in product vendor system_ext system; do sudo umount "$W/mnt/$p"; done
+          cat out/INIT_WINDOW_AUDIT.txt
+
+      - name: Upload tiny audit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V11-DIAG2-InitWindow-Audit
+          path: out/
+          if-no-files-found: error
+          retention-days: 60
+          compression-level: 9
