@@ -1,0 +1,169 @@
+name: Wear7 V11 reboot-cause offline audit
+
+on:
+  push:
+    branches: [wear7-v11-reboot-cause-audit]
+    paths: ['.github/workflows/wear7-v11-reboot-cause-audit.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Install tools
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq android-sdk-libsparse-utils qemu-user-static unzip curl python3-pyelftools >/dev/null
+          mkdir -p "$RUNNER_TEMP/v11diag/input" "$RUNNER_TEMP/v11diag/parts" "$RUNNER_TEMP/v11diag/mnt" "$RUNNER_TEMP/v11diag/tools" wear7-v11-reboot-audit
+
+      - name: Download exact V11 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-Super
+          path: ${{ runner.temp }}/v11diag/input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35422065073'
+
+      - name: Prepare Android17 host tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11diag"
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for name in z.namelist():
+                  if name.startswith(('bin/','lib64/','lib/','framework/')):
+                      dst=(out/name).resolve()
+                      if not dst.is_relative_to(out):
+                          raise SystemExit('unsafe path')
+                      z.extract(name,out)
+          PY
+          rm "$ZIP"
+          chmod +x "$W/tools/extracted/bin/"*
+          test -e "$W/tools/extracted/bin/debugfs" || ln -s debugfs_static "$W/tools/extracted/bin/debugfs"
+
+      - name: Extract exact V11 logical partitions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11diag"
+          T="$W/tools/extracted"
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          simg2img "$W/input/super.img" "$W/super.raw"
+          lpunpack "$W/super.raw" "$W/parts"
+          rm "$W/super.raw"
+          for p in system system_ext product vendor; do
+            mkdir -p "$W/mnt/$p"
+            sudo mount -o loop,ro,noload "$W/parts/$p.img" "$W/mnt/$p"
+          done
+
+      - name: Activate packaged APEX exactly as Android17 host gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11diag"
+          T="$W/tools/extracted"
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          SYS="$W/mnt/system/system"; SX="$W/mnt/system_ext"; PROD="$W/mnt/product"; VEND="$W/mnt/vendor"; APEX="$W/apex"
+          mkdir -p "$APEX"
+          "$T/bin/apexd_host" --tool_path "$T" --apex_path "$APEX" --system_path "$SYS" --system_ext_path "$SX" --product_path "$PROD" --vendor_path "$VEND" > wear7-v11-reboot-audit/APEXD_HOST.log 2>&1
+          grep -n "com.android.vndk.v33" "$APEX/apex-info-list.xml" > wear7-v11-reboot-audit/VNDK33_ACTIVE.txt || true
+          grep -n "com.android.conscrypt" "$APEX/apex-info-list.xml" > wear7-v11-reboot-audit/CONSCRYPT_ACTIVE.txt || true
+          grep -n "com.android.tethering" "$APEX/apex-info-list.xml" > wear7-v11-reboot-audit/TETHERING_ACTIVE.txt || true
+
+      - name: Audit normal-reboot candidates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/v11diag"
+          SYS="$W/mnt/system/system"; SX="$W/mnt/system_ext"; PROD="$W/mnt/product"; VEND="$W/mnt/vendor"; APEX="$W/apex"; R=wear7-v11-reboot-audit
+          {
+            echo "=== FILE PRESENCE ==="
+            for f in "$SYS/bin/boringssl_self_test32" "$VEND/bin/boringssl_self_test32" "$APEX/com.android.conscrypt/bin/boringssl_self_test32" "$SYS/bin/apexd" "$SYS/bin/vold" "$SYS/bin/netd"; do
+              if [ -e "$f" ]; then echo "PRESENT $f"; file "$f" || true; else echo "MISSING $f"; fi
+            done
+            echo "=== BPFLOADER APEX OVERRIDE ==="
+            grep -R -n -A12 -B2 '^service bpfloader ' "$APEX"/*/etc 2>/dev/null || true
+          } > "$R/CANDIDATES.txt"
+
+          LIBS="$SYS/lib:$SX/lib:$PROD/lib:$VEND/lib"
+          for d in "$APEX"/*/lib "$APEX"/*/lib/bionic; do [ -d "$d" ] && LIBS="$LIBS:$d"; done
+          LINKER="$APEX/com.android.runtime/bin/linker"
+          test -x "$LINKER"
+
+          run_test() {
+            name="$1"; shift
+            set +e
+            timeout 30s /usr/bin/qemu-arm-static -E LD_LIBRARY_PATH="$LIBS" "$LINKER" "$@" > "$R/$name.log" 2>&1
+            rc=$?
+            set -e
+            echo "$rc" > "$R/$name.rc"
+          }
+          run_test BORINGSSL_SYSTEM32 "$SYS/bin/boringssl_self_test32"
+          set +e
+          timeout 30s /usr/bin/qemu-arm-static -E LD_LIBRARY_PATH="$LIBS" -E BORINGSSL_SELF_TEST_CREATE_FLAG=true "$LINKER" "$VEND/bin/boringssl_self_test32" > "$R/BORINGSSL_VENDOR32.log" 2>&1
+          rc=$?
+          set -e
+          echo "$rc" > "$R/BORINGSSL_VENDOR32.rc"
+          run_test BORINGSSL_APEX32 "$APEX/com.android.conscrypt/bin/boringssl_self_test32"
+
+          python3 - "$SYS" "$SX" "$PROD" "$VEND" "$APEX" "$R" <<'PY'
+          import json,pathlib,re,subprocess,sys
+          sysroot,sx,prod,vend,apex,rep=map(pathlib.Path,sys.argv[1:])
+          libdirs=[r/'lib' for r in (sysroot,sx,prod,vend)]
+          libdirs += [p/'lib' for p in apex.iterdir() if p.is_dir()]
+          libdirs += [p/'lib/bionic' for p in apex.iterdir() if p.is_dir()]
+          libdirs=[x for x in libdirs if x.is_dir()]
+          targets={'apexd':sysroot/'bin/apexd','vold':sysroot/'bin/vold','netd':sysroot/'bin/netd','bssl_system32':sysroot/'bin/boringssl_self_test32','bssl_vendor32':vend/'bin/boringssl_self_test32','bssl_apex32':apex/'com.android.conscrypt/bin/boringssl_self_test32'}
+          def needed(p):
+              if not p.exists(): return None
+              out=subprocess.run(['readelf','-d',p],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT).stdout
+              return re.findall(r'\(NEEDED\).*?\[(.*?)\]',out)
+          report={}
+          for name,p in targets.items():
+              ns=needed(p)
+              unresolved=[]
+              if ns:
+                  for n in ns:
+                      if not any((d/n).exists() for d in libdirs): unresolved.append(n)
+              report[name]={'path':str(p),'exists':p.exists(),'needed':ns,'unresolved':unresolved if ns is not None else None}
+          (rep/'DIRECT_DT_NEEDED.json').write_text(json.dumps(report,indent=2)+'\n')
+          PY
+
+          {
+            echo "SYSTEM32=$(cat "$R/BORINGSSL_SYSTEM32.rc")"
+            echo "VENDOR32=$(cat "$R/BORINGSSL_VENDOR32.rc")"
+            echo "APEX32=$(cat "$R/BORINGSSL_APEX32.rc")"
+            echo
+            cat "$R/DIRECT_DT_NEEDED.json"
+          } > "$R/VERDICT.txt"
+
+      - name: Upload audit
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-V11-Reboot-Cause-Audit
+          path: wear7-v11-reboot-audit/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 9
+
+      - name: Cleanup mounts
+        if: always()
+        run: |
+          W="$RUNNER_TEMP/v11diag"
+          for p in system system_ext product vendor; do sudo umount "$W/mnt/$p" 2>/dev/null || true; done
