@@ -26,6 +26,10 @@ import os
 import struct
 import sys
 
+expected = {
+    "vbmeta.img": 3,
+    "vbmeta_system.img": 0,
+}
 for p in sys.argv[1:]:
     if not os.path.exists(p):
         raise SystemExit("MISSING:" + p)
@@ -36,8 +40,9 @@ for p in sys.argv[1:]:
     if len(raw) != 4:
         raise SystemExit("SHORT_AVB:" + p)
     flags = struct.unpack(">I", raw)[0]
-    print("{}:magic={}:flags={}".format(os.path.basename(p), magic.decode(errors="replace"), flags))
-    if magic != b"AVB0" or flags != 3:
+    name=os.path.basename(p)
+    print("{}:magic={}:flags={}".format(name, magic.decode(errors="replace"), flags))
+    if magic != b"AVB0" or flags != expected[name]:
         raise SystemExit("BAD_AVB_FLAGS:" + p)
 PY
 
@@ -52,6 +57,7 @@ ACTUAL="$(sha256sum "$SUPER" | awk '{print $1}')"
   echo "SUPER_SHA256=$ACTUAL"
   echo "PARTITIONS=system vendor product system_ext vendor_dlkm system_dlkm"
   echo "VBMETA_FLAGS=3"
+  echo "VBMETA_SYSTEM_FLAGS=0"
   echo "RECOVERY_INCLUDED=NO"
 } | tee "$REPORT"
 
