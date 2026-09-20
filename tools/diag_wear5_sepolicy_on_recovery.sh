@@ -74,24 +74,60 @@ POLICYVERS="$("${ADB[@]}" shell 'cat /sys/fs/selinux/policyvers 2>/dev/null || c
 [ -n "$POLICYVERS" ] || POLICYVERS=30
 echo "KERNEL_POLICYVERS=$POLICYVERS"
 
-DONOR_PROBE="$("${ADB[@]}" shell "'$REMOTE/donor_secilc' -h" 2>&1 || true)"
+# Prefer an already-runnable secilc from recovery. If absent, try the
+# Android 14 donor binary directly and then through any 32-bit linker
+# exposed by recovery. ENOENT on a present ELF usually means its PT_INTERP
+# (/system/bin/bootstrap/linker) is missing, not that the ELF itself is missing.
 COMPILER=""
-if printf '%s\n' "$DONOR_PROBE" | grep -qiE 'usage|secilc|option'; then
-  COMPILER="$REMOTE/donor_secilc"
-  echo "COMPILER=DONOR_ANDROID14"
-else
-  REC_SEC="$("${ADB[@]}" shell 'command -v secilc 2>/dev/null || [ -x /system/bin/secilc ] && echo /system/bin/secilc' | tr -d '\r' | tail -1)"
-  if [ -n "$REC_SEC" ]; then
-    REC_PROBE="$("${ADB[@]}" shell "'$REC_SEC' -h" 2>&1 || true)"
-    if printf '%s\n' "$REC_PROBE" | grep -qiE 'usage|secilc|option'; then
-      COMPILER="$REC_SEC"
-      echo "COMPILER=RECOVERY_SECILC"
-    fi
+COMPILER_KIND=""
+
+probe_cmd(){
+  local cmd="$1" out rc
+  set +e
+  out="$("${ADB[@]}" shell "$cmd -h" 2>&1)"
+  rc=$?
+  set -e
+  if printf '%s\n' "$out" | grep -qiE 'usage:.*secilc|secilc.*usage|options:' \
+     && ! printf '%s\n' "$out" | grep -qiE 'No such file|not found|Exec format'; then
+    return 0
   fi
+  return 1
+}
+
+for CAND in /system/bin/secilc /sbin/secilc /vendor/bin/secilc; do
+  if "${ADB[@]}" shell "[ -x '$CAND' ]" >/dev/null 2>&1 && probe_cmd "'$CAND'"; then
+    COMPILER="'$CAND'"
+    COMPILER_KIND="RECOVERY_SECILC"
+    break
+  fi
+done
+
+DONOR_DIRECT_OUT="$("${ADB[@]}" shell "'$REMOTE/donor_secilc' -h" 2>&1 || true)"
+if [ -z "$COMPILER" ] && probe_cmd "'$REMOTE/donor_secilc'"; then
+  COMPILER="'$REMOTE/donor_secilc'"
+  COMPILER_KIND="DONOR_DIRECT"
 fi
 
 if [ -z "$COMPILER" ]; then
-  echo "DONOR_SECILC_PROBE=$(printf '%s' "$DONOR_PROBE" | tr '\n' ' ' | head -c 300)"
+  for LINKER in /system/bin/bootstrap/linker /system/bin/linker /apex/com.android.runtime/bin/linker; do
+    if "${ADB[@]}" shell "[ -x '$LINKER' ]" >/dev/null 2>&1; then
+      if probe_cmd "'$LINKER' '$REMOTE/donor_secilc'"; then
+        COMPILER="'$LINKER' '$REMOTE/donor_secilc'"
+        COMPILER_KIND="DONOR_VIA_$LINKER"
+        break
+      fi
+    fi
+  done
+fi
+
+if [ -n "$COMPILER" ]; then
+  echo "COMPILER=$COMPILER_KIND"
+fi
+
+if [ -z "$COMPILER" ]; then
+  echo "DONOR_DIRECT_PROBE=$(printf '%s' "$DONOR_DIRECT_OUT" | tr '\n' ' ' | head -c 300)"
+  echo "RECOVERY_SECILC_PATHS=$("${ADB[@]}" shell 'for x in /system/bin/secilc /sbin/secilc /vendor/bin/secilc; do [ -x "$x" ] && printf "%s," "$x"; done' 2>/dev/null | tr -d '\r' | sed 's/,$//')"
+  echo "RECOVERY_LINKERS=$("${ADB[@]}" shell 'for x in /system/bin/bootstrap/linker /system/bin/linker /system/bin/linker64 /apex/com.android.runtime/bin/linker /apex/com.android.runtime/bin/linker64; do [ -x "$x" ] && printf "%s," "$x"; done' 2>/dev/null | tr -d '\r' | sed 's/,$//')"
   echo "FINDING=NO_EXECUTABLE_SECILC_IN_RECOVERY"
   exit 0
 fi
