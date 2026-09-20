@@ -29,7 +29,7 @@ esac
 PRODUCT="$("${ADB[@]}" shell getprop ro.product.device 2>/dev/null | tr -d '\r' | tail -1)"
 [ "$PRODUCT" = "dace" ] || die "device_inatteso_${PRODUCT:-vuoto}"
 
-UID="$("${ADB[@]}" shell id -u 2>/dev/null | tr -d '\r' | tail -1)"
+REMOTE_UID="$("${ADB[@]}" shell id -u 2>/dev/null | tr -d '\r' | tail -1)"
 [ "$REMOTE_UID" = "0" ] || die "adb_non_root_uid_${REMOTE_UID:-vuoto}"
 
 INIT_DEV="$("${ADB[@]}" shell 'readlink -f /dev/block/by-name/init_boot 2>/dev/null' | tr -d '\r' | tail -1)"
