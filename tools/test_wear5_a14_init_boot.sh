@@ -30,7 +30,7 @@ PRODUCT="$("${ADB[@]}" shell getprop ro.product.device 2>/dev/null | tr -d '\r' 
 [ "$PRODUCT" = "dace" ] || die "device_inatteso_${PRODUCT:-vuoto}"
 
 UID="$("${ADB[@]}" shell id -u 2>/dev/null | tr -d '\r' | tail -1)"
-[ "$UID" = "0" ] || die "adb_non_root_uid_${UID:-vuoto}"
+[ "$REMOTE_UID" = "0" ] || die "adb_non_root_uid_${REMOTE_UID:-vuoto}"
 
 INIT_DEV="$("${ADB[@]}" shell 'readlink -f /dev/block/by-name/init_boot 2>/dev/null' | tr -d '\r' | tail -1)"
 [ -n "$INIT_DEV" ] || die "init_boot_device_non_trovato"
@@ -44,7 +44,7 @@ echo "PREFLIGHT=PASS"
 echo "MODE=$MODE"
 echo "PRODUCT=$PRODUCT"
 echo "ADB_STATE=$STATE"
-echo "UID=$UID"
+echo "UID=$REMOTE_UID"
 echo "INIT_BOOT_DEV=$INIT_DEV"
 echo "INIT_BOOT_SIZE=$REMOTE_SIZE"
 echo "DONOR_SHA256=$DONOR_SHA"
