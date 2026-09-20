@@ -7,6 +7,7 @@ STOCK="$WORK/stock"
 OUT="/storage/emulated/0/Download/WEAR5_C1_DIAG_PC"
 IMG="$OUT/images"
 TMP="$WORK/C1_DIAG_PC_BUILD"
+META="/metadata/wear5diag"
 SUPER="$OUT/super_C1_DIAG.img"
 SUPER_SIZE=4294967296
 GROUP="qti_dynamic_partitions"
