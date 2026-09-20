@@ -95,8 +95,16 @@ RECOVERY_DEV="$(rsh "readlink -f /dev/block/by-name/recovery 2>/dev/null" | tr -
 [ -n "$RECOVERY_DEV" ] || die "recovery_partition_non_trovata_non_flasho"
 [ "$RECOVERY_DEV" != "$BOOT_DEV" ] || die "recovery_e_boot_coincidono_non_flasho"
 
-BUSY_MOUNTS="$(rsh "cat /proc/mounts" 2>/dev/null | awk '$2 ~ /^\/(system|system_root|vendor|product|system_ext|system_dlkm|vendor_dlkm)(\/|$)/ {print $2}' | tr '\n' ',' || true)"
-[ -z "$BUSY_MOUNTS" ] || die "partizioni_super_montate_${BUSY_MOUNTS}"
+# Blocca soltanto i filesystem logici realmente contenuti in super.
+# Submount indipendenti come /vendor/firmware_mnt (modem/firmware partition)
+# non rendono "vendor" montata e non devono fermare il flash di super.
+BUSY_MOUNTS="$(rsh "cat /proc/mounts" 2>/dev/null | awk '
+  ($2==\"/system\" || $2==\"/system_root\" || $2==\"/vendor\" ||
+   $2==\"/product\" || $2==\"/system_ext\" ||
+   $2==\"/system_dlkm\" || $2==\"/vendor_dlkm\") {print $2}
+  $1 ~ /\/dev\/block\/(mapper\/)?(system|vendor|product|system_ext|system_dlkm|vendor_dlkm)(_[ab])?$/ {print $2}
+' | sort -u | tr '\n' ',' || true)"
+[ -z "$BUSY_MOUNTS" ] || die "partizioni_logiche_super_montate_${BUSY_MOUNTS}"
 
 echo "FLASH_GUARD=PASS"
 echo "RECOVERY_DEV=$RECOVERY_DEV"
