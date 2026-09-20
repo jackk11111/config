@@ -3,14 +3,15 @@ set -Eeuo pipefail
 
 BUILD="/storage/emulated/0/Download/WEAR5_FIRST_BUILD"
 IMG="$BUILD/images"
-ADB_SERVER="tcp:10.82.56.57:5037"
+ADB_HOST="10.82.56.57"
+ADB_PORT="5037"
 MODE="${1:-preflight}"
 TARGET="${2:-}"
 
 die(){ echo; echo "BLOCKER=$*"; exit 2; }
 
-export ADB_SERVER_SOCKET="$ADB_SERVER"
 command -v adb >/dev/null 2>&1 || die "adb_non_disponibile"
+ADB=(adb -H "$ADB_HOST" -P "$ADB_PORT")
 
 for F in super.img boot.img vbmeta.img vbmeta_system.img; do
   [ -f "$IMG/$F" ] || die "file_mancante_$F"
@@ -21,23 +22,22 @@ ACTUAL_SUPER="$(sha256sum "$IMG/super.img" | awk '{print $1}')"
 [ "$ACTUAL_SUPER" = "$EXPECTED_SUPER" ] || die "sha256_super_locale_errato"
 [ "$(stat -c %s "$IMG/super.img")" = "4294967296" ] || die "super_locale_non_4GiB"
 
-# In modalita cavo NON esegue adb connect: usa direttamente il device USB
-# gia esposto dal server ADB sul PC. Un TARGET esplicito e opzionale.
-if [ -n "$TARGET" ]; then
-  ADB=(adb -s "$TARGET")
-else
-  ADB=(adb)
+# Modalita cavo: usa direttamente il server ADB del PC.
+# In recovery adb devices puo mostrare "recovery" invece di "device".
+if [ -z "$TARGET" ]; then
+  TARGET="$("${ADB[@]}" devices 2>/dev/null | awk 'NR>1 && $1!="" && $2!="offline" && $2!="unauthorized"{print $1; exit}')"
 fi
+[ -n "$TARGET" ] || die "nessun_transport_adb_utilizzabile_sul_server_PC"
 
-STATE="$("${ADB[@]}" get-state 2>/dev/null | tr -d "\r" | tail -1 || true)"
-[ "$STATE" = "device" ] || {
-  if [ -z "$TARGET" ]; then
-    COUNT="$(adb devices 2>/dev/null | awk '$2=="device"{n++} END{print n+0}')"
-    [ "$COUNT" = "1" ] || die "adb_transport_non_univoco_device_count_$COUNT"
-    STATE="$(adb get-state 2>/dev/null | tr -d "\r" | tail -1 || true)"
-  fi
-}
-[ "$STATE" = "device" ] || die "watch_non_raggiungibile_sul_server_adb"
+ADB+=(-s "$TARGET")
+
+LIST_STATE="$(adb -H "$ADB_HOST" -P "$ADB_PORT" devices 2>/dev/null | awk -v s="$TARGET" '$1==s{print $2; exit}')"
+case "$LIST_STATE" in
+  device|recovery|rescue|sideload) ;;
+  *) die "transport_${TARGET}_stato_${LIST_STATE:-vuoto}" ;;
+esac
+
+"${ADB[@]}" shell 'echo WEAR5_ADB_OK' 2>/dev/null | tr -d "\r" | grep -qx 'WEAR5_ADB_OK' || die "adb_shell_non_operativa_su_${TARGET}"
 
 PRODUCT="$("${ADB[@]}" shell getprop ro.product.device 2>/dev/null | tr -d "\r" | tail -1 || true)"
 [ "$PRODUCT" = "dace" ] || die "device_inatteso_${PRODUCT:-vuoto}"
@@ -75,6 +75,8 @@ REMOTE_SUPER_SIZE="$(rsh "blockdev --getsize64 $SUPER_DEV" 2>/dev/null | tr -d "
 
 echo "PREFLIGHT=PASS"
 echo "TRANSPORT=CABLE_ADB_SERVER"
+echo "SERIAL=$TARGET"
+echo "ADB_LIST_STATE=$LIST_STATE"
 echo "PRODUCT=$PRODUCT"
 echo "SHELL_UID=$SHELL_UID"
 echo "ROOT_UID=$ROOT_UID"
