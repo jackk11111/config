@@ -28,25 +28,64 @@ mkdir -p "$TMP/patches"
 
 echo "[1/8] PATCH_INIT_TARGET_LOCALLY"
 debugfs -R "cat $RC" "$SRC" > "$TMP/init.target.old.rc" 2>/dev/null || die "init_target_non_leggibile"
-grep -Fq 'wait_for_prop hwservicemanager.ready true' "$TMP/init.target.old.rc" || die "wait_for_prop_non_trovato"
-grep -Fq 'mount_all /vendor/etc/fstab.${ro.hardware} --late' "$TMP/init.target.old.rc" || die "mount_all_late_non_trovato"
 
 python - "$TMP/init.target.old.rc" "$TMP/init.target.new.rc" <<'PY'
-import sys
+import sys,re
 src,dst=sys.argv[1:]
-s=open(src,encoding='utf-8').read()
-wait='    wait_for_prop hwservicemanager.ready true'
-mount='    mount_all /vendor/etc/fstab.${ro.hardware} --late'
-if s.count(wait)!=1: raise SystemExit("WAIT_COUNT_NOT_1")
-if s.count(mount)!=1: raise SystemExit("MOUNT_COUNT_NOT_1")
-s=s.replace(wait,
-'''    chmod 0777 /metadata/diag/wear5diag/05a_before_hwsm_wait
-    wait_for_prop hwservicemanager.ready true
-    chmod 0777 /metadata/diag/wear5diag/05b_after_hwsm_wait''')
-s=s.replace(mount,
-'''    mount_all /vendor/etc/fstab.${ro.hardware} --late
-    chmod 0777 /metadata/diag/wear5diag/05c_after_mount_all''')
-open(dst,'w',encoding='utf-8',newline='\n').write(s)
+lines=open(src,encoding='utf-8',errors='strict').read().splitlines()
+
+# Locate the late-fs action semantically, independent of indentation/spacing.
+start=None; end=None
+for i,line in enumerate(lines):
+    if re.fullmatch(r'\s*on\s+late-fs\s*', line):
+        j=i+1
+        while j < len(lines):
+            s=lines[j].strip()
+            if re.match(r'^(on|service|import)\b', s):
+                break
+            j += 1
+        body=lines[i+1:j]
+        has_wait=any(re.fullmatch(r'\s*wait_for_prop\s+hwservicemanager\.ready\s+true\s*', x) for x in body)
+        has_mount=any(re.fullmatch(r'\s*mount_all\s+/vendor/etc/fstab\.\$\{ro\.hardware\}\s+--late\s*', x) for x in body)
+        if has_wait and has_mount:
+            if start is not None:
+                raise SystemExit("MULTIPLE_TARGET_LATE_FS_BLOCKS")
+            start,end=i,j
+
+if start is None:
+    # Stop locally and print the actual late-fs blocks for a concrete mismatch.
+    print("TARGET_LATE_FS_BLOCK_NOT_FOUND")
+    for i,line in enumerate(lines):
+        if re.fullmatch(r'\s*on\s+late-fs\s*', line):
+            print(f"--- late-fs at line {i+1}")
+            j=i
+            while j < min(len(lines), i+12):
+                print(lines[j])
+                j += 1
+    raise SystemExit(3)
+
+out=[]
+inserted_wait=inserted_mount=0
+for i,line in enumerate(lines):
+    if start < i < end and re.fullmatch(r'\s*wait_for_prop\s+hwservicemanager\.ready\s+true\s*', line):
+        indent=line[:len(line)-len(line.lstrip())]
+        out.append(indent+'chmod 0777 /metadata/diag/wear5diag/05a_before_hwsm_wait')
+        out.append(line)
+        out.append(indent+'chmod 0777 /metadata/diag/wear5diag/05b_after_hwsm_wait')
+        inserted_wait += 1
+    elif start < i < end and re.fullmatch(r'\s*mount_all\s+/vendor/etc/fstab\.\$\{ro\.hardware\}\s+--late\s*', line):
+        indent=line[:len(line)-len(line.lstrip())]
+        out.append(line)
+        out.append(indent+'chmod 0777 /metadata/diag/wear5diag/05c_after_mount_all')
+        inserted_mount += 1
+    else:
+        out.append(line)
+
+if inserted_wait != 1 or inserted_mount != 1:
+    raise SystemExit(f"INSERT_COUNTS_wait={inserted_wait}_mount={inserted_mount}")
+
+open(dst,'w',encoding='utf-8',newline='\n').write('\n'.join(out)+'\n')
+print("LATEFS_TARGET_MATCH=PASS")
 PY
 
 cp --reflink=auto --sparse=always "$SRC" "$FIX"
