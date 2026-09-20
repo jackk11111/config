@@ -47,26 +47,72 @@ echo "TARGET_FCM=$TARGET_FCM"
 
 echo "[3/6] Leggo geometria super TicWatch"
 : > "$META/target_dynamic_info.txt"
+
+# Primo tentativo: metadata build-style, quando presenti.
 while IFS= read -r E; do
   unzip -p "$STOCK_OTA" "$E" >> "$META/target_dynamic_info.txt" 2>/dev/null || true
   echo >> "$META/target_dynamic_info.txt"
-done < <(unzip -Z1 "$STOCK_OTA" | grep -E '(^|/)(dynamic_partitions_info|misc_info)\.txt$' || true)
+done < <(unzip -Z1 "$STOCK_OTA" | grep -E '(^|/)(dynamic_partitions_info|misc_info)\\.txt$' || true)
 
-[ -s "$META/target_dynamic_info.txt" ] || die "metadata_dynamic_partitions_non_present_nell_OTA"
+# Block OTA Mobvoi: se i metadata build-style non ci sono, ricostruisce lo
+# stato finale delle dynamic partitions da dynamic_partitions_op_list.
+if ! grep -q '^super_partition_groups=' "$META/target_dynamic_info.txt" 2>/dev/null; then
+  OP_ENTRY="$(unzip -Z1 "$STOCK_OTA" | grep -E '(^|/)dynamic_partitions_op_list$' | head -1 || true)"
+  [ -n "$OP_ENTRY" ] || die "dynamic_partitions_op_list_non_trovato"
+  unzip -p "$STOCK_OTA" "$OP_ENTRY" > "$META/dynamic_partitions_op_list"
 
-AB="$(kv ab_update || true)"
-VAB="$(kv virtual_ab || true)"
-if [ "$AB" = "true" ] || [ "$VAB" = "true" ]; then
-  die "layout_AB_o_VirtualAB_rilevato_da_gestire_specificamente"
+  python - "$META/dynamic_partitions_op_list" "$META/target_dynamic_info.txt" <<'PY'
+import sys
+src,dst=sys.argv[1:3]
+groups={}
+parts={}
+for raw in open(src,encoding='utf-8',errors='ignore'):
+    line=raw.strip()
+    if not line or line.startswith('#'):
+        continue
+    t=line.split()
+    op=t[0]
+    if op=="remove_all_groups":
+        groups.clear(); parts.clear()
+    elif op=="add_group" and len(t)>=3:
+        groups[t[1]]=int(t[2])
+    elif op=="resize_group" and len(t)>=3:
+        groups[t[1]]=int(t[2])
+    elif op=="remove_group" and len(t)>=2:
+        g=t[1]; groups.pop(g,None)
+        parts={p:pg for p,pg in parts.items() if pg!=g}
+    elif op=="add" and len(t)>=3:
+        parts[t[1]]=t[2]
+    elif op=="move" and len(t)>=3:
+        parts[t[1]]=t[2]
+    elif op=="remove" and len(t)>=2:
+        parts.pop(t[1],None)
+# resize partition is intentionally irrelevant here; image sizes come from files.
+
+if not groups or not parts:
+    raise SystemExit("cannot reconstruct dynamic layout")
+
+with open(dst,'a',encoding='utf-8') as o:
+    o.write("super_partition_groups="+" ".join(groups)+"\n")
+    o.write("dynamic_partition_list="+" ".join(parts)+"\n")
+    for g,size in groups.items():
+        plist=[p for p,pg in parts.items() if pg==g]
+        o.write(f"{g}_size={size}\n")
+        o.write(f"{g}_partition_list={' '.join(plist)}\n")
+PY
 fi
 
+# La dimensione fisica di super non è obbligatoriamente codificata nel block OTA.
+# La leggiamo dal target reale tramite il server ADB già usato dal progetto.
 SUPER_SIZE="$(kv super_partition_size || true)"
-BLOCK_DEVS="$(kv super_block_devices || true)"
-if [ -z "$SUPER_SIZE" ] && [ -n "$BLOCK_DEVS" ]; then
-  D="$(printf '%s' "$BLOCK_DEVS" | awk '{print $1}')"
-  SUPER_SIZE="$(kv "super_${D}_device_size" || true)"
+if [ -z "$SUPER_SIZE" ]; then
+  export ADB_SERVER_SOCKET=tcp:10.82.56.57:5037
+  SERIAL="$(adb devices 2>/dev/null | awk 'NR>1 && $2=="device"{print $1; exit}')"
+  [ -n "$SERIAL" ] || die "TicWatch_non_visibile_su_ADB_per_leggere_super_size"
+  SUPER_SIZE="$(adb -s "$SERIAL" shell "su -c 'blockdev --getsize64 /dev/block/by-name/super'" 2>/dev/null | tr -d '\r' | tail -1 | grep -E '^[0-9]+$' || true)"
+  [ -n "$SUPER_SIZE" ] || die "impossibile_leggere_dimensione_super_dal_TicWatch"
+  echo "super_partition_size=$SUPER_SIZE" >> "$META/target_dynamic_info.txt"
 fi
-[ -n "$SUPER_SIZE" ] || die "super_partition_size_non_rilevata"
 
 GROUPS="$(kv super_partition_groups || true)"
 [ -n "$GROUPS" ] || die "super_partition_groups_non_rilevato"
