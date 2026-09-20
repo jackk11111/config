@@ -83,20 +83,36 @@ done < "$TMP/secure_services.txt"
 echo '# WEAR5-DIAG2-END' >> "$TMP/wear5diag.rc"
 chmod 0644 "$TMP/wear5diag.rc"
 
-TEMPLATE="$(find "$TMP/vendor_init" -type f -name '*.rc' | head -n1 | sed "s#^$TMP/vendor_init#/etc/init#")"
-[ -n "$TEMPLATE" ] || die "vendor_init_template_non_trovato"
+# Pick a real rc path directly from vendor.img. The previous version
+# derived it from rdump output and could accidentally produce /etc/init/init/...
+TEMPLATE=""
+debugfs -R "ls -p /etc/init" "$STOCK/vendor.img" 2>/dev/null \
+  | awk -F/ '$6 ~ /[.]rc$/ {print $6}' > "$TMP/vendor_rc_names.txt" || true
+
+while IFS= read -r RCNAME; do
+  [ -n "$RCNAME" ] || continue
+  CAND="/etc/init/$RCNAME"
+  rm -f "$TMP/vendor_selinux.xattr"
+  if debugfs -R "ea_get -f $TMP/vendor_selinux.xattr $CAND security.selinux" "$STOCK/vendor.img" >/dev/null 2>&1 \
+     && [ -s "$TMP/vendor_selinux.xattr" ]; then
+    TEMPLATE="$CAND"
+    break
+  fi
+done < "$TMP/vendor_rc_names.txt"
+
+[ -n "$TEMPLATE" ] || die "vendor_init_selinux_xattr_non_trovato"
 
 debugfs -w -R "rm /etc/init/wear5diag.rc" "$TMP/vendor_diag.img" >/dev/null 2>&1 || true
-debugfs -w -R "write $TMP/wear5diag.rc /etc/init/wear5diag.rc" "$TMP/vendor_diag.img" >/dev/null 2>&1   || die "vendor_diag_write_fallito"
+debugfs -w -R "write $TMP/wear5diag.rc /etc/init/wear5diag.rc" "$TMP/vendor_diag.img" >/dev/null 2>&1 \
+  || die "vendor_diag_write_fallito"
 debugfs -w -R "set_inode_field /etc/init/wear5diag.rc mode 0100644" "$TMP/vendor_diag.img" >/dev/null 2>&1 || true
 debugfs -w -R "set_inode_field /etc/init/wear5diag.rc uid 0" "$TMP/vendor_diag.img" >/dev/null 2>&1 || true
 debugfs -w -R "set_inode_field /etc/init/wear5diag.rc gid 0" "$TMP/vendor_diag.img" >/dev/null 2>&1 || true
 
-if debugfs -R "ea_get -f $TMP/vendor_selinux.xattr $TEMPLATE security.selinux" "$STOCK/vendor.img" >/dev/null 2>&1    && [ -s "$TMP/vendor_selinux.xattr" ]; then
-  debugfs -w -R "ea_set -f $TMP/vendor_selinux.xattr /etc/init/wear5diag.rc security.selinux" "$TMP/vendor_diag.img" >/dev/null 2>&1     || die "vendor_diag_xattr_fallito"
-else
-  die "vendor_init_selinux_xattr_non_trovato"
-fi
+debugfs -w -R "ea_set -f $TMP/vendor_selinux.xattr /etc/init/wear5diag.rc security.selinux" "$TMP/vendor_diag.img" >/dev/null 2>&1 \
+  || die "vendor_diag_xattr_fallito"
+
+echo "VENDOR_INIT_TEMPLATE=$TEMPLATE"
 
 debugfs -R "cat /etc/init/wear5diag.rc" "$TMP/vendor_diag.img" > "$TMP/verify.rc" 2>/dev/null   || die "vendor_diag_verify_read_fallito"
 cmp -s "$TMP/wear5diag.rc" "$TMP/verify.rc" || die "vendor_diag_verify_content_fallito"
