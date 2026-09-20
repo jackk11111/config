@@ -229,16 +229,24 @@ trap cleanup EXIT
 
 # Stage + verify + write only changed 4K runs, then read back each run and hash it.
 echo "RAW_PATCH=START"
-while IFS=$'\t' read -r START BLOCKS FILE HASH; do
+# adb inherits stdin; never let it consume the manifest feeding the loop.
+mapfile -t PATCH_ROWS < "$TMP/patches.tsv"
+[ "${#PATCH_ROWS[@]}" -gt 0 ] || die "patch_manifest_vuoto"
+APPLIED=0
+for ROW in "${PATCH_ROWS[@]}"; do
+  IFS=$'\t' read -r START BLOCKS FILE HASH <<<"$ROW"
   BN="$(basename "$FILE")"
-  "${ADB[@]}" push "$FILE" "$REMOTE/$BN" >/dev/null || die "push_$BN"
-  RH="$("${ADB[@]}" shell "sha256sum '$REMOTE/$BN' 2>/dev/null" | tr -d '\r' | awk '{print $1}' | tail -1)"
+  "${ADB[@]}" push "$FILE" "$REMOTE/$BN" </dev/null >/dev/null || die "push_$BN"
+  RH="$("${ADB[@]}" shell "sha256sum '$REMOTE/$BN' 2>/dev/null" </dev/null | tr -d '\r' | awk '{print $1}' | tail -1)"
   [ "$RH" = "$HASH" ] || die "stage_hash_$BN"
-  "${ADB[@]}" shell "dd if='$REMOTE/$BN' of='$DEV' bs=4096 seek='$START' count='$BLOCKS' conv=notrunc,fsync 2>/dev/null"     || die "dd_patch_$BN"
-  VH="$("${ADB[@]}" shell "dd if='$DEV' bs=4096 skip='$START' count='$BLOCKS' 2>/dev/null | sha256sum" | tr -d '\r' | awk '{print $1}' | tail -1)"
+  "${ADB[@]}" shell "dd if='$REMOTE/$BN' of='$DEV' bs=4096 seek='$START' count='$BLOCKS' conv=notrunc,fsync 2>/dev/null" </dev/null \
+    || die "dd_patch_$BN"
+  VH="$("${ADB[@]}" shell "dd if='$DEV' bs=4096 skip='$START' count='$BLOCKS' 2>/dev/null | sha256sum" </dev/null | tr -d '\r' | awk '{print $1}' | tail -1)"
   [ "$VH" = "$HASH" ] || die "readback_hash_$BN"
-done < "$TMP/patches.tsv"
-"${ADB[@]}" shell sync >/dev/null 2>&1 || die "sync_fallito"
+  APPLIED=$((APPLIED+1))
+  echo "PATCH_APPLIED=$APPLIED/${#PATCH_ROWS[@]}:$BN"
+done
+"${ADB[@]}" shell sync </dev/null >/dev/null 2>&1 || die "sync_fallito"
 
 # Read-only mount must still work and the new rc must be visible.
 "${ADB[@]}" shell "mkdir -p /mnt/wear5diag_verify; mount -t ext4 -o ro,noload '$DEV' /mnt/wear5diag_verify" >/dev/null   || die "verify_mount_ro_fallito"
