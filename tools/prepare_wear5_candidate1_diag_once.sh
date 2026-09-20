@@ -213,7 +213,7 @@ done
 [ -n "$GZIP_RUNNER" ] || die "gzip_non_disponibile_in_recovery"
 echo "REMOTE_GZIP=$GZIP_RUNNER"
 
-CACHE_AVAIL_KB="$("${ADB[@]}" shell "df -k /cache 2>/dev/null | tail -1 | awk '{print \\$4}'" </dev/null | tr -d '\r' | tail -1)"
+CACHE_AVAIL_KB="$("${ADB[@]}" shell "df -k /cache 2>/dev/null | tail -1 | sed 's/^ *//' | tr -s ' ' | cut -d' ' -f4" </dev/null | tr -d '\r' | tail -1)"
 case "$CACHE_AVAIL_KB" in ''|*[!0-9]*) CACHE_AVAIL_KB=65536 ;; esac
 CACHE_LIMIT=$((CACHE_AVAIL_KB*1024*70/100))
 echo "CACHE_AVAILABLE_BYTES=$((CACHE_AVAIL_KB*1024))"
