@@ -4,9 +4,8 @@ set -Eeuo pipefail
 BUILD="/storage/emulated/0/Download/WEAR5_FIRST_BUILD"
 IMG="$BUILD/images"
 ADB_SERVER="tcp:10.82.56.57:5037"
-WATCH_DEFAULT="10.82.56.111:5555"
 MODE="${1:-preflight}"
-WATCH="${2:-$WATCH_DEFAULT}"
+TARGET="${2:-}"
 
 die(){ echo; echo "BLOCKER=$*"; exit 2; }
 
@@ -22,29 +21,63 @@ ACTUAL_SUPER="$(sha256sum "$IMG/super.img" | awk '{print $1}')"
 [ "$ACTUAL_SUPER" = "$EXPECTED_SUPER" ] || die "sha256_super_locale_errato"
 [ "$(stat -c %s "$IMG/super.img")" = "4294967296" ] || die "super_locale_non_4GiB"
 
-adb connect "$WATCH" >/dev/null 2>&1 || true
-SERIAL="$(adb devices | awk -v w="$WATCH" '$1==w && $2=="device"{print $1; exit}')"
-[ -n "$SERIAL" ] || SERIAL="$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')"
-[ -n "$SERIAL" ] || die "watch_non_visibile_su_adb"
+# In modalita cavo NON esegue adb connect: usa direttamente il device USB
+# gia esposto dal server ADB sul PC. Un TARGET esplicito e opzionale.
+if [ -n "$TARGET" ]; then
+  ADB=(adb -s "$TARGET")
+else
+  ADB=(adb)
+fi
 
-UID="$(adb -s "$SERIAL" shell 'id -u' 2>/dev/null | tr -d '\r' | tail -1)"
-[ "$UID" = "0" ] || die "adb_non_root_uid_$UID"
+STATE="$("${ADB[@]}" get-state 2>/dev/null | tr -d "\r" | tail -1 || true)"
+[ "$STATE" = "device" ] || {
+  if [ -z "$TARGET" ]; then
+    COUNT="$(adb devices 2>/dev/null | awk '$2=="device"{n++} END{print n+0}')"
+    [ "$COUNT" = "1" ] || die "adb_transport_non_univoco_device_count_$COUNT"
+    STATE="$(adb get-state 2>/dev/null | tr -d "\r" | tail -1 || true)"
+  fi
+}
+[ "$STATE" = "device" ] || die "watch_non_raggiungibile_sul_server_adb"
 
-SUPER_DEV="$(adb -s "$SERIAL" shell 'readlink -f /dev/block/by-name/super 2>/dev/null' | tr -d '\r' | tail -1)"
-BOOT_DEV="$(adb -s "$SERIAL" shell 'readlink -f /dev/block/by-name/boot 2>/dev/null' | tr -d '\r' | tail -1)"
-VBMETA_DEV="$(adb -s "$SERIAL" shell 'readlink -f /dev/block/by-name/vbmeta 2>/dev/null' | tr -d '\r' | tail -1)"
-VBMETA_SYS_DEV="$(adb -s "$SERIAL" shell 'readlink -f /dev/block/by-name/vbmeta_system 2>/dev/null' | tr -d '\r' | tail -1)"
+PRODUCT="$("${ADB[@]}" shell getprop ro.product.device 2>/dev/null | tr -d "\r" | tail -1 || true)"
+[ "$PRODUCT" = "dace" ] || die "device_inatteso_${PRODUCT:-vuoto}"
+
+SHELL_UID="$("${ADB[@]}" shell id -u 2>/dev/null | tr -d "\r" | tail -1 || true)"
+ROOT_UID="$SHELL_UID"
+USE_SU=0
+if [ "$SHELL_UID" != "0" ]; then
+  ROOT_UID="$("${ADB[@]}" shell "su -c 'id -u'" 2>/dev/null | tr -d "\r" | tail -1 || true)"
+  [ "$ROOT_UID" = "0" ] || die "root_non_disponibile_shell_uid_${SHELL_UID:-vuoto}"
+  USE_SU=1
+fi
+
+rsh(){
+  local cmd="$1"
+  if [ "$USE_SU" = "1" ]; then
+    "${ADB[@]}" shell "su -c \"$cmd\""
+  else
+    "${ADB[@]}" shell "$cmd"
+  fi
+}
+
+SUPER_DEV="$(rsh "readlink -f /dev/block/by-name/super 2>/dev/null" | tr -d "\r" | tail -1)"
+BOOT_DEV="$(rsh "readlink -f /dev/block/by-name/boot 2>/dev/null" | tr -d "\r" | tail -1)"
+VBMETA_DEV="$(rsh "readlink -f /dev/block/by-name/vbmeta 2>/dev/null" | tr -d "\r" | tail -1)"
+VBMETA_SYS_DEV="$(rsh "readlink -f /dev/block/by-name/vbmeta_system 2>/dev/null" | tr -d "\r" | tail -1)"
 
 [ -n "$SUPER_DEV" ] || die "super_device_non_trovato"
 [ -n "$BOOT_DEV" ] || die "boot_device_non_trovato"
 [ -n "$VBMETA_DEV" ] || die "vbmeta_device_non_trovato"
 [ -n "$VBMETA_SYS_DEV" ] || die "vbmeta_system_device_non_trovato"
 
-REMOTE_SUPER_SIZE="$(adb -s "$SERIAL" shell "blockdev --getsize64 '$SUPER_DEV'" 2>/dev/null | tr -d '\r' | tail -1)"
-[ "$REMOTE_SUPER_SIZE" = "4294967296" ] || die "super_target_size_$REMOTE_SUPER_SIZE"
+REMOTE_SUPER_SIZE="$(rsh "blockdev --getsize64 $SUPER_DEV" 2>/dev/null | tr -d "\r" | grep -E '^[0-9]+$' | tail -1 || true)"
+[ "$REMOTE_SUPER_SIZE" = "4294967296" ] || die "super_target_size_${REMOTE_SUPER_SIZE:-vuoto}"
 
 echo "PREFLIGHT=PASS"
-echo "SERIAL=$SERIAL"
+echo "TRANSPORT=CABLE_ADB_SERVER"
+echo "PRODUCT=$PRODUCT"
+echo "SHELL_UID=$SHELL_UID"
+echo "ROOT_UID=$ROOT_UID"
 echo "SUPER_DEV=$SUPER_DEV"
 echo "SUPER_SIZE=$REMOTE_SUPER_SIZE"
 echo "BOOT_DEV=$BOOT_DEV"
@@ -58,7 +91,11 @@ echo "RECOVERY_TOUCHED=NO"
 write_image(){
   local src="$1" dev="$2" label="$3"
   echo "FLASHING=$label"
-  adb -s "$SERIAL" exec-in "dd of='$dev' bs=4194304 conv=fsync 2>/dev/null" < "$src" || die "flash_${label}_fallito"
+  if [ "$USE_SU" = "1" ]; then
+    "${ADB[@]}" exec-in "su -c 'dd of=$dev bs=4194304 conv=fsync 2>/dev/null'" < "$src" || die "flash_${label}_fallito"
+  else
+    "${ADB[@]}" exec-in "dd of=$dev bs=4194304 conv=fsync 2>/dev/null" < "$src" || die "flash_${label}_fallito"
+  fi
 }
 
 write_image "$IMG/super.img" "$SUPER_DEV" "super"
@@ -66,10 +103,9 @@ write_image "$IMG/vbmeta_system.img" "$VBMETA_SYS_DEV" "vbmeta_system"
 write_image "$IMG/vbmeta.img" "$VBMETA_DEV" "vbmeta"
 write_image "$IMG/boot.img" "$BOOT_DEV" "boot"
 
-adb -s "$SERIAL" shell 'sync' || die "sync_fallito"
-
-REMOTE_HASH="$(adb -s "$SERIAL" shell "sha256sum '$SUPER_DEV' 2>/dev/null | awk '{print \\\$1}'" | tr -d '\r' | tail -1)"
-[ "$REMOTE_HASH" = "$EXPECTED_SUPER" ] || die "verifica_super_postflash_fallita_$REMOTE_HASH"
+rsh "sync" >/dev/null || die "sync_fallito"
+REMOTE_HASH="$(rsh "sha256sum $SUPER_DEV 2>/dev/null" | tr -d "\r" | awk '{print $1}' | tail -1)"
+[ "$REMOTE_HASH" = "$EXPECTED_SUPER" ] || die "verifica_super_postflash_fallita_${REMOTE_HASH:-vuoto}"
 
 echo "FLASH=PASS"
 echo "SUPER_SHA256=$REMOTE_HASH"
