@@ -30,8 +30,19 @@ VBMETA_SYSTEM_DEV="$(getdev vbmeta_system)"
 [ -n "$VBMETA_SYSTEM_DEV" ] || die "vbmeta_system_dev_mancante"
 
 hash_remote_prefix(){
-  local dev="$1" bytes="$2"
-  "${ADB[@]}" shell "dd if='$dev' bs=1 count='$bytes' 2>/dev/null | sha256sum"     | tr -d '\r' | awk '{print $1}' | tail -1
+  local dev="$1" bytes="$2" bs count
+  if (( bytes % 1048576 == 0 )); then
+    bs=1048576
+    count=$((bytes / 1048576))
+  elif (( bytes % 4096 == 0 )); then
+    bs=4096
+    count=$((bytes / 4096))
+  else
+    bs=512
+    count=$((bytes / 512))
+  fi
+  "${ADB[@]}" shell "dd if='$dev' bs='$bs' count='$count' 2>/dev/null | sha256sum" \
+    | tr -d '\r' | awk '{print $1}' | tail -1
 }
 
 BOOT_SIZE="$(stat -c %s "$BUILD/boot.img")"
