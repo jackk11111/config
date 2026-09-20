@@ -90,6 +90,17 @@ echo "RECOVERY_TOUCHED=NO"
 [ "$MODE" = "preflight" ] && exit 0
 [ "$MODE" = "flash" ] || die "modo_valido_preflight_o_flash"
 
+# Guardie immediatamente prima di qualsiasi scrittura.
+RECOVERY_DEV="$(rsh "readlink -f /dev/block/by-name/recovery 2>/dev/null" | tr -d "\r" | tail -1 || true)"
+[ -n "$RECOVERY_DEV" ] || die "recovery_partition_non_trovata_non_flasho"
+[ "$RECOVERY_DEV" != "$BOOT_DEV" ] || die "recovery_e_boot_coincidono_non_flasho"
+
+BUSY_MOUNTS="$(rsh "cat /proc/mounts" 2>/dev/null | awk '$2 ~ /^\/(system|system_root|vendor|product|system_ext|system_dlkm|vendor_dlkm)(\/|$)/ {print $2}' | tr '\n' ',' || true)"
+[ -z "$BUSY_MOUNTS" ] || die "partizioni_super_montate_${BUSY_MOUNTS}"
+
+echo "FLASH_GUARD=PASS"
+echo "RECOVERY_DEV=$RECOVERY_DEV"
+
 write_image(){
   local src="$1" dev="$2" label="$3"
   echo "FLASHING=$label"
