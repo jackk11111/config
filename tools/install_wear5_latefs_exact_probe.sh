@@ -225,23 +225,19 @@ done
 [ -n "$RUNNER" ] || die "dmctl_non_eseguibile"
 echo "DMCTL_RUNNER=$RUNNER"
 
-echo "[4/8] CLONE_LIVE_VENDOR_RW"
-TAB="$("${ADB[@]}" shell "$RUNNER table vendor" </dev/null 2>/dev/null | tr -d '\r')"
-printf '%s\n' "$TAB"
-printf '%s\n' "$TAB" | sed -n 's/^\([0-9][0-9]*\)-\([0-9][0-9]*\): linear, \([^ ]*\) \([0-9][0-9]*\)$/\1 \2 \3 \4/p' > "$TMP/vendor.table"
-[ -s "$TMP/vendor.table" ] || die "vendor_table_non_parsabile"
+echo "[4/8] CREATE_KNOWN_VENDOR_RW_MAP"
+# Proven live vendor mapping from this exact TicWatch super layout:
+# logical 0-580784 -> mmcblk0p7 (179:7) physical sector 3231744.
+# Do not query 'dmctl table vendor' again: that command is the current remote-ADB hang point.
+# Safety is preserved by the full-device SHA check in [5/8] before any write.
+ARGS="linear 0 580784 '179:7' 3231744"
 
-ARGS=""
-while read -r START END BASE OFF; do
-  LEN=$((END-START))
-  ARGS="$ARGS linear $START $LEN '$BASE' $OFF"
-done < "$TMP/vendor.table"
-
-"${ADB[@]}" shell "$RUNNER delete '$NAME' >/dev/null 2>&1 || true" </dev/null >/dev/null 2>&1 || true
-"${ADB[@]}" shell "$RUNNER create '$NAME' $ARGS" </dev/null >/dev/null || die "dm_create_fallito"
-DEV="$("${ADB[@]}" shell "$RUNNER getpath '$NAME'" </dev/null 2>/dev/null | tr -d '\r' | tail -1)"
+timeout 5s "${ADB[@]}" shell "$RUNNER delete '$NAME' >/dev/null 2>&1 || true" </dev/null >/dev/null 2>&1 || true
+timeout 8s "${ADB[@]}" shell "$RUNNER create '$NAME' $ARGS" </dev/null >/dev/null || die "dm_create_timeout_or_fail"
+DEV="$(timeout 5s "${ADB[@]}" shell "$RUNNER getpath '$NAME'" </dev/null 2>/dev/null | tr -d '\r' | tail -1)" || die "dm_getpath_timeout"
 [ -n "$DEV" ] || die "dm_getpath_fallito"
-RO="$("${ADB[@]}" shell "blockdev --getro '$DEV'" </dev/null 2>/dev/null | tr -d '\r' | tail -1)"
+echo "DM_PATH=$DEV"
+RO="$(timeout 5s "${ADB[@]}" shell "blockdev --getro '$DEV'" </dev/null 2>/dev/null | tr -d '\r' | tail -1)" || die "blockdev_getro_timeout"
 [ "$RO" = "0" ] || die "dm_device_readonly_$RO"
 
 cleanup(){
@@ -250,7 +246,7 @@ cleanup(){
 trap cleanup EXIT
 
 echo "[5/8] VERIFY_LIVE_BASELINE"
-REMOTE_OLD="$("${ADB[@]}" shell "sha256sum '$DEV'" </dev/null 2>/dev/null | tr -d '\r' | awk '{print $1}' | tail -1)"
+REMOTE_OLD="$(timeout 20s "${ADB[@]}" shell "sha256sum '$DEV'" </dev/null 2>/dev/null | tr -d '\r' | awk '{print $1}' | tail -1)" || die "remote_baseline_sha_timeout"
 echo "REMOTE_OLD_SHA=$REMOTE_OLD"
 [ "$REMOTE_OLD" = "$LOCAL_OLD" ] || die "live_vendor_non_corrisponde_baseline"
 
