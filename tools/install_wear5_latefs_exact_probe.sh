@@ -195,11 +195,18 @@ print(f"PATCH_BYTES={total}")
 PY
 
 ADB=(adb -H "$ADB_HOST" -P "$ADB_PORT" -s "$TARGET")
-STATE="$(adb -H "$ADB_HOST" -P "$ADB_PORT" devices 2>/dev/null | awk -v s="$TARGET" '$1==s{print $2; exit}')"
+
+echo "[PRECHECK] ADB_STATE"
+STATE="$(timeout 5s "${ADB[@]}" get-state </dev/null 2>/dev/null | tr -d '\r' | tail -1)" || die "adb_get_state_timeout"
 case "$STATE" in recovery|device|rescue) ;; *) die "adb_state_${STATE:-vuoto}";; esac
-PRODUCT="$("${ADB[@]}" shell getprop ro.product.device </dev/null 2>/dev/null | tr -d '\r' | tail -1)"
+echo "ADB_STATE=$STATE"
+
+echo "[PRECHECK] DEVICE_AND_UID"
+PRE="$(timeout 5s "${ADB[@]}" shell 'printf "DEVICE="; getprop ro.product.device; printf "UID="; id -u' </dev/null 2>/dev/null | tr -d '\r')" || die "adb_shell_precheck_timeout"
+printf '%s\n' "$PRE"
+PRODUCT="$(printf '%s\n' "$PRE" | sed -n 's/^DEVICE=//p' | tail -1)"
+UIDR="$(printf '%s\n' "$PRE" | sed -n 's/^UID=//p' | tail -1)"
 [ "$PRODUCT" = "dace" ] || die "device_${PRODUCT:-vuoto}"
-UIDR="$("${ADB[@]}" shell id -u </dev/null 2>/dev/null | tr -d '\r' | tail -1)"
 [ "$UIDR" = "0" ] || die "adb_non_root_uid_${UIDR:-vuoto}"
 
 echo "[3/8] LOAD_DMCTL"
