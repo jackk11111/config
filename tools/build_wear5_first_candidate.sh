@@ -22,13 +22,25 @@ rm -rf "$OUT"
 mkdir -p "$IMG/logical" "$META"
 
 echo "[2/6] VINTF gate"
-VM="$STAGE2/stock/vendor/vintf_root/vintf/manifest.xml"
-[ -f "$VM" ] || die "manifest_VINTF_stock_non_trovato"
 
-TARGET_FCM="$(grep -oE 'target-level="[0-9]+"' "$VM" | head -1 | grep -oE '[0-9]+' || true)"
+# Alcuni firmware Qualcomm dividono il device manifest in frammenti e non
+# hanno /vendor/etc/vintf/manifest.xml. Prima cerca target-level in tutti i
+# manifest vendor; se non è esplicitato, ricava il livello FCM massimo
+# supportato dal framework stock (Android 13 => tipicamente FCM 7).
+TARGET_FCM="$(
+  grep -RhoE 'target-level="[0-9]+"' "$STAGE2/stock/vendor/vintf_root" 2>/dev/null     | grep -oE '[0-9]+' | sort -n | tail -1 || true
+)"
+
+if [ -z "$TARGET_FCM" ]; then
+  TARGET_FCM="$(
+    find "$STAGE2/stock/system" -type f -name 'compatibility_matrix.*.xml' 2>/dev/null       | sed -n 's/.*compatibility_matrix\.\([0-9][0-9]*\)\.xml$/\1/p'       | sort -n | tail -1
+  )"
+fi
+
 [ -n "$TARGET_FCM" ] || die "target_FCM_stock_non_rilevato"
 
 DONOR_MATRIX="$STAGE2/xiaomi/system/vintf_root/vintf/compatibility_matrix.$TARGET_FCM.xml"
+[ -f "$DONOR_MATRIX" ] || DONOR_MATRIX="$STAGE2/xiaomi/system/vintf_system/vintf/compatibility_matrix.$TARGET_FCM.xml"
 [ -f "$DONOR_MATRIX" ] || die "donor_Wear5_non_contiene_FCM_${TARGET_FCM}"
 
 echo "TARGET_FCM=$TARGET_FCM"
