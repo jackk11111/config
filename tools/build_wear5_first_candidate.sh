@@ -81,9 +81,9 @@ with open(dst,'w',encoding='utf-8') as o:
         o.write(f"{g}_partition_list={' '.join(plist)}\n")
 PY
 
-GROUPS="$(kv super_partition_groups || true)"
+LP_GROUPS="$(kv super_partition_groups || true)"
 DYNAMIC_LIST="$(kv dynamic_partition_list || true)"
-[ -n "$GROUPS" ] || die "super_partition_groups_non_rilevato"
+[ -n "$LP_GROUPS" ] || die "super_partition_groups_non_rilevato"
 [ -n "$DYNAMIC_LIST" ] || die "lista_partizioni_dinamiche_vuota"
 
 # Cerca la dimensione fisica esatta di super solo nei metadata GPT/rawprogram dell'OTA.
@@ -172,7 +172,7 @@ done
 
 group_for_part(){
   local p="$1" g list q
-  for g in $GROUPS; do
+  for g in $LP_GROUPS; do
     list="$(kv "${g}_partition_list" || true)"
     for q in $list; do
       [ "$q" = "$p" ] && { echo "$g"; return 0; }
@@ -183,7 +183,7 @@ group_for_part(){
 
 # Riduce solo lo spazio libero ext4 se il set ibrido supera il group max.
 NEED_SHRINK=0
-for G in $GROUPS; do
+for G in $LP_GROUPS; do
   GS="$(kv "${G}_size" || true)"
   [ -n "$GS" ] || die "dimensione_gruppo_${G}_non_rilevata"
   SUM=0
@@ -207,7 +207,7 @@ else
   echo "SHRINK=NO"
 fi
 
-for G in $GROUPS; do
+for G in $LP_GROUPS; do
   GS="$(kv "${G}_size")"
   SUM=0
   LIST="$(kv "${G}_partition_list" || true)"
@@ -223,7 +223,7 @@ if [ -n "$SUPER_SIZE" ]; then
   META_SIZE=65536
   META_SLOTS=2
   LPM_ARGS=()
-  for G in $GROUPS; do
+  for G in $LP_GROUPS; do
     GS="$(kv "${G}_size")"
     LPM_ARGS+=(--group "${G}:${GS}")
   done
