@@ -1,0 +1,49 @@
+name: Cleanup Wear7 branches
+on:
+  push:
+    branches:
+      - wear5-port-staging
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Delete obsolete Wear7 branches
+        shell: bash
+        run: |
+          set -u
+          branches=(
+            "cleanup/wear7-obsolete-2026-09-17"
+            "wear7-initboot-a17-probe"
+            "wear7-rom-staging"
+            "wear7-v6-offline-validation"
+            "wear7-v7-super-split-download-20260918"
+            "wear7-v9-run"
+            "wear7-v11-current-diag3-charger-init"
+            "wear7-v11-diag2-all-bssl-bypass"
+            "wear7-v11-diag2-bssl-bypass-test"
+            "wear7-v11-diag2-delta-super"
+            "wear7-v11-diag2-earlyinit-audit"
+            "wear7-v11-diag2-init-window-audit"
+            "wear7-v11-diag2-light-package"
+            "wear7-v11-fs-aware-charger"
+            "wear7-v11-init-audit"
+            "wear7-v11-init-metadata-policy-final"
+            "wear7-v11-marker-policy-audit"
+            "wear7-v11-property-context-fix"
+            "wear7-v11-reboot-cause-audit"
+            "wear7-v11-rootcause-audit"
+            "wear7-v11-service-state-diag"
+            "wear7-v11-stage-marker-diag"
+            "wear7-v11-stage-marker-diag2"
+          )
+          for b in "${branches[@]}"; do
+            echo "Deleting $b"
+            git push origin --delete "$b" || true
+          done
