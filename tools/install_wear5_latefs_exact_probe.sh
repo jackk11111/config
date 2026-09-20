@@ -26,79 +26,132 @@ done
 rm -rf "$TMP"
 mkdir -p "$TMP/patches"
 
-echo "[1/8] PATCH_INIT_TARGET_LOCALLY"
-debugfs -R "cat $RC" "$SRC" > "$TMP/init.target.old.rc" 2>/dev/null || die "init_target_non_leggibile"
+echo "[1/8] RESOLVE_AND_PATCH_REAL_LATEFS_RC"
 
-python - "$TMP/init.target.old.rc" "$TMP/init.target.new.rc" <<'PY'
-import sys,re
-src,dst=sys.argv[1:]
-lines=open(src,encoding='utf-8',errors='strict').read().splitlines()
+rm -rf "$TMP/vendor_init_live"
+mkdir -p "$TMP/vendor_init_live"
+debugfs -R "rdump /etc/init $TMP/vendor_init_live" "$SRC" >/dev/null 2>&1 \
+  || die "rdump_vendor_init_fallito"
 
-# Locate the late-fs action semantically, independent of indentation/spacing.
-start=None; end=None
-for i,line in enumerate(lines):
-    if re.fullmatch(r'\s*on\s+late-fs\s*', line):
-        j=i+1
-        while j < len(lines):
-            s=lines[j].strip()
-            if re.match(r'^(on|service|import)\b', s):
-                break
-            j += 1
-        body=lines[i+1:j]
-        has_wait=any(re.fullmatch(r'\s*wait_for_prop\s+hwservicemanager\.ready\s+true\s*', x) for x in body)
-        has_mount=any(re.fullmatch(r'\s*mount_all\s+/vendor/etc/fstab\.\$\{ro\.hardware\}\s+--late\s*', x) for x in body)
-        if has_wait and has_mount:
-            if start is not None:
-                raise SystemExit("MULTIPLE_TARGET_LATE_FS_BLOCKS")
-            start,end=i,j
+python - "$TMP/vendor_init_live" "$TMP/target.rel" "$TMP/init.target.old.rc" "$TMP/init.target.new.rc" <<'PY'
+import os,sys,re,shutil
+root,relout,oldout,newout=sys.argv[1:]
+root=os.path.realpath(root)
 
-if start is None:
-    # Stop locally and print the actual late-fs blocks for a concrete mismatch.
-    print("TARGET_LATE_FS_BLOCK_NOT_FOUND")
-    for i,line in enumerate(lines):
-        if re.fullmatch(r'\s*on\s+late-fs\s*', line):
-            print(f"--- late-fs at line {i+1}")
-            j=i
-            while j < min(len(lines), i+12):
-                print(lines[j])
-                j += 1
+def find_action(lines):
+    hits=[]
+    i=0
+    while i < len(lines):
+        if re.fullmatch(r'\s*on\s+late-fs\s*', lines[i]):
+            j=i+1
+            while j < len(lines):
+                s=lines[j].strip()
+                if re.match(r'^(on|service|import)\b', s):
+                    break
+                j+=1
+            body=lines[i+1:j]
+            has_wait=any(re.fullmatch(r'\s*wait_for_prop\s+hwservicemanager\.ready\s+true\s*', x) for x in body)
+            has_mount=any(re.fullmatch(r'\s*mount_all\s+/vendor/etc/fstab\.\$\{ro\.hardware\}\s+--late\s*', x) for x in body)
+            if has_wait and has_mount:
+                hits.append((i,j))
+            i=j
+        else:
+            i+=1
+    return hits
+
+matches=[]
+for dp,dirs,files in os.walk(root, followlinks=True):
+    for fn in files:
+        if not fn.endswith('.rc'):
+            continue
+        p=os.path.join(dp,fn)
+        try:
+            data=open(p,'r',encoding='utf-8',errors='strict').read()
+        except Exception:
+            continue
+        lines=data.splitlines()
+        hits=find_action(lines)
+        for h in hits:
+            matches.append((p,lines,h))
+
+if len(matches)!=1:
+    print("TARGET_LATE_FS_MATCHES="+str(len(matches)))
+    for p,lines,(i,j) in matches:
+        print("MATCH="+p)
+        for x in lines[i:j]:
+            print(x)
     raise SystemExit(3)
 
+p,lines,(start,end)=matches[0]
+real=os.path.realpath(p)
+if not (real==root or real.startswith(root+os.sep)):
+    raise SystemExit("TARGET_ESCAPES_RDUMP_ROOT")
+rel=os.path.relpath(real,root)
+open(relout,'w').write(rel+'\n')
+shutil.copyfile(real,oldout)
+
 out=[]
-inserted_wait=inserted_mount=0
+iw=im=0
 for i,line in enumerate(lines):
     if start < i < end and re.fullmatch(r'\s*wait_for_prop\s+hwservicemanager\.ready\s+true\s*', line):
-        indent=line[:len(line)-len(line.lstrip())]
-        out.append(indent+'chmod 0777 /metadata/diag/wear5diag/05a_before_hwsm_wait')
+        ind=line[:len(line)-len(line.lstrip())]
+        out.append(ind+'chmod 0777 /metadata/diag/wear5diag/05a_before_hwsm_wait')
         out.append(line)
-        out.append(indent+'chmod 0777 /metadata/diag/wear5diag/05b_after_hwsm_wait')
-        inserted_wait += 1
+        out.append(ind+'chmod 0777 /metadata/diag/wear5diag/05b_after_hwsm_wait')
+        iw+=1
     elif start < i < end and re.fullmatch(r'\s*mount_all\s+/vendor/etc/fstab\.\$\{ro\.hardware\}\s+--late\s*', line):
-        indent=line[:len(line)-len(line.lstrip())]
+        ind=line[:len(line)-len(line.lstrip())]
         out.append(line)
-        out.append(indent+'chmod 0777 /metadata/diag/wear5diag/05c_after_mount_all')
-        inserted_mount += 1
+        out.append(ind+'chmod 0777 /metadata/diag/wear5diag/05c_after_mount_all')
+        im+=1
     else:
         out.append(line)
 
-if inserted_wait != 1 or inserted_mount != 1:
-    raise SystemExit(f"INSERT_COUNTS_wait={inserted_wait}_mount={inserted_mount}")
+if iw!=1 or im!=1:
+    raise SystemExit(f"INSERT_COUNTS_wait={iw}_mount={im}")
 
-open(dst,'w',encoding='utf-8',newline='\n').write('\n'.join(out)+'\n')
+open(newout,'w',encoding='utf-8',newline='\n').write('\n'.join(out)+'\n')
 print("LATEFS_TARGET_MATCH=PASS")
+print("RDUMP_REAL_REL="+rel)
 PY
+
+REL="$(cat "$TMP/target.rel")"
+OLD_SHA_FILE="$(sha256sum "$TMP/init.target.old.rc" | awk '{print $1}')"
+RC=""
+
+# Resolve the rdump path back to the exact ext4 path by content, not by assumption.
+for CAND in \
+  "/etc/init/$REL" \
+  "/etc/$REL" \
+  "/$REL" \
+  "/etc/init/$(basename "$REL")"
+do
+  rm -f "$TMP/candidate.rc"
+  if debugfs -R "cat $CAND" "$SRC" > "$TMP/candidate.rc" 2>/dev/null; then
+    H="$(sha256sum "$TMP/candidate.rc" | awk '{print $1}')"
+    if [ "$H" = "$OLD_SHA_FILE" ]; then
+      [ -z "$RC" ] || [ "$RC" = "$CAND" ] || die "multiple_image_paths_for_target"
+      RC="$CAND"
+    fi
+  fi
+done
+
+[ -n "$RC" ] || die "real_latefs_rc_image_path_non_risolto"
+echo "REAL_LATEFS_RC=$RC"
 
 cp --reflink=auto --sparse=always "$SRC" "$FIX"
 rm -f "$TMP/selinux.xattr"
-debugfs -R "ea_get -f $TMP/selinux.xattr $RC security.selinux" "$SRC" >/dev/null 2>&1 || die "xattr_read_fallito"
+debugfs -R "ea_get -f $TMP/selinux.xattr $RC security.selinux" "$SRC" >/dev/null 2>&1 \
+  || die "xattr_read_fallito"
 [ -s "$TMP/selinux.xattr" ] || die "xattr_vuoto"
 
-debugfs -w -R "rm $RC" "$FIX" >/dev/null 2>&1 || die "rm_init_target_fallito"
-debugfs -w -R "write $TMP/init.target.new.rc $RC" "$FIX" >/dev/null 2>&1 || die "write_init_target_fallito"
+debugfs -w -R "rm $RC" "$FIX" >/dev/null 2>&1 || die "rm_target_rc_fallito"
+debugfs -w -R "write $TMP/init.target.new.rc $RC" "$FIX" >/dev/null 2>&1 || die "write_target_rc_fallito"
 debugfs -w -R "set_inode_field $RC mode 0100644" "$FIX" >/dev/null 2>&1 || true
 debugfs -w -R "set_inode_field $RC uid 0" "$FIX" >/dev/null 2>&1 || true
 debugfs -w -R "set_inode_field $RC gid 0" "$FIX" >/dev/null 2>&1 || true
-debugfs -w -R "ea_set -f $TMP/selinux.xattr $RC security.selinux" "$FIX" >/dev/null 2>&1 || die "xattr_write_fallito"
+debugfs -w -R "ea_set -f $TMP/selinux.xattr $RC security.selinux" "$FIX" >/dev/null 2>&1 \
+  || die "xattr_write_fallito"
 
 debugfs -R "cat $RC" "$FIX" > "$TMP/init.target.verify.rc" 2>/dev/null || die "verify_rc_read_fallito"
 cmp -s "$TMP/init.target.new.rc" "$TMP/init.target.verify.rc" || die "verify_rc_mismatch"
