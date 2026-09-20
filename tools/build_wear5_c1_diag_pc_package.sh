@@ -7,7 +7,7 @@ STOCK="$WORK/stock"
 OUT="/storage/emulated/0/Download/WEAR5_C1_DIAG_PC"
 IMG="$OUT/images"
 TMP="$WORK/C1_DIAG_PC_BUILD"
-META="/metadata/wear5diag"
+META="/metadata/diag/wear5diag"
 SUPER="$OUT/super_C1_DIAG.img"
 SUPER_SIZE=4294967296
 GROUP="qti_dynamic_partitions"
@@ -35,41 +35,41 @@ grep -RhsE '^[[:space:]]*service[[:space:]]+' "$TMP/vendor_init" 2>/dev/null   |
 cat > "$TMP/wear5diag.rc" <<'EOF'
 # WEAR5-DIAG2-BEGIN
 on early-init
-    chmod 0777 /metadata/wear5diag/01_early_init
+    chmod 0777 /metadata/diag/wear5diag/01_early_init
 on init
-    chmod 0777 /metadata/wear5diag/02_init
+    chmod 0777 /metadata/diag/wear5diag/02_init
 on late-init
-    chmod 0777 /metadata/wear5diag/03_late_init
+    chmod 0777 /metadata/diag/wear5diag/03_late_init
 on fs
-    chmod 0777 /metadata/wear5diag/04_fs
+    chmod 0777 /metadata/diag/wear5diag/04_fs
 on post-fs
-    chmod 0777 /metadata/wear5diag/05_post_fs
+    chmod 0777 /metadata/diag/wear5diag/05_post_fs
 on late-fs
-    chmod 0777 /metadata/wear5diag/06_late_fs
+    chmod 0777 /metadata/diag/wear5diag/06_late_fs
 on post-fs-data
-    chmod 0777 /metadata/wear5diag/07_post_fs_data
+    chmod 0777 /metadata/diag/wear5diag/07_post_fs_data
 on early-boot
-    chmod 0777 /metadata/wear5diag/08_early_boot
+    chmod 0777 /metadata/diag/wear5diag/08_early_boot
 on boot
-    chmod 0777 /metadata/wear5diag/09_boot
+    chmod 0777 /metadata/diag/wear5diag/09_boot
 on property:init.svc.apexd=running
-    chmod 0777 /metadata/wear5diag/10_apexd_running
+    chmod 0777 /metadata/diag/wear5diag/10_apexd_running
 on property:init.svc.vold=running
-    chmod 0777 /metadata/wear5diag/20_vold_running
+    chmod 0777 /metadata/diag/wear5diag/20_vold_running
 on property:init.svc.servicemanager=running
-    chmod 0777 /metadata/wear5diag/30_servicemanager_running
+    chmod 0777 /metadata/diag/wear5diag/30_servicemanager_running
 on property:init.svc.hwservicemanager=running
-    chmod 0777 /metadata/wear5diag/31_hwservicemanager_running
+    chmod 0777 /metadata/diag/wear5diag/31_hwservicemanager_running
 on property:init.svc.keystore2=running
-    chmod 0777 /metadata/wear5diag/35_keystore2_running
+    chmod 0777 /metadata/diag/wear5diag/35_keystore2_running
 on property:init.svc.zygote=running
-    chmod 0777 /metadata/wear5diag/40_zygote_running
+    chmod 0777 /metadata/diag/wear5diag/40_zygote_running
 on property:init.svc.surfaceflinger=running
-    chmod 0777 /metadata/wear5diag/41_surfaceflinger_running
+    chmod 0777 /metadata/diag/wear5diag/41_surfaceflinger_running
 on property:init.svc.bootanim=running
-    chmod 0777 /metadata/wear5diag/42_bootanim_running
+    chmod 0777 /metadata/diag/wear5diag/42_bootanim_running
 on property:sys.boot_completed=1
-    chmod 0777 /metadata/wear5diag/99_boot_completed
+    chmod 0777 /metadata/diag/wear5diag/99_boot_completed
 EOF
 
 while IFS= read -r SVC; do
@@ -78,7 +78,7 @@ while IFS= read -r SVC; do
   {
     echo
     echo "on property:init.svc.$SVC=running"
-    echo "    chmod 0777 /metadata/wear5diag/50_svc_$SAFE"
+    echo "    chmod 0777 /metadata/diag/wear5diag/50_svc_$SAFE"
   } >> "$TMP/wear5diag.rc"
 done < "$TMP/secure_services.txt"
 echo '# WEAR5-DIAG2-END' >> "$TMP/wear5diag.rc"
@@ -183,7 +183,7 @@ if /I not "!PRODUCT!"=="dace" (
 )
 
 echo [1/4] Preparo marker persistenti...
-adb -s %SERIAL% shell "rm -rf $META; mkdir -p $META; chmod 0700 $META; for d in $CORE_MARKERS$SEC_MARKERS; do mkdir -p $META/\$d; chmod 0700 $META/\$d; chcon u:object_r:vendor_data_file:s0 $META/\$d 2>/dev/null || true; done; chcon u:object_r:vendor_data_file:s0 $META 2>/dev/null || true; sync" || goto :fail
+adb -s %SERIAL% shell "rm -rf $META; mkdir -p $META; chmod 0700 $META; for d in $CORE_MARKERS$SEC_MARKERS; do mkdir -p $META/\$d; chmod 0700 $META/\$d; chcon u:object_r:vendor_data_file:s0 $META/\$d 2>/dev/null || true; done; chcon u:object_r:vendor_data_file:s0 /metadata/diag 2>/dev/null || true; chcon u:object_r:vendor_data_file:s0 $META 2>/dev/null || true; sync" || goto :fail
 adb -s %SERIAL% shell "ls -Zd $META" | findstr /C:"vendor_data_file" >nul || (echo ERROR: label marker non corretto & goto :fail)
 
 echo [2/4] Flash diretto USB 4GiB...
