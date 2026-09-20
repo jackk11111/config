@@ -14,7 +14,7 @@ REMOTE="/cache/wear5_c1diag"
 REMOTE_STAGE="$REMOTE/stage.bin"
 META="/metadata/vold/wear5diag"
 BS=4194304
-STAGE_CHUNKS=4
+RAW_MAX_CHUNKS=64
 C1_SHA="7fe0e1ecc6bca9d22c15f3ae21a91034a3b21589c27a4dddc6a67d40aa6c9079"
 C2_SHA="0ececf37ca5deee776f635c4b0fe89c3f6afb7e0ed1a233aba043d0e9d4cd595"
 
@@ -23,7 +23,7 @@ die(){ echo; echo "BLOCKER=$*"; exit 2; }
 for F in "$C1" "$C2" "$STOCK_VENDOR" "$STOCK_SYSTEM"; do
   [ -f "$F" ] || die "file_mancante_$F"
 done
-for C in debugfs lpdump python sha256sum; do
+for C in debugfs lpdump python sha256sum gzip; do
   command -v "$C" >/dev/null 2>&1 || die "tool_mancante_$C"
 done
 [ "$(sha256sum "$C1" | awk '{print $1}')" = "$C1_SHA" ] || die "candidate1_hash_locale_errato"
@@ -195,37 +195,90 @@ CHAIN_FLAGS="$("${ADB[@]}" shell "dd if='$VBMETA_SYS_DEV' bs=1 skip=120 count=4 
 "${ADB[@]}" shell "rm -rf '$REMOTE'; mkdir -p '$REMOTE'" >/dev/null || die "remote_dir_fallita"
 
 # ---------- Restore C1 in verified staged groups ----------
-echo "[4/6] RESTORE_CANDIDATE1_DELTA"
+echo "[4/6] RESTORE_CANDIDATE1_DELTA_FAST"
+# Bulk restore: up to 256 MiB raw per transfer, gzip-compressed locally,
+# staged + hashed on watch, then decompressed locally into super.
+# This reduces ~75 tiny network round-trips to only a handful.
 mapfile -t RANGES < "$TMP/c1_delta.tsv"
-GROUPS=0
+
+# Locate a gzip-capable command in recovery.
+GZIP_RUNNER=""
+for CAND in "/system/bin/toybox gzip" "/system/bin/gzip" "/sbin/gzip" "toybox gzip" "gzip"; do
+  OUT="$("${ADB[@]}" shell "$CAND --help" </dev/null 2>&1 || true)"
+  if printf '%s\n' "$OUT" | grep -qiE 'gzip|compress|decompress'; then
+    GZIP_RUNNER="$CAND"
+    break
+  fi
+done
+[ -n "$GZIP_RUNNER" ] || die "gzip_non_disponibile_in_recovery"
+echo "REMOTE_GZIP=$GZIP_RUNNER"
+
+CACHE_AVAIL_KB="$("${ADB[@]}" shell "df -k /cache 2>/dev/null | tail -1 | awk '{print \\$4}'" </dev/null | tr -d '\r' | tail -1)"
+case "$CACHE_AVAIL_KB" in ''|*[!0-9]*) CACHE_AVAIL_KB=65536 ;; esac
+CACHE_LIMIT=$((CACHE_AVAIL_KB*1024*70/100))
+echo "CACHE_AVAILABLE_BYTES=$((CACHE_AVAIL_KB*1024))"
+echo "CACHE_STAGE_LIMIT=$CACHE_LIMIT"
+
+TOTAL_RAW=0
 for ROW in "${RANGES[@]}"; do
   IFS=$'\t' read -r S N <<<"$ROW"
-  GROUPS=$((GROUPS + (N + STAGE_CHUNKS - 1) / STAGE_CHUNKS))
+  TOTAL_RAW=$((TOTAL_RAW + N*BS))
 done
+echo "DELTA_RAW_BYTES=$TOTAL_RAW"
+
 G=0
 for ROW in "${RANGES[@]}"; do
   IFS=$'\t' read -r RUN_START RUN_COUNT <<<"$ROW"
   OFF=0
   while [ "$OFF" -lt "$RUN_COUNT" ]; do
-    CNT=$STAGE_CHUNKS
+    CNT=$RAW_MAX_CHUNKS
     REM=$((RUN_COUNT-OFF))
     [ "$REM" -lt "$CNT" ] && CNT=$REM
     START=$((RUN_START+OFF))
+
+    # Build a compressed chunk. If it does not fit comfortably in /cache,
+    # halve its raw size until it does.
+    while :; do
+      RAW_FILE="$TMP/c1_raw_chunk.bin"
+      GZ_FILE="$TMP/c1_chunk.bin.gz"
+      dd if="$C1" of="$RAW_FILE" bs="$BS" skip="$START" count="$CNT" status=none
+      RAW_HASH="$(sha256sum "$RAW_FILE" | awk '{print $1}')"
+      gzip -1 -c "$RAW_FILE" > "$GZ_FILE"
+      GZ_SIZE="$(stat -c %s "$GZ_FILE")"
+      if [ "$GZ_SIZE" -le "$CACHE_LIMIT" ] || [ "$CNT" -le 1 ]; then
+        break
+      fi
+      CNT=$(( (CNT+1)/2 ))
+    done
+
     G=$((G+1))
-    LOCAL_STAGE="$TMP/c1_stage.bin"
-    dd if="$C1" of="$LOCAL_STAGE" bs="$BS" skip="$START" count="$CNT" status=none
-    LH="$(sha256sum "$LOCAL_STAGE" | awk '{print $1}')"
-    echo "C1_DELTA=$G/$GROUPS START=$START CHUNKS=$CNT"
-    "${ADB[@]}" push "$LOCAL_STAGE" "$REMOTE_STAGE" </dev/null >/dev/null || die "c1_push_$G"
-    SH="$("${ADB[@]}" shell "sha256sum '$REMOTE_STAGE' 2>/dev/null" </dev/null | tr -d '\r' | awk '{print $1}' | tail -1)"
-    [ "$SH" = "$LH" ] || die "c1_stage_hash_$G"
-    "${ADB[@]}" shell "dd if='$REMOTE_STAGE' of='$SUPER_DEV' bs=$BS seek=$START count=$CNT conv=notrunc,fsync 2>/dev/null" </dev/null       || die "c1_write_$G"
-    RH="$("${ADB[@]}" shell "dd if='$SUPER_DEV' bs=$BS skip=$START count=$CNT 2>/dev/null | sha256sum" </dev/null | tr -d '\r' | awk '{print $1}' | tail -1)"
-    [ "$RH" = "$LH" ] || die "c1_verify_$G"
+    RAW_BYTES=$((CNT*BS))
+    echo "BULK=$G START=$START RAW_MIB=$((RAW_BYTES/1048576)) COMPRESSED_MIB=$((GZ_SIZE/1048576))"
+
+    # Skip transfer if this exact target range already matches Candidate 1
+    # (useful after an interrupted earlier restore).
+    CURRENT_HASH="$("${ADB[@]}" shell "dd if='$SUPER_DEV' bs=$BS skip=$START count=$CNT 2>/dev/null | sha256sum" </dev/null | tr -d '\r' | awk '{print $1}' | tail -1)"
+    if [ "$CURRENT_HASH" = "$RAW_HASH" ]; then
+      echo "BULK_STATUS=ALREADY_CORRECT"
+      OFF=$((OFF+CNT))
+      continue
+    fi
+
+    GZ_HASH="$(sha256sum "$GZ_FILE" | awk '{print $1}')"
+    "${ADB[@]}" push "$GZ_FILE" "$REMOTE_STAGE.gz" </dev/null >/dev/null || die "bulk_push_$G"
+    STAGE_HASH="$("${ADB[@]}" shell "sha256sum '$REMOTE_STAGE.gz' 2>/dev/null" </dev/null | tr -d '\r' | awk '{print $1}' | tail -1)"
+    [ "$STAGE_HASH" = "$GZ_HASH" ] || die "bulk_stage_hash_$G"
+
+    "${ADB[@]}" shell "$GZIP_RUNNER -dc '$REMOTE_STAGE.gz' | dd of='$SUPER_DEV' bs=$BS seek=$START conv=notrunc,fsync 2>/dev/null" </dev/null       || die "bulk_write_$G"
+
+    VERIFY_HASH="$("${ADB[@]}" shell "dd if='$SUPER_DEV' bs=$BS skip=$START count=$CNT 2>/dev/null | sha256sum" </dev/null | tr -d '\r' | awk '{print $1}' | tail -1)"
+    [ "$VERIFY_HASH" = "$RAW_HASH" ] || die "bulk_verify_$G"
+    echo "BULK_STATUS=PASS"
+
     OFF=$((OFF+CNT))
   done
 done
-"${ADB[@]}" shell sync >/dev/null 2>&1 || die "c1_sync_fallito"
+"${ADB[@]}" shell "rm -f '$REMOTE_STAGE.gz'; sync" </dev/null >/dev/null 2>&1 || die "c1_sync_fallito"
 echo "CANDIDATE1_DELTA=PASS"
 
 # ---------- Prepare DIAG2 metadata sentinels ----------
@@ -342,6 +395,7 @@ echo "SECURE_SERVICES=$(paste -sd, "$TMP/secure_services.txt" 2>/dev/null || tru
 echo "VBMETA_TOP_FLAGS=0x$TOP_FLAGS"
 echo "VBMETA_SYSTEM_FLAGS=0x$CHAIN_FLAGS"
 echo "RECOVERY_TOUCHED=NO"
+echo "RESTORE_METHOD=GZIP_BULK_STAGED_VERIFIED"
 echo "REBOOTING=NOW"
 "${ADB[@]}" shell sync >/dev/null 2>&1 || true
 "${ADB[@]}" reboot
