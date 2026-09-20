@@ -64,21 +64,38 @@ echo "BACKUP_SHA256=$BACKUP_SHA"
 
 case "$MODE" in
   flash)
+    STAGE="/cache/wear5_init_boot_a14.img"
+    echo "STAGING=donor_Android14_init_boot"
+    "${ADB[@]}" shell "rm -f '$STAGE'" >/dev/null 2>&1 || true
+    "${ADB[@]}" push "$DONOR" "$STAGE" >/dev/null || die "push_donor_init_boot_fallito"
+    STAGE_SIZE="$("${ADB[@]}" shell "stat -c %s '$STAGE' 2>/dev/null" | tr -d '\r' | tail -1)"
+    [ "$STAGE_SIZE" = "8388608" ] || die "stage_donor_size_${STAGE_SIZE:-vuoto}"
+    STAGE_SHA="$("${ADB[@]}" shell "sha256sum '$STAGE' 2>/dev/null" | tr -d '\r' | awk '{print $1}' | tail -1)"
+    [ "$STAGE_SHA" = "$DONOR_SHA" ] || die "stage_donor_sha_fallita_${STAGE_SHA:-vuoto}"
+    echo "STAGE_SHA256=$STAGE_SHA"
     echo "FLASHING=donor_Android14_init_boot_only"
-    "${ADB[@]}" exec-in "dd of='$INIT_DEV' bs=1048576 conv=fsync 2>/dev/null" < "$DONOR" || die "flash_init_boot_fallito"
-    "${ADB[@]}" shell sync >/dev/null 2>&1 || die "sync_fallito"
+    "${ADB[@]}" shell "dd if='$STAGE' of='$INIT_DEV' bs=1048576 conv=fsync 2>/dev/null && sync" >/dev/null || die "flash_init_boot_fallito"
     REMOTE_SHA="$("${ADB[@]}" shell "sha256sum '$INIT_DEV' 2>/dev/null" | tr -d '\r' | awk '{print $1}' | tail -1)"
     [ "$REMOTE_SHA" = "$DONOR_SHA" ] || die "verifica_init_boot_donor_fallita_${REMOTE_SHA:-vuoto}"
+    "${ADB[@]}" shell "rm -f '$STAGE'" >/dev/null 2>&1 || true
     echo "INIT_BOOT_TEST=FLASH_PASS"
     echo "REMOTE_SHA256=$REMOTE_SHA"
     echo "NEXT=reboot_normal_test"
     ;;
   restore)
+    STAGE="/cache/wear5_init_boot_restore.img"
+    echo "STAGING=init_boot_backup"
+    "${ADB[@]}" shell "rm -f '$STAGE'" >/dev/null 2>&1 || true
+    "${ADB[@]}" push "$BACKUP" "$STAGE" >/dev/null || die "push_backup_init_boot_fallito"
+    STAGE_SIZE="$("${ADB[@]}" shell "stat -c %s '$STAGE' 2>/dev/null" | tr -d '\r' | tail -1)"
+    [ "$STAGE_SIZE" = "8388608" ] || die "stage_backup_size_${STAGE_SIZE:-vuoto}"
+    STAGE_SHA="$("${ADB[@]}" shell "sha256sum '$STAGE' 2>/dev/null" | tr -d '\r' | awk '{print $1}' | tail -1)"
+    [ "$STAGE_SHA" = "$BACKUP_SHA" ] || die "stage_backup_sha_fallita_${STAGE_SHA:-vuoto}"
     echo "RESTORING=init_boot_backup"
-    "${ADB[@]}" exec-in "dd of='$INIT_DEV' bs=1048576 conv=fsync 2>/dev/null" < "$BACKUP" || die "restore_init_boot_fallito"
-    "${ADB[@]}" shell sync >/dev/null 2>&1 || die "sync_fallito"
+    "${ADB[@]}" shell "dd if='$STAGE' of='$INIT_DEV' bs=1048576 conv=fsync 2>/dev/null && sync" >/dev/null || die "restore_init_boot_fallito"
     REMOTE_SHA="$("${ADB[@]}" shell "sha256sum '$INIT_DEV' 2>/dev/null" | tr -d '\r' | awk '{print $1}' | tail -1)"
     [ "$REMOTE_SHA" = "$BACKUP_SHA" ] || die "verifica_restore_init_boot_fallita_${REMOTE_SHA:-vuoto}"
+    "${ADB[@]}" shell "rm -f '$STAGE'" >/dev/null 2>&1 || true
     echo "INIT_BOOT_TEST=RESTORE_PASS"
     echo "REMOTE_SHA256=$REMOTE_SHA"
     ;;
