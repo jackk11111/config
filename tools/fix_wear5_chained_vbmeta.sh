@@ -46,12 +46,14 @@ REMOTE_UID="$("${ADB[@]}" shell id -u 2>/dev/null | tr -d '\r' | tail -1)"
 DEV="$("${ADB[@]}" shell 'readlink -f /dev/block/by-name/vbmeta_system 2>/dev/null' | tr -d '\r' | tail -1)"
 [ -n "$DEV" ] || die "vbmeta_system_device_non_trovato"
 SIZE="$("${ADB[@]}" shell "blockdev --getsize64 '$DEV'" 2>/dev/null | tr -d '\r' | grep -E '^[0-9]+$' | tail -1)"
-[ "$SIZE" = "4096" ] || die "vbmeta_system_target_size_${SIZE:-vuoto}"
+[ "$SIZE" = "65536" ] || die "vbmeta_system_target_size_${SIZE:-vuoto}_atteso_65536"
 
 echo "PREFLIGHT=PASS"
 echo "ADB_STATE=$STATE"
 echo "PRODUCT=$PRODUCT"
 echo "VBMETA_SYSTEM_DEV=$DEV"
+echo "VBMETA_SYSTEM_PARTITION_SIZE=$SIZE"
+echo "VBMETA_SYSTEM_IMAGE_SIZE=4096"
 echo "SOURCE_SHA256=$SOURCE_SHA"
 echo "LOCAL_BUILD_SHA256=$BUILD_SHA"
 
@@ -66,7 +68,7 @@ echo "STAGE_SHA256=$STAGE_SHA"
 echo "FLASHING=vbmeta_system_only"
 "${ADB[@]}" shell "dd if='$STAGE' of='$DEV' bs=4096 conv=fsync 2>/dev/null && sync" >/dev/null || die "flash_fallito"
 
-REMOTE_SHA="$("${ADB[@]}" shell "sha256sum '$DEV' 2>/dev/null" | tr -d '\r' | awk '{print $1}' | tail -1)"
+REMOTE_SHA="$("${ADB[@]}" shell "dd if='$DEV' bs=4096 count=1 2>/dev/null | sha256sum" | tr -d '\r' | awk '{print $1}' | tail -1)"
 [ "$REMOTE_SHA" = "$SOURCE_SHA" ] || die "verifica_remota_fallita_${REMOTE_SHA:-vuoto}"
 
 "${ADB[@]}" shell "rm -f '$STAGE'" >/dev/null 2>&1 || true
