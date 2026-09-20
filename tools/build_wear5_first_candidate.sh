@@ -264,10 +264,13 @@ for P in init_boot vendor_boot dtbo; do
   [ -f "$STOCK/$P.img" ] && cp -f "$STOCK/$P.img" "$IMG/$P.img"
 done
 
+# AVB: disabilitazione solo sul vbmeta top-level.
+# vbmeta_system e' chained e deve mantenere flags=0.
 for P in vbmeta vbmeta_system; do
   [ -f "$STOCK/$P.img" ] || continue
   cp -f "$STOCK/$P.img" "$IMG/$P.img"
-  python - "$IMG/$P.img" <<'PY'
+done
+python - "$IMG/vbmeta.img" <<'PY'
 import struct,sys
 p=sys.argv[1]
 with open(p,'r+b') as f:
@@ -275,7 +278,6 @@ with open(p,'r+b') as f:
     f.seek(120)
     f.write(struct.pack(">I",3))
 PY
-done
 
 cat > "$OUT/BUILD_INFO.txt" <<EOF
 TARGET=dace
