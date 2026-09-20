@@ -182,8 +182,8 @@ if /I not "!PRODUCT!"=="dace" (
 )
 
 echo [1/4] Preparo marker persistenti...
-adb -s %SERIAL% shell "rm -rf $META; mkdir -p $META; chmod 0700 $META; for d in $CORE_MARKERS$SEC_MARKERS; do mkdir -p $META/\$d; chmod 0700 $META/\$d; chcon u:object_r:vold_metadata_file:s0 $META/\$d 2>/dev/null || true; done; chcon u:object_r:vold_metadata_file:s0 $META 2>/dev/null || true; sync" || goto :fail
-adb -s %SERIAL% shell "ls -Zd $META" | findstr /C:"vold_metadata_file" >nul || (echo ERROR: label marker non corretto & goto :fail)
+adb -s %SERIAL% shell "rm -rf $META; mkdir -p $META; chmod 0700 $META; for d in $CORE_MARKERS$SEC_MARKERS; do mkdir -p $META/\$d; chmod 0700 $META/\$d; chcon u:object_r:vendor_data_file:s0 $META/\$d 2>/dev/null || true; done; chcon u:object_r:vendor_data_file:s0 $META 2>/dev/null || true; sync" || goto :fail
+adb -s %SERIAL% shell "ls -Zd $META" | findstr /C:"vendor_data_file" >nul || (echo ERROR: label marker non corretto & goto :fail)
 
 echo [2/4] Flash diretto USB 4GiB...
 adb -s %SERIAL% exec-in "dd of=/dev/block/mmcblk0p7 bs=4194304 conv=fsync 2>/dev/null" < "%SUPER%" || goto :fail
