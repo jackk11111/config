@@ -29,11 +29,14 @@ CORE=(
   07_post_fs_data
   08_early_boot
   09_boot
+  10_apexd_running
   20_vold_running
   30_servicemanager_running
   31_hwservicemanager_running
+  35_keystore2_running
   40_zygote_running
   41_surfaceflinger_running
+  42_bootanim_running
   99_boot_completed
 )
 
@@ -65,6 +68,20 @@ elif [ "$REACHED" -eq 0 ]; then
   echo "FINDING=NO_MARKER_REACHED_EARLY_INIT_NOT_PROVEN"
 elif [ "$LAST" = "99_boot_completed" ]; then
   echo "FINDING=ANDROID_BOOT_COMPLETED"
+elif [ "$LAST" = "42_bootanim_running" ]; then
+  echo "FINDING=BOOTANIM_REACHED_BEFORE_BOOT_COMPLETE"
+elif [ "$LAST" = "41_surfaceflinger_running" ]; then
+  echo "FINDING=SURFACEFLINGER_REACHED_BEFORE_BOOTANIM"
+elif [ "$LAST" = "40_zygote_running" ]; then
+  echo "FINDING=ZYGOTE_REACHED_BEFORE_SURFACEFLINGER"
+elif [ "$LAST" = "35_keystore2_running" ]; then
+  echo "FINDING=KEYSTORE2_REACHED_BEFORE_ZYGOTE"
+elif [ "$LAST" = "31_hwservicemanager_running" ] || [ "$LAST" = "30_servicemanager_running" ]; then
+  echo "FINDING=NATIVE_SERVICE_MANAGERS_REACHED"
+elif [ "$LAST" = "20_vold_running" ]; then
+  echo "FINDING=VOLD_REACHED_BEFORE_SERVICE_MANAGERS"
+elif [ "$LAST" = "10_apexd_running" ]; then
+  echo "FINDING=APEXD_REACHED_BEFORE_VOLD"
 else
-  echo "FINDING=BOOT_PROGRESS_LOCALIZED"
+  echo "FINDING=SECOND_STAGE_INIT_PROGRESS_LOCALIZED"
 fi
