@@ -60,7 +60,8 @@ echo "[6/7] ERASE_USERDATA"
 # so no valid F2FS superblock/checkpoint survives and fs_mgr formattable
 # can recreate userdata on the next normal boot.
 if timeout 30s "${ADB[@]}" shell "blkdiscard -f '$BLK'" </dev/null >/dev/null 2>&1; then
-  echo "ERASE_METHOD=blkdiscard"
+  timeout 12s "${ADB[@]}" shell "dd if=/dev/zero of='$BLK' bs=1M count=16 conv=fsync 2>/dev/null" </dev/null >/dev/null || die "userdata_head_zero_after_discard_failed"
+  echo "ERASE_METHOD=blkdiscard_plus_zero_head"
 else
   echo "BLKDISCARD_UNAVAILABLE=YES"
   timeout 20s "${ADB[@]}" shell "
