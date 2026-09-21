@@ -88,9 +88,36 @@ newbody=body[:idx]+inject+body[idx:]
 out=lines[:start+1]+newbody+lines[end:]
 
 text='\n'.join(out)+'\n'
+
+# Validate only the target late-fs action. The same service may legitimately
+# be started elsewhere in init.target.rc; global count==1 was incorrect.
+newlines=text.splitlines()
+ls=le=None
+for i,line in enumerate(newlines):
+    if re.fullmatch(r'\s*on\s+late-fs\s*', line):
+        j=i+1
+        while j<len(newlines):
+            s=newlines[j].strip()
+            if re.match(r'^(on|service|import)\b',s):
+                break
+            j+=1
+        b=[x.strip() for x in newlines[i+1:j]]
+        if 'mount_all /vendor/etc/fstab.${ro.hardware} --late' in b:
+            ls,le=i,j
+            break
+if ls is None:
+    raise SystemExit("PATCHED_LATEFS_BLOCK_NOT_FOUND")
+
+b=[x.strip() for x in newlines[ls+1:le]]
 for cmd in owned:
-    if text.count(cmd)!=1:
-        raise SystemExit("INJECT_VERIFY_FAILED_"+cmd.replace(' ','_'))
+    if cmd not in b:
+        raise SystemExit("LATEFS_INJECT_VERIFY_FAILED_"+cmd.replace(' ','_'))
+
+# Report whether starts already existed elsewhere; duplicates are harmless
+# but this makes the actual init topology explicit.
+for svc in ('vendor.qseecomd','vendor.keymaster-4-1'):
+    starts=sum(1 for x in newlines if x.strip()==f'start {svc}')
+    print(f"{svc}_START_OCCURRENCES={starts}")
 
 open(dst,'w',encoding='utf-8',newline='\n').write(text)
 print("KEYMASTER_READY_RC_PATCH=PASS")
