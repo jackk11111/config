@@ -1,0 +1,274 @@
+name: TicWatch KSU No-Cable Rescue Probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ticwatch-final-stock379-ksu-cleanwipe
+    paths:
+      - '.github/workflows/ticwatch-ksu-nocable-rescue-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-final-stock379-ksu-cleanwipe
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Install Android SDK pieces
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.3.13750724' >/dev/null
+
+      - name: Create minimal ARM32 KSU rescue probe app
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p probe/app/src/main/java/com/ticwatch/ksurescue
+          mkdir -p probe/app/src/main/cpp
+
+          cat > probe/settings.gradle <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name='TicWatchKsuRescue'
+          include ':app'
+          EOF
+
+          cat > probe/build.gradle <<'EOF'
+          plugins {
+              id 'com.android.application' version '8.7.3' apply false
+          }
+          EOF
+
+          cat > probe/app/build.gradle <<'EOF'
+          plugins { id 'com.android.application' }
+
+          android {
+              namespace 'com.ticwatch.ksurescue'
+              compileSdk 35
+              ndkVersion '27.3.13750724'
+
+              defaultConfig {
+                  applicationId 'com.ticwatch.ksurescue'
+                  minSdk 26
+                  targetSdk 33
+                  versionCode 1
+                  versionName '1.0-probe'
+                  ndk { abiFilters 'armeabi-v7a' }
+                  externalNativeBuild {
+                      cmake {
+                          cppFlags '-std=c++17 -Wall -Wextra'
+                      }
+                  }
+              }
+
+              externalNativeBuild {
+                  cmake { path file('src/main/cpp/CMakeLists.txt') }
+              }
+          }
+          EOF
+
+          cat > probe/app/src/main/AndroidManifest.xml <<'EOF'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <application android:theme="@android:style/Theme.Material.Light" android:label="TicWatch KSU Rescue Test">
+              <activity android:name=".MainActivity" android:exported="true">
+                <intent-filter>
+                  <action android:name="android.intent.action.MAIN"/>
+                  <category android:name="android.intent.category.LAUNCHER"/>
+                </intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+
+          cat > probe/app/src/main/java/com/ticwatch/ksurescue/MainActivity.java <<'EOF'
+          package com.ticwatch.ksurescue;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.graphics.Color;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.Button;
+          import android.widget.LinearLayout;
+          import android.widget.TextView;
+
+          public class MainActivity extends Activity {
+              static { System.loadLibrary("rescue"); }
+              private native String testKsu();
+
+              @Override public void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  LinearLayout l = new LinearLayout(this);
+                  l.setOrientation(LinearLayout.VERTICAL);
+                  l.setGravity(Gravity.CENTER);
+                  l.setPadding(18,18,18,18);
+                  TextView t = new TextView(this);
+                  t.setText("NO FLASH. Grant this app root in KernelSU Manager, then press TEST.");
+                  t.setTextSize(14);
+                  t.setTextColor(Color.BLACK);
+                  t.setGravity(Gravity.CENTER);
+                  Button x = new Button(this);
+                  x.setText("TEST KSU ROOT");
+                  l.addView(t);
+                  l.addView(x);
+                  setContentView(l);
+                  x.setOnClickListener(v -> {
+                      String r = testKsu();
+                      t.setText(r);
+                  });
+              }
+          }
+          EOF
+
+          cat > probe/app/src/main/cpp/CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.22.1)
+          project(twksurescue)
+          add_library(rescue SHARED rescue.cpp)
+          find_library(log-lib log)
+          target_link_libraries(rescue ${log-lib})
+          EOF
+
+          cat > probe/app/src/main/cpp/rescue.cpp <<'EOF'
+          #include <jni.h>
+          #include <unistd.h>
+          #include <sys/syscall.h>
+          #include <sys/ioctl.h>
+          #include <fcntl.h>
+          #include <errno.h>
+          #include <stdint.h>
+          #include <stdio.h>
+          #include <string.h>
+          #include <sys/stat.h>
+
+          static const uint32_t KSU_INSTALL_MAGIC1 = 0xDEADBEEF;
+          static const uint32_t KSU_INSTALL_MAGIC2 = 0xCAFEBABE;
+
+          struct ksu_get_info_cmd {
+              uint32_t version;
+              uint32_t flags;
+              uint32_t features;
+              uint32_t uapi_version;
+          };
+
+          static const unsigned long KSU_IOCTL_GRANT_ROOT =
+              _IOC(_IOC_NONE, 'K', 1, 0);
+          static const unsigned long KSU_IOCTL_GET_INFO =
+              _IOR('K', 2, struct ksu_get_info_cmd);
+
+          extern "C" JNIEXPORT jstring JNICALL
+          Java_com_ticwatch_ksurescue_MainActivity_testKsu(JNIEnv* env, jobject) {
+              char out[1024];
+              int fd = -1;
+              errno = 0;
+
+              // Explicit long casts are mandatory on ARM32 varargs ABI.
+              long rc_install = syscall(SYS_reboot,
+                  (long)KSU_INSTALL_MAGIC1,
+                  (long)KSU_INSTALL_MAGIC2,
+                  (long)0,
+                  &fd);
+              int e_install = errno;
+
+              struct ksu_get_info_cmd info = {};
+              errno = 0;
+              int rc_info = (fd >= 0) ? ioctl(fd, KSU_IOCTL_GET_INFO, &info) : -1;
+              int e_info = errno;
+
+              errno = 0;
+              int rc_root = (fd >= 0) ? ioctl(fd, KSU_IOCTL_GRANT_ROOT, 0) : -1;
+              int e_root = errno;
+              uid_t uid = getuid();
+              gid_t gid = getgid();
+
+              int marker = -1;
+              int e_marker = 0;
+              if (uid == 0) {
+                  marker = open("/data/local/tmp/TW_KSU_RESCUE_OK",
+                                O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644);
+                  if (marker >= 0) {
+                      char m[256];
+                      int n = snprintf(m, sizeof(m),
+                          "ROOT_OK uid=%u gid=%u ksu=%u uapi=%u fd=%d\n",
+                          (unsigned)uid, (unsigned)gid, info.version,
+                          info.uapi_version, fd);
+                      (void)write(marker, m, (size_t)n);
+                      (void)fchmod(marker, 0644);
+                      close(marker);
+                  } else {
+                      e_marker = errno;
+                  }
+              }
+
+              snprintf(out, sizeof(out),
+                  "NO FLASH\n"
+                  "SYS_reboot=%ld errno=%d fd=%d\n"
+                  "GET_INFO=%d errno=%d ksu=%u uapi=%u\n"
+                  "GRANT_ROOT=%d errno=%d\n"
+                  "uid=%u gid=%u\n"
+                  "marker=%d errno=%d\n"
+                  "%s",
+                  rc_install, e_install, fd,
+                  rc_info, e_info, info.version, info.uapi_version,
+                  rc_root, e_root,
+                  (unsigned)uid, (unsigned)gid,
+                  marker, e_marker,
+                  uid == 0 ? "RESULT=ROOT_OK" : "RESULT=NO_ROOT");
+
+              if (fd >= 0) close(fd);
+              return env->NewStringUTF(out);
+          }
+          EOF
+
+      - name: Build and audit APK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd probe
+          gradle --no-daemon :app:assembleDebug
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          unzip -l "$APK" | tee "$GITHUB_WORKSPACE/apk-contents.txt"
+          unzip -l "$APK" | grep -Fq 'lib/armeabi-v7a/librescue.so'
+          if unzip -l "$APK" | grep -Eq 'lib/(arm64-v8a|x86|x86_64)/'; then
+              echo 'Unexpected ABI in probe APK' >&2; exit 2
+          fi
+          cp "$APK" "$GITHUB_WORKSPACE/TicWatch-KSU-NoCable-Rescue-PROBE.apk"
+          cd "$GITHUB_WORKSPACE"
+          sha256sum TicWatch-KSU-NoCable-Rescue-PROBE.apk > SHA256SUMS.txt
+          cat > README.txt <<'EOF'
+          READ-ONLY/NO-FLASH KSU rescue probe.
+          Package: com.ticwatch.ksurescue
+          ABI: armeabi-v7a
+          It only requests a KSU fd, calls KSU_IOCTL_GET_INFO and KSU_IOCTL_GRANT_ROOT,
+          then creates /data/local/tmp/TW_KSU_RESCUE_OK if root succeeds.
+          It NEVER opens or writes boot/recovery/super/vbmeta.
+          EOF
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-KSU-NoCable-Rescue-PROBE
+          path: |
+            TicWatch-KSU-NoCable-Rescue-PROBE.apk
+            SHA256SUMS.txt
+            README.txt
+            apk-contents.txt
+          if-no-files-found: error
+          retention-days: 30
