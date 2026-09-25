@@ -41,6 +41,7 @@ env:
   CURRENT_BASELINE_SOURCE_DELTA_SHA256: 'b416e989cd01011ce394e5ffc7edfeec0801a4538b44558947e8031a2c627c17'
   CURRENT_BASELINE_FINAL_CONFIG_SHA256: '9e63ad86d97fa6d6ce1914efeb8035dafb9043819796f0784a1bdf10a2557b54'
   CURRENT_BASELINE_MODULE_SYMVERS_SHA256: '39c1019ed73a00b2ba8a9ab5f3a057d8cb0a8be1e285762b7cd56cb0bf95cea0'
+  CURRENT_BASELINE_SOURCE_DATE_EPOCH: '1789467983'
 
 jobs:
   build:
@@ -71,7 +72,23 @@ jobs:
           test -s /tmp/final.yml
           test -s /tmp/current.yml
 
-          git checkout --detach "$FINAL_KNOWN_GOOD_REPO_COMMIT"
+          cp "$KMI_CRC_MAP_REL" /tmp/ticwatch-stock379-kmi-crc-overrides-337.tsv
+
+          python3 - /tmp/current.yml "$CURRENT_BASELINE_SOURCE_DATE_EPOCH" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); epoch=sys.argv[2]
+          s=p.read_text()
+          old='export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"'
+          new=f'export SOURCE_DATE_EPOCH="{epoch}"'
+          if s.count(old) != 1:
+              raise SystemExit(f'current baseline SOURCE_DATE_EPOCH anchor mismatch: {s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
+
+          git checkout --detach "$HISTORICAL_V2_COMMIT"
+          mkdir -p "$(dirname "$KMI_CRC_MAP_REL")"
+          cp /tmp/ticwatch-stock379-kmi-crc-overrides-337.tsv "$KMI_CRC_MAP_REL"
 
           cat > /tmp/run-step.py <<'PY'
           from pathlib import Path
