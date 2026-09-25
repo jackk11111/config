@@ -58,15 +58,18 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          git fetch --no-tags origin "$HISTORICAL_V2_COMMIT" "$FINAL_KNOWN_GOOD_REPO_COMMIT"
+          git fetch --no-tags origin "$HISTORICAL_V2_COMMIT" "$FINAL_KNOWN_GOOD_REPO_COMMIT" "$CURRENT_BASELINE_COMMIT"
           git cat-file -e "${HISTORICAL_V2_COMMIT}^{commit}"
           git cat-file -e "${FINAL_KNOWN_GOOD_REPO_COMMIT}^{commit}"
+          git cat-file -e "${CURRENT_BASELINE_COMMIT}^{commit}"
 
           git show "$HISTORICAL_V2_COMMIT:.github/workflows/ticwatch-max-lts-220-final-build-v2.yml" > /tmp/v2.yml
           git show "$FINAL_KNOWN_GOOD_REPO_COMMIT:.github/workflows/ticwatch-max-lts-220-final-build-v5kmi-fixed.yml" > /tmp/final.yml
+          git show "$CURRENT_BASELINE_COMMIT:.github/workflows/ticwatch-kexec-arm64-reloc-internal-probe.yml" > /tmp/current.yml
 
           test -s /tmp/v2.yml
           test -s /tmp/final.yml
+          test -s /tmp/current.yml
 
           git checkout --detach "$FINAL_KNOWN_GOOD_REPO_COMMIT"
 
@@ -171,10 +174,6 @@ jobs:
           git -C "$K" apply --check "$GITHUB_WORKSPACE/current-baseline/audit/probe-source-delta.patch"
           git -C "$K" apply "$GITHUB_WORKSPACE/current-baseline/audit/probe-source-delta.patch"
 
-          git -C "$K" diff HEAD --binary > current-baseline-reproduced.patch
-          test -s current-baseline-reproduced.patch
-          echo "$CURRENT_BASELINE_SOURCE_DELTA_SHA256  current-baseline-reproduced.patch" | sha256sum -c -
-
           grep -Fq 'TWKEXEC_PROBE: ENTRY BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
           grep -Fq 'TWKEXEC_PROBE: ENTRY RETURNED' "$K/arch/arm64/kernel/machine_kexec.c"
           grep -Fq 'TWKEXEC_PROBE: TTBR1_SWITCH BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
@@ -190,6 +189,52 @@ jobs:
 
           echo "$CURRENT_BASELINE_FINAL_CONFIG_SHA256  final.config" | sha256sum -c -
           echo "CURRENT_INSTALLED_976C_SOURCE_GATE=PASS"
+
+      - name: Install targeted genksyms CRC preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F="$GITHUB_WORKSPACE/.ticwatch-preflight/common/scripts/genksyms/genksyms.c"
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+
+          p=Path(sys.argv[1]); s=p.read_text()
+          marker='static unsigned long ticwatch_kmi_crc_override('
+          call='\t\tcrc = ticwatch_kmi_crc_override(name, crc);\n'
+          helper='''static unsigned long ticwatch_kmi_crc_override(const char *name, unsigned long crc)\n{\n    const char *path = getenv("TICWATCH_KMI_CRC_MAP");\n    FILE *f;\n    char line[512];\n    char sym[256];\n    unsigned long expected;\n\n    if (!path || !*path)\n        return crc;\n    f = fopen(path, "r");\n    if (!f) {\n        perror(path);\n        exit(2);\n    }\n    while (fgets(line, sizeof(line), f)) {\n        if (line[0] == '#' || line[0] == '\\n')\n            continue;\n        if (sscanf(line, "%255s %lx", sym, &expected) == 2 && strcmp(sym, name) == 0) {\n            fclose(f);\n            return expected;\n        }\n    }\n    fclose(f);\n    return crc;\n}\n\n'''
+
+          state=(s.count(marker), s.count(call))
+          if state == (0, 0):
+              print('KMI_PRESTATE=CLEAN')
+          elif state == (1, 1):
+              if s.count(helper) != 1:
+                  raise SystemExit('KMI preexisting helper differs from historical helper')
+              s=s.replace(helper,'',1)
+              s=s.replace(call,'',1)
+              if s.count(marker) or s.count(call):
+                  raise SystemExit('KMI normalization failed')
+              p.write_text(s)
+              print('KMI_PRESTATE=NORMALIZED_TO_HISTORICAL_INPUT')
+          else:
+              raise SystemExit(f'KMI prestate ambiguous={state}')
+          PY
+
+          python3 /tmp/run-step.py /tmp/final.yml "Install targeted genksyms CRC preservation"
+          grep -Fq 'ticwatch_kmi_crc_override' "$F"
+          [ "$(grep -c 'static unsigned long ticwatch_kmi_crc_override' "$F")" -eq 1 ]
+          [ "$(grep -c 'crc = ticwatch_kmi_crc_override(name, crc);' "$F")" -eq 1 ]
+          echo "KMI_CRC_OVERRIDE_FINAL_COUNT=PASS"
+
+      - name: Compile exact installed 976c baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 /tmp/run-step.py /tmp/current.yml "Compile internal-probe kernel"
+          echo "$CURRENT_BASELINE_IMAGE_SHA256  Image" | sha256sum -c -
+          echo "$CURRENT_BASELINE_FINAL_CONFIG_SHA256  final.config" | sha256sum -c -
+          echo "$CURRENT_BASELINE_MODULE_SYMVERS_SHA256  Module.symvers" | sha256sum -c -
+          echo "CURRENT_INSTALLED_976C_BINARY_REPRODUCTION=PASS"
 
       - name: Patch only SELFHEAL static KSU init RC
         shell: bash
@@ -237,49 +282,13 @@ jobs:
           test -s selfheal-rc.patch
           grep -Fq '/oem/ticwatch-selfheal/bootstrap.sh' selfheal-rc.patch
 
-      - name: Install targeted genksyms CRC preservation
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          F="$GITHUB_WORKSPACE/.ticwatch-preflight/common/scripts/genksyms/genksyms.c"
-          python3 - "$F" <<'PY'
-          from pathlib import Path
-          import sys
-
-          p=Path(sys.argv[1]); s=p.read_text()
-          marker='static unsigned long ticwatch_kmi_crc_override('
-          call='\t\tcrc = ticwatch_kmi_crc_override(name, crc);\n'
-          helper='''static unsigned long ticwatch_kmi_crc_override(const char *name, unsigned long crc)\n{\n    const char *path = getenv("TICWATCH_KMI_CRC_MAP");\n    FILE *f;\n    char line[512];\n    char sym[256];\n    unsigned long expected;\n\n    if (!path || !*path)\n        return crc;\n    f = fopen(path, "r");\n    if (!f) {\n        perror(path);\n        exit(2);\n    }\n    while (fgets(line, sizeof(line), f)) {\n        if (line[0] == '#' || line[0] == '\\n')\n            continue;\n        if (sscanf(line, "%255s %lx", sym, &expected) == 2 && strcmp(sym, name) == 0) {\n            fclose(f);\n            return expected;\n        }\n    }\n    fclose(f);\n    return crc;\n}\n\n'''
-
-          state=(s.count(marker), s.count(call))
-          if state == (0, 0):
-              print('KMI_PRESTATE=CLEAN')
-          elif state == (1, 1):
-              if s.count(helper) != 1:
-                  raise SystemExit('KMI preexisting helper differs from historical helper')
-              s=s.replace(helper,'',1)
-              s=s.replace(call,'',1)
-              if s.count(marker) or s.count(call):
-                  raise SystemExit('KMI normalization failed')
-              p.write_text(s)
-              print('KMI_PRESTATE=NORMALIZED_TO_HISTORICAL_INPUT')
-          else:
-              raise SystemExit(f'KMI prestate ambiguous={state}')
-          PY
-
-          python3 /tmp/run-step.py /tmp/final.yml "Install targeted genksyms CRC preservation"
-          grep -Fq 'ticwatch_kmi_crc_override' "$F"
-          [ "$(grep -c 'static unsigned long ticwatch_kmi_crc_override' "$F")" -eq 1 ]
-          [ "$(grep -c 'crc = ticwatch_kmi_crc_override(name, crc);' "$F")" -eq 1 ]
-          echo "KMI_CRC_OVERRIDE_FINAL_COUNT=PASS"
-
       - name: Compile SELFHEAL kernel
         shell: bash
-        run: python3 /tmp/run-step.py /tmp/final.yml "Compile final kernel"
+        run: python3 /tmp/run-step.py /tmp/current.yml "Compile internal-probe kernel"
 
       - name: KMI and config hard gate
         shell: bash
-        run: python3 /tmp/run-step.py /tmp/final.yml "KMI and config hard gate"
+        run: python3 /tmp/run-step.py /tmp/current.yml "Exact KMI and config hard gate"
 
       - name: SELFHEAL binary and delta gate
         shell: bash
@@ -314,7 +323,7 @@ jobs:
           cp Image bundle/
           cp final.config Module.symvers System.map kernelrelease.txt bundle/audit/
           cp selfheal-rc.patch selfheal-rc-source.txt kmi-crc-audit.txt SELFHEAL_SHA256SUMS.txt bundle/audit/
-          cp current-baseline-reproduced.patch bundle/audit/
+          cp current-baseline/audit/probe-source-delta.patch bundle/audit/current-baseline-probe-source-delta.patch
           cp "$KMI_CRC_MAP_REL" bundle/audit/
 
           cat > bundle/README_SELFHEAL.txt <<EOF
@@ -332,6 +341,7 @@ jobs:
           UID2000_RESCUE_BYPASS=NO
           STOCK379_KMI_TARGETED_GATE=PASS
           CURRENT_INSTALLED_976C_SOURCE_GATE=PASS
+          CURRENT_INSTALLED_976C_BINARY_REPRODUCTION=PASS
           CURRENT_INSTALLED_976C_KMI_CONFIG_GATE=PASS
           FLASH_PERFORMED=NO
           TEST_PLAN=REPACK_KNOWN_GOOD_BOOT_AND_FASTBOOT_BOOT_TEMPORARILY_FIRST
