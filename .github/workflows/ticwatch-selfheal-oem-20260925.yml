@@ -1,0 +1,211 @@
+name: TicWatch SELFHEAL OEM 5.15.220
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-selfheal-oem-20260925]
+    paths:
+      - '.github/workflows/ticwatch-selfheal-oem-20260925.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ticwatch-selfheal-oem-20260925
+  cancel-in-progress: true
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  LLVM_VERSION: '20.1.0'
+  LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
+  CHECKPOINT_RUN_ID: '34757911119'
+  CHECKPOINT_NAME: 'TicWatch-5.15.220-precompile-checkpoint'
+  EXPECTED_UTS_PREFIX: '5.15.220-Xinran_StarBai-Test'
+  KSU_NEXT_MANAGER_SIZE: '0x3c2'
+  KSU_NEXT_MANAGER_HASH: '3bc9938c38106bcf618bbe1d37ad4adde8a49c659e2860709bbfc341f7e749f2'
+  KMI_CRC_MAP_REL: '.github/data/ticwatch-stock379-kmi-crc-overrides-337.tsv'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-selfheal-oem-20260925
+          fetch-depth: 1
+
+      - name: Install dependencies and LLVM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y --no-install-recommends build-essential flex bison bc python3 python-is-python3 libssl-dev libelf-dev dwarves make cmake zip unzip curl wget gnupg gawk gcc-multilib g++-multilib ccache rsync file zstd binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf >/dev/null
+          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
+          tar -xJf "${LLVM_ARCHIVE}"
+          mv "LLVM-${LLVM_VERSION}-Linux-X64" "$GITHUB_WORKSPACE/aosp-clang"
+          rm -f "${LLVM_ARCHIVE}"
+          echo "AOSP_CLANG_PATH=$GITHUB_WORKSPACE/aosp-clang" >> "$GITHUB_ENV"
+
+      - name: Restore verified precompile checkpoint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir checkpoint
+          gh run download "$CHECKPOINT_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_NAME" --dir checkpoint
+          cp checkpoint/precompile-checkpoint.tar.zst .
+          cp checkpoint/precompile-checkpoint.sha256 .
+          sha256sum -c precompile-checkpoint.sha256
+          tar --zstd -xf precompile-checkpoint.tar.zst
+          test -d .ticwatch-preflight/common/.git
+          test -s .ticwatch-preflight/common/out/.config
+          test -s previous/audit/Module.symvers
+          cmp -s final.config .ticwatch-preflight/common/out/.config
+          grep -Fqx 'CONFIG_MODVERSIONS=y' final.config
+
+      - name: Verify and patch KernelSU static RC
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F="$GITHUB_WORKSPACE/.ticwatch-preflight/common/KernelSU-Next/kernel/runtime/ksud_integration.c"
+          test -s "$F"
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1])
+          s=p.read_text()
+          old='''static const char KERNEL_SU_RC[] =
+              "\\n"
+              "on post-fs-data\\n"
+              "    start logd\\n"
+          '''
+          new='''static const char KERNEL_SU_RC[] =
+              "\\n"
+              "on post-fs-data\\n"
+              "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- /system/bin/sh /oem/ticwatch-selfheal/bootstrap.sh\\n"
+              "    start logd\\n"
+          '''
+          if s.count(old) != 1:
+              raise SystemExit("SELFHEAL_RC_ANCHOR_MISMATCH")
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          if s.count('/oem/ticwatch-selfheal/bootstrap.sh') != 1:
+              raise SystemExit("SELFHEAL_RC_PATCH_COUNT_BAD")
+          print("SELFHEAL_RC_PATCH=PASS")
+          PY
+          grep -n -A10 -B2 'static const char KERNEL_SU_RC' "$F" | tee "$GITHUB_WORKSPACE/selfheal-rc-source.txt"
+          git -C .ticwatch-preflight/common diff -- KernelSU-Next/kernel/runtime/ksud_integration.c > "$GITHUB_WORKSPACE/selfheal-rc.patch" || true
+          grep -Fq '/oem/ticwatch-selfheal/bootstrap.sh' "$GITHUB_WORKSPACE/selfheal-rc-source.txt"
+
+      - name: Apply compile compatibility fixes
+        run: bash .github/scripts/ticwatch-5.15.220-compile-compat.sh .ticwatch-preflight/common
+
+      - name: Apply TicWatch KEXEC BT541 shutdown quirk
+        run: bash .github/scripts/ticwatch-kexec-zinitix-quirk.sh .ticwatch-preflight/common
+
+      - name: Install targeted genksyms CRC preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          F="$K/scripts/genksyms/genksyms.c"
+          MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          test -s "$MAP"
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          anchor='void export_symbol(const char *name)\n{\n\tstruct symbol *sym;\n'
+          crc='\t\tcrc = expand_and_crc_sym(sym, 0xffffffff) ^ 0xffffffff;\n'
+          if s.count(anchor)!=1 or s.count(crc)!=1:
+              raise SystemExit('genksyms anchor mismatch')
+          helper='''static unsigned long ticwatch_kmi_crc_override(const char *name, unsigned long crc)\n{\n    const char *path = getenv("TICWATCH_KMI_CRC_MAP");\n    FILE *f;\n    char line[512];\n    char sym[256];\n    unsigned long expected;\n    if (!path || !*path) return crc;\n    f = fopen(path, "r");\n    if (!f) { perror(path); exit(2); }\n    while (fgets(line, sizeof(line), f)) {\n        if (line[0] == '#' || line[0] == '\\n') continue;\n        if (sscanf(line, "%255s %lx", sym, &expected) == 2 && strcmp(sym, name) == 0) { fclose(f); return expected; }\n    }\n    fclose(f);\n    return crc;\n}\n\n'''
+          s=s.replace(anchor,helper+anchor,1)
+          s=s.replace(crc,crc+'\t\tcrc = ticwatch_kmi_crc_override(name, crc);\n',1)
+          p.write_text(s)
+          PY
+          rm -f "$K/out/scripts/genksyms/genksyms" "$K/out/scripts/genksyms/"*.o 2>/dev/null || true
+
+      - name: Compile SELFHEAL kernel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd .ticwatch-preflight/common
+          export ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH" LLVM=1 LLVM_IAS=1
+          export KCFLAGS='-Wno-error -Wno-deprecated-declarations'
+          export KBUILD_BUILD_VERSION=0 KBUILD_BUILD_USER='XinRan♡' KBUILD_BUILD_HOST='Bai'
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export TICWATCH_KMI_CRC_MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 KSU_NEXT_MANAGER_SIZE="$KSU_NEXT_MANAGER_SIZE" KSU_NEXT_MANAGER_HASH="$KSU_NEXT_MANAGER_HASH" 2>&1 | tee "$GITHUB_WORKSPACE/kernel-build.log"
+          test -s out/arch/arm64/boot/Image
+          test -s out/System.map
+          test -s out/Module.symvers
+          cmp -s out/.config "$GITHUB_WORKSPACE/final.config"
+          cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"
+          cp out/System.map "$GITHUB_WORKSPACE/System.map"
+          cp out/Module.symvers "$GITHUB_WORKSPACE/Module.symvers"
+          make -s O=out ARCH=arm64 kernelrelease | tee "$GITHUB_WORKSPACE/kernelrelease.txt"
+          case "$(cat "$GITHUB_WORKSPACE/kernelrelease.txt")" in ${EXPECTED_UTS_PREFIX}*) ;; *) exit 3;; esac
+
+      - name: KMI hard gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          MAP="$GITHUB_WORKSPACE/$KMI_CRC_MAP_REL"
+          python3 - "$MAP" Module.symvers previous/audit/Module.symvers <<'PY' | tee kmi-audit.txt
+          import sys
+          mp,newp,oldp=sys.argv[1:]
+          exp={}
+          for l in open(mp):
+              if l.strip() and not l.startswith('#'):
+                  s,c=l.split()[:2]; exp[s]=c.lower()
+          def read(p):
+              return {f[1]:f[0].lower() for l in open(p) if len((f:=l.split()))>=2}
+          new,old=read(newp),read(oldp)
+          missing=[s for s in exp if s not in new]
+          bad=[(s,exp[s],new.get(s)) for s in exp if new.get(s)!=exp[s]]
+          print('EXPECTED',len(exp),'MISSING',len(missing),'MISMATCH',len(bad))
+          if missing or bad:
+              print('MISSING_LIST',missing[:50]); print('BAD_LIST',bad[:50]); raise SystemExit(2)
+          print('STOCK379_KMI_TARGETED_GATE=PASS')
+          PY
+          for x in 'CONFIG_ARM64=y' 'CONFIG_COMPAT=y' 'CONFIG_ANDROID_BINDER_IPC=y' 'CONFIG_ANDROID_BINDERFS=y' 'CONFIG_MODVERSIONS=y' 'CONFIG_KSU=y' 'CONFIG_KSU_SUSFS=y'; do grep -Fqx "$x" final.config; done
+
+      - name: Binary SELFHEAL gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          grep -aF '/oem/ticwatch-selfheal/bootstrap.sh' Image >/dev/null
+          COUNT="$(grep -aoF '/oem/ticwatch-selfheal/bootstrap.sh' Image | wc -l)"
+          [ "$COUNT" -eq 1 ]
+          sha256sum Image final.config Module.symvers System.map kernelrelease.txt selfheal-rc.patch selfheal-rc-source.txt kmi-audit.txt > SELFHEAL_SHA256SUMS.txt
+          echo "SELFHEAL_BINARY_MARKER_COUNT=$COUNT"
+          echo "SELFHEAL_BUILD=PASS"
+
+      - name: Package artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir bundle
+          cp Image final.config Module.symvers System.map kernelrelease.txt selfheal-rc.patch selfheal-rc-source.txt kmi-audit.txt SELFHEAL_SHA256SUMS.txt kernel-build.log bundle/
+          cat > bundle/README_SELFHEAL.txt <<'EOF'
+          DEVICE=TicWatch Pro 5 Enduro dace
+          BASE=known-good 5.15.220 KMI-preserved build chain
+          CHANGE=one static KernelSU init.rc exec before ksud post-fs-data
+          EXEC=/system/bin/sh /oem/ticwatch-selfheal/bootstrap.sh
+          VENDOR_BOOT_CHANGE=NONE
+          INIT_BOOT_CHANGE=NONE
+          SUPER_CHANGE=NONE
+          OEM_PAYLOAD_REQUIRED=YES
+          FLASH_PERFORMED=NO
+          EOF
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-SELFHEAL-OEM-5.15.220
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 90
