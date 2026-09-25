@@ -270,7 +270,7 @@ jobs:
             "$CURRENT_BASELINE_BUILD_TIMESTAMP" \
             <<'PY' | tee baseline-equivalence.txt
           from pathlib import Path
-          import hashlib, io, lzma, re, sys, tarfile
+          import hashlib, io, lzma, sys, tarfile
 
           old_img_p,new_img_p,old_map_p,new_map_p,old_cfg_p,new_cfg_p,old_sym_p,new_sym_p,stamp = sys.argv[1:]
           old_img=Path(old_img_p).read_bytes()
@@ -322,23 +322,56 @@ jobs:
           if od["kernel_headers_data"] != nd["kernel_headers_data"]:
               raise SystemExit("KHEADERS_START_CHANGED")
 
-          shift=nd["kernel_headers_data_end"]-od["kernel_headers_data_end"]
-          old_end=od["kernel_headers_data_end"]
+          idx={name: next(i for i,(_,_,n) in enumerate(oldm) if n==name)
+               for name in ("kernel_headers_data_end","udivslot_table","__end_rodata","__init_begin")}
+          if not (idx["kernel_headers_data_end"] < idx["udivslot_table"] < idx["__end_rodata"] < idx["__init_begin"]):
+              raise SystemExit("SYSTEM_MAP_BOUNDARY_ORDER_BAD")
+
+          shift_kh = nd["kernel_headers_data_end"] - od["kernel_headers_data_end"]
+          shift_mid = nd["udivslot_table"] - od["udivslot_table"]
+          shift_ro = nd["__end_rodata"] - od["__end_rodata"]
+
+          expected_shifts = {
+              "KHEADERS_END": -3576,
+              "MID_RODATA": -3584,
+              "END_RODATA": -4096,
+          }
+          actual_shifts = {
+              "KHEADERS_END": shift_kh,
+              "MID_RODATA": shift_mid,
+              "END_RODATA": shift_ro,
+          }
+          if actual_shifts != expected_shifts:
+              raise SystemExit(f"SYSTEM_MAP_EXPECTED_SHIFT_MISMATCH actual={actual_shifts} expected={expected_shifts}")
+
           bad=[]
-          zero=shifted=0
-          for (oa,ot,on),(na,nt,nn) in zip(oldm,newm):
-              expected = oa if oa < old_end else oa + shift
-              if na != expected:
-                  bad.append((on,oa,na,expected))
-                  if len(bad)>=20: break
-              if na==oa: zero+=1
-              elif na-oa==shift: shifted+=1
+          counts={}
+          ranges=[
+              (0, idx["kernel_headers_data_end"], 0, "PRE_KHEADERS_END"),
+              (idx["kernel_headers_data_end"], idx["udivslot_table"], shift_kh, "KHEADERS_TAIL"),
+              (idx["udivslot_table"], idx["__end_rodata"], shift_mid, "MID_RODATA"),
+              (idx["__end_rodata"], idx["__init_begin"], shift_ro, "RODATA_PAGE_ALIGN"),
+              (idx["__init_begin"], len(oldm), 0, "POST_INIT_BEGIN"),
+          ]
+          for lo,hi,shift,label in ranges:
+              n=0
+              for i in range(lo,hi):
+                  oa,ot,on=oldm[i]; na,nt,nn=newm[i]
+                  if na-oa != shift:
+                      bad.append((label,on,oa,na,shift))
+                      if len(bad)>=20: break
+                  n+=1
+              counts[label]=n
+              if bad: break
           if bad:
-              raise SystemExit("SYSTEM_MAP_NON_KHEADERS_SHIFT="+repr(bad))
+              raise SystemExit("SYSTEM_MAP_NON_ALLOWED_LAYOUT_DELTA="+repr(bad))
+
           print(f"SYSTEM_MAP_SYMBOLS={len(oldm)}")
-          print(f"KHEADERS_LAYOUT_SHIFT={shift}")
-          print(f"SYSTEM_MAP_SAME_ADDRESS={zero}")
-          print(f"SYSTEM_MAP_UNIFORM_SHIFTED={shifted}")
+          print(f"KHEADERS_LAYOUT_SHIFT={shift_kh}")
+          print(f"MID_RODATA_LAYOUT_SHIFT={shift_mid}")
+          print(f"END_RODATA_LAYOUT_SHIFT={shift_ro}")
+          for k,v in counts.items():
+              print(f"SYSTEM_MAP_{k}_COUNT={v}")
           print("SYSTEM_MAP_EQUIVALENCE=PASS")
 
           base=od["_text"]
@@ -355,6 +388,8 @@ jobs:
           print(f"IKHEADERS_OLD_SIZE={len(old_blob)}")
           print(f"IKHEADERS_NEW_SIZE={len(new_blob)}")
           print(f"IKHEADERS_SIZE_DELTA={len(new_blob)-len(old_blob)}")
+          if len(new_blob)-len(old_blob) != shift_kh:
+              raise SystemExit(f"IKHEADERS_SIZE_SHIFT_MISMATCH blob_delta={len(new_blob)-len(old_blob)} map_shift={shift_kh}")
 
           def manifest(blob):
               dec=lzma.decompress(blob)
@@ -365,13 +400,6 @@ jobs:
                   if m.isfile():
                       fp=tf.extractfile(m)
                       data=fp.read() if fp else b""
-                  # The build timestamp is intentionally normalized away.
-                  if m.name == "./include/generated/compile.h":
-                      txt=data.decode(errors="replace")
-                      txt=re.sub(r'^#define UTS_VERSION ".*"$',
-                                 '#define UTS_VERSION "<NORMALIZED>"',
-                                 txt, flags=re.M)
-                      data=txt.encode()
                   out.append((m.name,m.size,m.mode,m.uid,m.gid,m.type,
                               hashlib.sha256(data).hexdigest() if m.isfile() else ""))
               return out
