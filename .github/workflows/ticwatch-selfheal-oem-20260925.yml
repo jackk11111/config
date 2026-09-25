@@ -34,6 +34,13 @@ env:
   KMI_CRC_MAP_REL: '.github/data/ticwatch-stock379-kmi-crc-overrides-337.tsv'
   HISTORICAL_V2_COMMIT: 'be11c389636d0d7fadd9c258e1895b42c8b85a2d'
   FINAL_KNOWN_GOOD_REPO_COMMIT: 'c0c32179666db0f318ab7f9d14ed7e540696c907'
+  CURRENT_BASELINE_COMMIT: 'b8e04cbb8962990296fbefb8bbffb4155ab3d118'
+  CURRENT_BASELINE_RUN_ID: '34957108624'
+  CURRENT_BASELINE_ARTIFACT: 'TicWatch-KEXEC-ARM64-RELOC-INTERNAL-PROBE-CANDIDATE'
+  CURRENT_BASELINE_IMAGE_SHA256: '976c4b7a27679bf7afb1c62ed3937f5f8f494d09860ff2d8d04b6132889aed18'
+  CURRENT_BASELINE_SOURCE_DELTA_SHA256: 'b416e989cd01011ce394e5ffc7edfeec0801a4538b44558947e8031a2c627c17'
+  CURRENT_BASELINE_FINAL_CONFIG_SHA256: '9e63ad86d97fa6d6ce1914efeb8035dafb9043819796f0784a1bdf10a2557b54'
+  CURRENT_BASELINE_MODULE_SYMVERS_SHA256: '39c1019ed73a00b2ba8a9ab5f3a057d8cb0a8be1e285762b7cd56cb0bf95cea0'
 
 jobs:
   build:
@@ -144,6 +151,46 @@ jobs:
         shell: bash
         run: python3 /tmp/run-step.py /tmp/v2.yml "Configure Wear7-ready final kernel"
 
+      - name: Reproduce exact installed 976c KEXEC baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf current-baseline
+          mkdir -p current-baseline
+          gh run download "$CURRENT_BASELINE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "$CURRENT_BASELINE_ARTIFACT" --dir current-baseline
+
+          test -s current-baseline/Image
+          test -s current-baseline/audit/probe-source-delta.patch
+          echo "$CURRENT_BASELINE_IMAGE_SHA256  current-baseline/Image" | sha256sum -c -
+          echo "$CURRENT_BASELINE_SOURCE_DELTA_SHA256  current-baseline/audit/probe-source-delta.patch" | sha256sum -c -
+          echo "$CURRENT_BASELINE_FINAL_CONFIG_SHA256  current-baseline/audit/final.config" | sha256sum -c -
+          echo "$CURRENT_BASELINE_MODULE_SYMVERS_SHA256  current-baseline/audit/Module.symvers" | sha256sum -c -
+
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          git -C "$K" apply --check "$GITHUB_WORKSPACE/current-baseline/audit/probe-source-delta.patch"
+          git -C "$K" apply "$GITHUB_WORKSPACE/current-baseline/audit/probe-source-delta.patch"
+
+          git -C "$K" diff HEAD --binary > current-baseline-reproduced.patch
+          test -s current-baseline-reproduced.patch
+          echo "$CURRENT_BASELINE_SOURCE_DELTA_SHA256  current-baseline-reproduced.patch" | sha256sum -c -
+
+          grep -Fq 'TWKEXEC_PROBE: ENTRY BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'TWKEXEC_PROBE: ENTRY RETURNED' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'TWKEXEC_PROBE: TTBR1_SWITCH BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'TWKEXEC_PROBE: TTBR1_SWITCH RETURNED' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'kernel_reloc(kimage, 0);' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'Lticwatch_probe_ttbr1' "$K/arch/arm64/kernel/relocate_kernel.S"
+          grep -Fq 'TWKEXEC: GENI UART platform shutdown skipped' "$K/drivers/base/platform.c"
+          grep -Fq 'TWKEXEC: MMC0 card shutdown skipped' "$K/drivers/mmc/core/bus.c"
+          grep -Fq 'TWKEXEC: BT541 I2C shutdown skipped' "$K/drivers/i2c/i2c-core-base.c"
+          grep -Fq 'TWKEXEC_PATH: MACHINE_KEXEC BEFORE' "$K/kernel/kexec_core.c"
+          grep -Fq 'del_timer_sync(&uap->dmarx.timer);' "$K/drivers/tty/serial/amba-pl011.c"
+          ! grep -Fq 'timer_delete_sync(&uap->dmarx.timer);' "$K/drivers/tty/serial/amba-pl011.c"
+
+          echo "$CURRENT_BASELINE_FINAL_CONFIG_SHA256  final.config" | sha256sum -c -
+          echo "CURRENT_INSTALLED_976C_SOURCE_GATE=PASS"
+
       - name: Patch only SELFHEAL static KSU init RC
         shell: bash
         run: |
@@ -189,10 +236,6 @@ jobs:
           diff -u /tmp/ksud_integration.before.c "$F" > selfheal-rc.patch || [ "$?" -eq 1 ]
           test -s selfheal-rc.patch
           grep -Fq '/oem/ticwatch-selfheal/bootstrap.sh' selfheal-rc.patch
-
-      - name: Apply compile compatibility fixes
-        shell: bash
-        run: python3 /tmp/run-step.py /tmp/final.yml "Apply compile compatibility fixes"
 
       - name: Install targeted genksyms CRC preservation
         shell: bash
@@ -255,8 +298,11 @@ jobs:
           grep -Fqx 'CONFIG_MODVERSIONS=y' final.config
           grep -Fqx 'CONFIG_SECCOMP=y' final.config
           grep -Fqx 'CONFIG_SECCOMP_FILTER=y' final.config
+          echo "$CURRENT_BASELINE_FINAL_CONFIG_SHA256  final.config" | sha256sum -c -
+          echo "$CURRENT_BASELINE_MODULE_SYMVERS_SHA256  Module.symvers" | sha256sum -c -
 
           echo "SELFHEAL_MARKER_COUNT=$COUNT"
+          echo "CURRENT_INSTALLED_976C_KMI_CONFIG_GATE=PASS"
           sha256sum Image final.config Module.symvers System.map kernelrelease.txt selfheal-rc.patch selfheal-rc-source.txt kmi-crc-audit.txt > SELFHEAL_SHA256SUMS.txt
           echo "SELFHEAL_BINARY_GATE=PASS"
 
@@ -268,11 +314,14 @@ jobs:
           cp Image bundle/
           cp final.config Module.symvers System.map kernelrelease.txt bundle/audit/
           cp selfheal-rc.patch selfheal-rc-source.txt kmi-crc-audit.txt SELFHEAL_SHA256SUMS.txt bundle/audit/
+          cp current-baseline-reproduced.patch bundle/audit/
           cp "$KMI_CRC_MAP_REL" bundle/audit/
 
           cat > bundle/README_SELFHEAL.txt <<EOF
           DEVICE=TicWatch Pro 5 Enduro (dace)
-          BASE_REPO_COMMIT=$FINAL_KNOWN_GOOD_REPO_COMMIT
+          BASE_REPO_COMMIT=$CURRENT_BASELINE_COMMIT
+          BASE_INSTALLED_IMAGE_SHA256=$CURRENT_BASELINE_IMAGE_SHA256
+          BASE_SOURCE_DELTA_SHA256=$CURRENT_BASELINE_SOURCE_DELTA_SHA256
           KERNEL_RELEASE=$(cat kernelrelease.txt)
           CHANGE=one static KernelSU init.rc exec before normal ksud post-fs-data
           EXEC=/system/bin/sh /oem/ticwatch-selfheal/bootstrap.sh
@@ -282,6 +331,8 @@ jobs:
           SUPER_CHANGE=NONE
           UID2000_RESCUE_BYPASS=NO
           STOCK379_KMI_TARGETED_GATE=PASS
+          CURRENT_INSTALLED_976C_SOURCE_GATE=PASS
+          CURRENT_INSTALLED_976C_KMI_CONFIG_GATE=PASS
           FLASH_PERFORMED=NO
           TEST_PLAN=REPACK_KNOWN_GOOD_BOOT_AND_FASTBOOT_BOOT_TEMPORARILY_FIRST
           EOF
@@ -291,7 +342,7 @@ jobs:
       - name: Upload SELFHEAL artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: TicWatch-SELFHEAL-OEM-5.15.220
+          name: TicWatch-SELFHEAL-OEM-5.15.220-CURRENT976C
           path: bundle/
           if-no-files-found: error
           retention-days: 90
