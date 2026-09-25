@@ -92,7 +92,7 @@ jobs:
           subprocess.run(["bash", "-Eeuo", "pipefail", "-c", script], check=True)
           PY
 
-          python3 /tmp/run-step.py /tmp/v2.yml "Dependencies and known-good bundle" --help >/dev/null 2>&1 || true
+          grep -Fq "      - name: Dependencies and known-good bundle" /tmp/v2.yml
           echo "HISTORICAL_RECIPES_PINNED=PASS"
 
       - name: Dependencies and known-good bundle
