@@ -133,6 +133,7 @@ jobs:
           set -Eeuo pipefail
           F="$GITHUB_WORKSPACE/.ticwatch-preflight/common/KernelSU-Next/kernel/runtime/ksud_integration.c"
           test -s "$F"
+          cp "$F" /tmp/ksud_integration.before.c
 
           python3 - "$F" <<'PY'
           from pathlib import Path
@@ -168,8 +169,9 @@ jobs:
 
           grep -n -A12 -B2 'static const char KERNEL_SU_RC' "$F" | tee selfheal-rc-source.txt
           grep -Fq '/oem/ticwatch-selfheal/bootstrap.sh' selfheal-rc-source.txt
-          git -C .ticwatch-preflight/common diff -- KernelSU-Next/kernel/runtime/ksud_integration.c > selfheal-rc.patch || true
+          diff -u /tmp/ksud_integration.before.c "$F" > selfheal-rc.patch || [ "$?" -eq 1 ]
           test -s selfheal-rc.patch
+          grep -Fq '/oem/ticwatch-selfheal/bootstrap.sh' selfheal-rc.patch
 
       - name: Apply compile compatibility fixes
         shell: bash
