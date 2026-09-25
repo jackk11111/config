@@ -248,10 +248,119 @@ jobs:
         run: |
           set -Eeuo pipefail
           python3 /tmp/run-step.py /tmp/current.yml "Compile internal-probe kernel"
-          echo "$CURRENT_BASELINE_IMAGE_SHA256  Image" | sha256sum -c -
+
+          mkdir -p baseline-diagnostic
+          cp Image baseline-diagnostic/rebuilt-Image
+          cp current-baseline/Image baseline-diagnostic/historical-976c-Image
+          cp final.config Module.symvers System.map kernelrelease.txt baseline-diagnostic/
+          cp current-baseline/audit/final.config baseline-diagnostic/historical-final.config
+          cp current-baseline/audit/Module.symvers baseline-diagnostic/historical-Module.symvers
+          cp current-baseline/audit/System.map baseline-diagnostic/historical-System.map
+
+          {
+            echo "EXPECTED_IMAGE_SHA256=$CURRENT_BASELINE_IMAGE_SHA256"
+            echo "REBUILT_IMAGE_SHA256=$(sha256sum Image | awk '{print $1}')"
+            echo "EXPECTED_CONFIG_SHA256=$CURRENT_BASELINE_FINAL_CONFIG_SHA256"
+            echo "REBUILT_CONFIG_SHA256=$(sha256sum final.config | awk '{print $1}')"
+            echo "EXPECTED_MODULE_SYMVERS_SHA256=$CURRENT_BASELINE_MODULE_SYMVERS_SHA256"
+            echo "REBUILT_MODULE_SYMVERS_SHA256=$(sha256sum Module.symvers | awk '{print $1}')"
+            echo "HISTORICAL_SYSTEM_MAP_SHA256=$(sha256sum current-baseline/audit/System.map | awk '{print $1}')"
+            echo "REBUILT_SYSTEM_MAP_SHA256=$(sha256sum System.map | awk '{print $1}')"
+            echo "IMAGE_SIZE_HISTORICAL=$(stat -c %s current-baseline/Image)"
+            echo "IMAGE_SIZE_REBUILT=$(stat -c %s Image)"
+            if cmp -s final.config current-baseline/audit/final.config; then echo "CONFIG_CMP=IDENTICAL"; else echo "CONFIG_CMP=DIFFERENT"; fi
+            if cmp -s Module.symvers current-baseline/audit/Module.symvers; then echo "MODULE_SYMVERS_CMP=IDENTICAL"; else echo "MODULE_SYMVERS_CMP=DIFFERENT"; fi
+            if cmp -s System.map current-baseline/audit/System.map; then echo "SYSTEM_MAP_CMP=IDENTICAL"; else echo "SYSTEM_MAP_CMP=DIFFERENT"; fi
+            if cmp -s Image current-baseline/Image; then echo "IMAGE_CMP=IDENTICAL"; else echo "IMAGE_CMP=DIFFERENT"; fi
+          } | tee baseline-diagnostic/summary.txt
+
+          strings -a current-baseline/Image | grep -E 'Linux version 5\\.15\\.220|#0 SMP PREEMPT' | head -5 > baseline-diagnostic/historical-version-strings.txt || true
+          strings -a Image | grep -E 'Linux version 5\\.15\\.220|#0 SMP PREEMPT' | head -5 > baseline-diagnostic/rebuilt-version-strings.txt || true
+
+          python3 - current-baseline/Image Image current-baseline/audit/System.map <<'PY' | tee baseline-diagnostic/image-byte-diff.txt
+          from pathlib import Path
+          import hashlib, sys
+
+          oldp,newp,mapp=map(Path,sys.argv[1:])
+          old=oldp.read_bytes(); new=newp.read_bytes()
+          print("OLD_SHA256",hashlib.sha256(old).hexdigest())
+          print("NEW_SHA256",hashlib.sha256(new).hexdigest())
+          print("OLD_SIZE",len(old),"NEW_SIZE",len(new))
+
+          n=min(len(old),len(new))
+          diffs=[i for i in range(n) if old[i]!=new[i]]
+          if len(old)!=len(new):
+              diffs.extend(range(n,max(len(old),len(new))))
+          print("DIFF_BYTES",len(diffs))
+          if not diffs:
+              print("BYTE_IDENTITY=PASS")
+              raise SystemExit(0)
+
+          print("FIRST_DIFF",diffs[0],"LAST_DIFF",diffs[-1])
+
+          ranges=[]
+          start=prev=diffs[0]
+          for x in diffs[1:]:
+              if x==prev+1:
+                  prev=x
+              else:
+                  ranges.append((start,prev))
+                  start=prev=x
+              if len(ranges)>=2000:
+                  break
+          if len(ranges)<2000:
+              ranges.append((start,prev))
+
+          syms=[]
+          for line in mapp.read_text(errors="replace").splitlines():
+              f=line.split()
+              if len(f)>=3:
+                  try: addr=int(f[0],16)
+                  except ValueError: continue
+                  syms.append((addr,f[2]))
+          syms.sort()
+          text_addr=next((a for a,nm in syms if nm in ("_text","_stext")), syms[0][0] if syms else 0)
+          print("TEXT_BASE",hex(text_addr))
+          print("RANGE_COUNT_SHOWN",min(len(ranges),2000))
+          for a,b in ranges[:200]:
+              addr=text_addr+a
+              nearest=None
+              lo,hi=0,len(syms)
+              while lo<hi:
+                  mid=(lo+hi)//2
+                  if syms[mid][0]<=addr: lo=mid+1
+                  else: hi=mid
+              if lo:
+                  sa,sn=syms[lo-1]; nearest=f"{sn}+0x{addr-sa:x}"
+              print(f"RANGE {a}-{b} LEN={b-a+1} VA={addr:#x} NEAREST={nearest}")
+
+          chunk=1024*1024
+          for off in range(0,max(len(old),len(new)),chunk):
+              oa=old[off:off+chunk]; na=new[off:off+chunk]
+              if oa!=na:
+                  print("DIFF_CHUNK",off//chunk,
+                        hashlib.sha256(oa).hexdigest()[:16],
+                        hashlib.sha256(na).hexdigest()[:16])
+          PY
+
           echo "$CURRENT_BASELINE_FINAL_CONFIG_SHA256  final.config" | sha256sum -c -
           echo "$CURRENT_BASELINE_MODULE_SYMVERS_SHA256  Module.symvers" | sha256sum -c -
-          echo "CURRENT_INSTALLED_976C_BINARY_REPRODUCTION=PASS"
+
+          if cmp -s Image current-baseline/Image; then
+            echo "CURRENT_INSTALLED_976C_BINARY_REPRODUCTION=PASS"
+          else
+            echo "CURRENT_INSTALLED_976C_BINARY_REPRODUCTION=FAIL_DIAGNOSTIC_CAPTURED"
+            exit 71
+          fi
+
+      - name: Upload 976c baseline mismatch diagnostic
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-976c-Baseline-Mismatch-Diagnostic
+          path: baseline-diagnostic/
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Patch only SELFHEAL static KSU init RC
         shell: bash
