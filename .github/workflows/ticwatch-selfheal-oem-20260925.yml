@@ -73,22 +73,39 @@ jobs:
           matches = [i for i, line in enumerate(lines) if line == marker]
           if len(matches) != 1:
               raise SystemExit(f"step anchor mismatch: {step}: {len(matches)}")
-          i = matches[0]
-          while i < len(lines) and lines[i].strip() != "run: |":
-              i += 1
-          if i == len(lines):
-              raise SystemExit(f"run block not found: {step}")
-          i += 1
-          out = []
+
+          i = matches[0] + 1
+          run_i = None
           while i < len(lines):
               line = lines[i]
               if line.startswith("      - name: ") or line.startswith("      - uses: "):
                   break
-              if line and not line.startswith("          "):
-                  raise SystemExit(f"unexpected indentation in {step}: {line!r}")
-              out.append(line[10:] if line else "")
+              if line.startswith("        run:"):
+                  run_i = i
+                  break
               i += 1
-          script = "\n".join(out) + "\n"
+
+          if run_i is None:
+              raise SystemExit(f"run directive not found inside step: {step}")
+
+          stripped = lines[run_i].strip()
+          if stripped == "run: |":
+              i = run_i + 1
+              out = []
+              while i < len(lines):
+                  line = lines[i]
+                  if line.startswith("      - name: ") or line.startswith("      - uses: "):
+                      break
+                  if line and not line.startswith("          "):
+                      raise SystemExit(f"unexpected indentation in {step}: {line!r}")
+                  out.append(line[10:] if line else "")
+                  i += 1
+              script = "\n".join(out) + "\n"
+          elif stripped.startswith("run: "):
+              script = stripped[len("run: "):] + "\n"
+          else:
+              raise SystemExit(f"unsupported run syntax in {step}: {stripped!r}")
+
           subprocess.run(["bash", "-Eeuo", "pipefail", "-c", script], check=True)
           PY
 
