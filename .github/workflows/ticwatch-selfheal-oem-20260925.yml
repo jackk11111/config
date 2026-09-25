@@ -177,10 +177,6 @@ jobs:
         shell: bash
         run: python3 /tmp/run-step.py /tmp/final.yml "Apply compile compatibility fixes"
 
-      - name: Apply TicWatch KEXEC BT541 shutdown quirk
-        shell: bash
-        run: python3 /tmp/run-step.py /tmp/final.yml "Apply TicWatch KEXEC BT541 shutdown quirk"
-
       - name: Install targeted genksyms CRC preservation
         shell: bash
         run: python3 /tmp/run-step.py /tmp/final.yml "Install targeted genksyms CRC preservation"
