@@ -1,0 +1,65 @@
+name: TicWatch KSU 3.4.0 SuSFS 2.3 Prereq Probe
+
+on:
+  push:
+    branches: [ticwatch-autoinit-boot-20260926]
+    paths:
+      - '.github/workflows/ticwatch-ksun340-susfs230-prereq-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Probe exact prerequisite delta plus SuSFS integration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE=1a879d6a866f80b1fa1c1009a2ffa747873cbb5e
+          PARENT=c61d876480976e553060789759cc4b54c9e7d816
+          SUS=34d71c4d10a53cecb9759b4787944a2a65bb3d8d
+
+          git init -q KSUN
+          git -C KSUN remote add origin https://github.com/KernelSU-Next/KernelSU-Next.git
+          git -C KSUN fetch -q --depth=1 origin "$BASE"
+          git -C KSUN checkout -q --detach FETCH_HEAD
+          git -C KSUN remote add pershoot https://github.com/pershoot/KernelSU-Next.git
+          git -C KSUN fetch -q --no-tags pershoot "$PARENT" "$SUS"
+
+          test "$(git -C KSUN rev-parse HEAD)" = "$BASE"
+          test "$(git -C KSUN rev-parse "$SUS^")" = "$PARENT"
+          test "$(git -C KSUN merge-base "$BASE" "$PARENT")" = "$BASE"
+
+          git -C KSUN diff --binary "$BASE" "$PARENT" -- \
+            kernel/Kbuild \
+            kernel/hook/syscall_event_bridge.c \
+            kernel/runtime/ksud_integration.c \
+            > prereq.patch
+
+          test -s prereq.patch
+          grep -Fq 'else ifeq ($(CONFIG_RISCV),y)' prereq.patch
+          grep -Fq 'PT_REGS_SYSCALL_PARM1(regs)' prereq.patch
+          test "$(grep -Fc 'PT_REGS_SYSCALL_PARM1(regs)' prereq.patch)" -eq 4
+
+          git -C KSUN apply --check ../prereq.patch
+          git -C KSUN apply ../prereq.patch
+
+          git -C KSUN cherry-pick -n "$SUS"
+
+          test -z "$(git -C KSUN diff --name-only --diff-filter=U)"
+          grep -Fq 'ifneq ($(strip $(CONFIG_KSU_SUSFS)),y)' KSUN/kernel/Kbuild
+          grep -Fq 'kernelsu-objs += hook/$(KSU_ARCH)/syscall_hook.o' KSUN/kernel/Kbuild
+          grep -Fq 'static_branch_likely(&ksu_su_compat_enabled)' KSUN/kernel/hook/syscall_event_bridge.c
+          grep -Fq 'DEFINE_STATIC_KEY_TRUE(is_first_zygote);' KSUN/kernel/runtime/ksud_integration.c
+          grep -Fq 'ksu_handle_sys_read(fd, NULL, NULL);' KSUN/kernel/runtime/ksud_integration.c
+          grep -Fq 'config KSU_SUSFS' KSUN/kernel/Kconfig
+
+          echo "KSUN_BASE=$BASE"
+          echo "PREREQ_PARENT=$PARENT"
+          echo "SUSFS_INTEGRATION=$SUS"
+          echo "UNMERGED=NO"
+          echo "KSU340_SUSFS230_PREREQ_PROBE=PASS"
