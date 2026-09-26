@@ -1,0 +1,58 @@
+name: TicWatch KSU 3.4.0 Pershoot SuSFS Probe
+
+on:
+  push:
+    branches: [ticwatch-autoinit-boot-20260926]
+    paths:
+      - '.github/workflows/ticwatch-ksun340-pershoot-susfs-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Build exact v3.4.0 plus pershoot SuSFS commit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone --no-checkout https://github.com/KernelSU-Next/KernelSU-Next.git KSUN
+          git -C KSUN checkout --detach 1a879d6a866f80b1fa1c1009a2ffa747873cbb5e
+          test "$(git -C KSUN rev-parse HEAD)" = 1a879d6a866f80b1fa1c1009a2ffa747873cbb5e
+
+          git -C KSUN remote add pershoot https://github.com/pershoot/KernelSU-Next.git
+          git -C KSUN fetch --no-tags pershoot 34d71c4d10a53cecb9759b4787944a2a65bb3d8d
+
+          mkdir -p probe
+          set +e
+          git -C KSUN cherry-pick -n 34d71c4d10a53cecb9759b4787944a2a65bb3d8d >probe/cherry-pick.log 2>&1
+          rc=$?
+          set -e
+
+          echo "CHERRY_PICK_RC=$rc" | tee probe/summary.txt
+          cat probe/cherry-pick.log
+          git -C KSUN status --short | tee probe/status.txt
+
+          if git -C KSUN ls-files -u | grep -q .; then
+            echo "UNMERGED=YES" | tee -a probe/summary.txt
+            git -C KSUN ls-files -u | tee probe/unmerged.txt
+            git -C KSUN diff --cc > probe/conflicts.diff || true
+          else
+            echo "UNMERGED=NO" | tee -a probe/summary.txt
+            git -C KSUN diff --cached --check | tee probe/diff-check.txt
+            git -C KSUN diff --cached > probe/applied.diff
+            grep -Fq 'CONFIG_KSU_SUSFS' KSUN/kernel/Kconfig
+            grep -R -Fq 'SUSFS_MAGIC' KSUN/kernel
+            echo "SUSFS_MARKERS=PASS" | tee -a probe/summary.txt
+          fi
+
+      - name: Upload probe
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-KSU340-Pershoot-SuSFS-Probe
+          path: probe/
+          if-no-files-found: error
+          retention-days: 30
