@@ -31,6 +31,8 @@ env:
   MANAGER_APK_SHA256: '8310faebd2b592ccddd6a15a6d996c70d89cd679eb51835e84d18f531471357b'
   KSU_NEXT_MANAGER_SIZE: '0x3c2'
   KSU_NEXT_MANAGER_HASH: '3bc9938c38106bcf618bbe1d37ad4adde8a49c659e2860709bbfc341f7e749f2'
+  KSU_STABLE_MANAGER_SIZE: '964'
+  KSU_STABLE_MANAGER_HASH: '595a383e2babd847a4e1f42cd19fd16644cd36d3f4222ea6cc42e2c4f4f3986e'
   KMI_CRC_MAP_REL: '.github/data/ticwatch-stock379-kmi-crc-overrides-337.tsv'
   HISTORICAL_V2_COMMIT: 'be11c389636d0d7fadd9c258e1895b42c8b85a2d'
   FINAL_KNOWN_GOOD_REPO_COMMIT: 'c0c32179666db0f318ab7f9d14ed7e540696c907'
@@ -445,6 +447,40 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Add stable Manager certificate alongside current Manager
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F="$GITHUB_WORKSPACE/.ticwatch-preflight/common/KernelSU-Next/kernel/manager/apk_sign.c"
+          test -s "$F"
+          cp "$F" /tmp/apk_sign.before.c
+
+          python3 - "$F" "$KSU_STABLE_MANAGER_SIZE" "$KSU_STABLE_MANAGER_HASH" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1])
+          size=int(sys.argv[2])
+          h=sys.argv[3]
+          s=p.read_text()
+          old='return check_v2_signature(path, EXPECTED_MANAGER_SIZE, EXPECTED_MANAGER_HASH);'
+          new=f'''if (check_v2_signature(path, EXPECTED_MANAGER_SIZE, EXPECTED_MANAGER_HASH)) {{
+        return true;
+    }}
+
+    /* Stable TicWatch Manager signing certificate for future ARM32 updates. */
+    return check_v2_signature(path, {size}u, "{h}");'''
+          if s.count(old) != 1:
+              raise SystemExit(f'DUAL_MANAGER_ANCHOR_MISMATCH count={s.count(old)}')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+
+          grep -Fq "$KSU_STABLE_MANAGER_HASH" "$F"
+          grep -Fq "check_v2_signature(path, 964u" "$F"
+          diff -u /tmp/apk_sign.before.c "$F" > manager-dual-cert.patch || [ "$?" -eq 1 ]
+          test -s manager-dual-cert.patch
+          echo "MANAGER_DUAL_CERT_SOURCE_GATE=PASS"
+
       - name: Patch AUTOINIT static KSU init RC
         shell: bash
         run: |
@@ -468,7 +504,7 @@ jobs:
           new=r'''static const char KERNEL_SU_RC[] =
               "\n"
               "on post-fs-data\n"
-              "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- /system/bin/sh -c \"S=/data/adb/ticwatch-autoinit/source; P=/data/adb/ticwatch-autoinit/payload.tar; D=/data/local/tmp/boot_KSU_AUTOINIT_5.15.220.img; if [ ! -f $S/AUTOINIT_MAGIC ]; then mkdir -p $S; [ -r $D ] || D=/dev/block/by-name/boot; [ -r $D ] || D=/dev/block/mmcblk0p6; /system/bin/dd if=$D of=$P bs=4096 skip=20480 count=4096 2>/dev/null; /system/bin/toybox tar -xf $P -C $S 2>/dev/null; rm -f $P; fi; [ -f $S/AUTOINIT_MAGIC ] && /system/bin/sh $S/bootstrap.sh\"\n"
+              "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- /system/bin/sh -c \"S=/data/adb/ticwatch-autoinit/source; P=/data/adb/ticwatch-autoinit/payload.tar; D=/data/local/tmp/boot_KSU_AUTOINIT_5.15.220.img; if [ ! -f $S/AUTOINIT_MAGIC ]; then mkdir -p $S; [ -r $D ] || D=/dev/block/by-name/boot; /system/bin/dd if=$D of=$P bs=4096 skip=20480 count=4096 2>/dev/null; /system/bin/toybox tar -xf $P -C $S 2>/dev/null; rm -f $P; fi; [ -f $S/AUTOINIT_MAGIC ] && /system/bin/sh $S/bootstrap.sh\"\n"
               "    start logd\n"
           '''
 
@@ -518,6 +554,8 @@ jobs:
           grep -aFq '/data/adb/ticwatch-autoinit/source' Image
           grep -aFq 'boot_KSU_AUTOINIT_5.15.220.img' Image
           ! grep -aFq '/oem/ticwatch-selfheal/bootstrap.sh' Image
+          grep -aFq "$KSU_STABLE_MANAGER_HASH" Image
+          ! grep -aFq '/dev/block/mmcblk0p6' Image
 
           grep -Fqx 'CONFIG_KSU=y' final.config
           grep -Fqx 'CONFIG_KSU_SUSFS=y' final.config
@@ -533,7 +571,7 @@ jobs:
           echo "AUTOINIT_MARKER_COUNT=$COUNT"
           echo "CURRENT_INSTALLED_976C_STRUCTURAL_EQUIVALENCE=PASS"
           echo "CURRENT_INSTALLED_976C_KMI_CONFIG_GATE=PASS"
-          sha256sum Image final.config Module.symvers System.map kernelrelease.txt autoinit-rc.patch autoinit-rc-source.txt kmi-crc-audit.txt > AUTOINIT_SHA256SUMS.txt
+          sha256sum Image final.config Module.symvers System.map kernelrelease.txt autoinit-rc.patch autoinit-rc-source.txt manager-dual-cert.patch kmi-crc-audit.txt > AUTOINIT_SHA256SUMS.txt
           echo "AUTOINIT_BINARY_GATE=PASS"
 
       - name: Package AUTOINIT audit artifact
@@ -543,7 +581,7 @@ jobs:
           mkdir -p bundle/audit
           cp Image bundle/
           cp final.config Module.symvers System.map kernelrelease.txt bundle/audit/
-          cp autoinit-rc.patch autoinit-rc-source.txt kmi-crc-audit.txt AUTOINIT_SHA256SUMS.txt bundle/audit/
+          cp autoinit-rc.patch autoinit-rc-source.txt manager-dual-cert.patch kmi-crc-audit.txt AUTOINIT_SHA256SUMS.txt bundle/audit/
           cp baseline-equivalence.txt bundle/audit/
           cp current-baseline/audit/probe-source-delta.patch bundle/audit/current-baseline-probe-source-delta.patch
           cp "$KMI_CRC_MAP_REL" bundle/audit/
@@ -565,6 +603,10 @@ jobs:
           INIT_BOOT_CHANGE=NONE
           SUPER_CHANGE=NONE
           UID2000_RESCUE_BYPASS=NO
+          CURRENT_MANAGER_CERT_SHA256=$KSU_NEXT_MANAGER_HASH
+          STABLE_MANAGER_CERT_SIZE=$KSU_STABLE_MANAGER_SIZE
+          STABLE_MANAGER_CERT_SHA256=$KSU_STABLE_MANAGER_HASH
+          RAW_MMCBLK_FALLBACK=REMOVED
           STOCK379_KMI_TARGETED_GATE=PASS
           CURRENT_INSTALLED_976C_SOURCE_GATE=PASS
           CURRENT_INSTALLED_976C_STRUCTURAL_EQUIVALENCE=PASS
