@@ -35,6 +35,8 @@ env:
   KSU_STABLE_MANAGER_HASH: '595a383e2babd847a4e1f42cd19fd16644cd36d3f4222ea6cc42e2c4f4f3986e'
   KSUN_CORE_TAG: 'v3.4.0'
   KSUN_CORE_SHA: '1a879d6a866f80b1fa1c1009a2ffa747873cbb5e'
+  SUSFS_KSU_INTEGRATION_SHA: '34d71c4d10a53cecb9759b4787944a2a65bb3d8d'
+  SUSFS_CORE_SHA: '687d2d18d94cb2e3e72d1074778d58384d58e379'
   KMI_CRC_MAP_REL: '.github/data/ticwatch-stock379-kmi-crc-overrides-337.tsv'
   HISTORICAL_V2_COMMIT: 'be11c389636d0d7fadd9c258e1895b42c8b85a2d'
   FINAL_KNOWN_GOOD_REPO_COMMIT: 'c0c32179666db0f318ab7f9d14ed7e540696c907'
@@ -162,42 +164,9 @@ jobs:
         shell: bash
         run: python3 /tmp/run-step.py /tmp/v2.yml "Reproduce verified source uplift to 5.15.220"
 
-      - name: Integrate exact KernelSU Next 3.4.0 with proven SuSFS recipe
+      - name: Resume proven KSU Next 3.3.0 and SuSFS 2.2.0 for baseline proof
         shell: bash
-        run: |
-          set -Eeuo pipefail
-
-          git checkout -- ticwatch-ultimate/preflight.sh
-
-          sed -i 's/v3\.3\.0/v3.4.0/g' ticwatch-ultimate/preflight.sh
-          sed -i             -e "s|^KSUN_TAG=.*|KSUN_TAG=\"$KSUN_CORE_TAG\"|"             -e "s|^KSUN_SHA=.*|KSUN_SHA=\"$KSUN_CORE_SHA\"|"             -e "s|^KSUN_MANAGER=.*|KSUN_MANAGER=\"$MANAGER_APK\"|"             -e "s|^KSUN_MANAGER_SHA256=.*|KSUN_MANAGER_SHA256=\"$MANAGER_APK_SHA256\"|"             ticwatch-ultimate/preflight.sh
-
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path('ticwatch-ultimate/preflight.sh')
-          s=p.read_text()
-
-          old='mkdir -p "$(dirname "$REPORT")"\nrm -rf "$ROOT"\nmkdir -p "$ROOT"\n: > "$REPORT"\n'
-          new='mkdir -p "$(dirname "$REPORT")"\n[ -d "$ROOT/common/.git" ] || { echo "FAIL: verified 5.15.220 common tree missing" >&2; exit 1; }\n: >> "$REPORT"\n'
-          if s.count(old) != 1:
-              raise SystemExit('preflight resume anchor changed')
-          s=s.replace(old,new,1)
-
-          start=s.index('log "TicWatch Ultimate 5.15 / KernelSU Next v3.4.0 + SuSFS v2.2.0 preflight"')
-          end=s.index('log "[2/11] Fetch exact KernelSU Next v3.4.0 source"')
-          intro='log "TicWatch FINAL 5.15.220 / KSU Next 3.4.0 + SuSFS 2.2.0"\nlog "REUSE_VERIFIED_INCREMENTAL_UPLIFT=1"\nlog ""\n'
-          p.write_text(s[:start] + intro + s[end:])
-          PY
-
-          grep -Fqx 'KSUN_TAG="v3.4.0"' ticwatch-ultimate/preflight.sh
-          grep -Fqx 'KSUN_SHA="1a879d6a866f80b1fa1c1009a2ffa747873cbb5e"' ticwatch-ultimate/preflight.sh
-
-          bash ticwatch-ultimate/preflight.sh
-          grep -Fqx 'RESULT=PASS' ticwatch-ultimate-results/preflight.txt
-          grep -Fqx "KSUN_SHA=$KSUN_CORE_SHA" ticwatch-ultimate-results/preflight.txt
-          test "$(make -s -C .ticwatch-preflight/common kernelversion)" = '5.15.220'
-          test "$(git -C .ticwatch-preflight/common/KernelSU-Next rev-parse HEAD)" = "$KSUN_CORE_SHA"
-          echo 'KSU340_SUSFS_PREFLIGHT_RESULT=PASS'
+        run: python3 /tmp/run-step.py /tmp/v2.yml "Resume proven KSU Next and SuSFS integration"
 
       - name: Apply proven KSU SuSFS Seccomp and hardened SafeKey fixes
         shell: bash
@@ -481,6 +450,71 @@ jobs:
           path: baseline-diagnostic/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upgrade to exact KSU Next 3.4.0 plus SuSFS 2.3.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash ticwatch-autoinit/integrate-ksun340-susfs230.sh
+          grep -Fqx 'RESULT=PASS' ksun340-susfs230-audit/PROVENANCE.txt
+          grep -Fqx "KSUN_BASE=$KSUN_CORE_SHA" ksun340-susfs230-audit/PROVENANCE.txt
+          grep -Fqx "SUSFS_INTEGRATION=$SUSFS_KSU_INTEGRATION_SHA" ksun340-susfs230-audit/PROVENANCE.txt
+          grep -Fqx "SUSFS_KERNEL_SOURCE=$SUSFS_CORE_SHA" ksun340-susfs230-audit/PROVENANCE.txt
+          grep -Fqx 'SUSFS_VERSION=v2.3.0' ksun340-susfs230-audit/PROVENANCE.txt
+          echo "KSU340_SUSFS230_SOURCE_GATE=PASS"
+
+      - name: Reapply proven ACK 5.15.220 timer compatibility
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash ticwatch-autoinit/apply-ack-515220-timer-compat.sh "$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          echo "ACK_515220_TIMER_COMPAT=PASS"
+
+      - name: Restore proven Slatecom PM fix after source reset
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/v2.yml "Keep proven Slatecom PM fix"
+
+      - name: Reconfigure Wear7 profile for KSU 3.4 core
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 /tmp/run-step.py /tmp/v2.yml "Configure Wear7-ready final kernel"
+          grep -Fqx 'CONFIG_KSU=y' final.config
+          grep -Fqx 'CONFIG_KSU_SUSFS=y' final.config
+          grep -Fqx 'CONFIG_SECCOMP=y' final.config
+          grep -Fqx 'CONFIG_SECCOMP_FILTER=y' final.config
+          grep -Fqx 'CONFIG_MODVERSIONS=y' final.config
+          test "$(git -C .ticwatch-preflight/common/KernelSU-Next rev-parse HEAD)" = "$KSUN_CORE_SHA"
+          grep -Fq '#define SUSFS_VERSION "v2.3.0"' .ticwatch-preflight/common/include/linux/susfs.h
+          echo "KSU340_FINAL_CONFIG_GATE=PASS"
+
+      - name: Reapply exact installed KEXEC source delta after KSU upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          git -C "$K" apply --check "$GITHUB_WORKSPACE/current-baseline/audit/probe-source-delta.patch"
+          git -C "$K" apply "$GITHUB_WORKSPACE/current-baseline/audit/probe-source-delta.patch"
+          grep -Fq 'TWKEXEC_PROBE: ENTRY BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'TWKEXEC_PROBE: TTBR1_SWITCH BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'kernel_reloc(kimage, 0);' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'Lticwatch_probe_ttbr1' "$K/arch/arm64/kernel/relocate_kernel.S"
+          grep -Fq 'TWKEXEC: GENI UART platform shutdown skipped' "$K/drivers/base/platform.c"
+          grep -Fq 'TWKEXEC: MMC0 card shutdown skipped' "$K/drivers/mmc/core/bus.c"
+          grep -Fq 'TWKEXEC: BT541 I2C shutdown skipped' "$K/drivers/i2c/i2c-core-base.c"
+          echo "KSU340_KEXEC_SOURCE_GATE=PASS"
+
+      - name: Reinstall targeted genksyms CRC preservation after source reset
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F="$GITHUB_WORKSPACE/.ticwatch-preflight/common/scripts/genksyms/genksyms.c"
+          ! grep -Fq 'ticwatch_kmi_crc_override' "$F"
+          python3 /tmp/run-step.py /tmp/final.yml "Install targeted genksyms CRC preservation"
+          grep -Fq 'ticwatch_kmi_crc_override' "$F"
+          [ "$(grep -c 'static unsigned long ticwatch_kmi_crc_override' "$F")" -eq 1 ]
+          [ "$(grep -c 'crc = ticwatch_kmi_crc_override(name, crc);' "$F")" -eq 1 ]
+          echo "KSU340_KMI_CRC_OVERRIDE_GATE=PASS"
 
       - name: Add stable Manager certificate alongside current Manager
         shell: bash
