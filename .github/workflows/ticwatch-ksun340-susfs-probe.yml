@@ -1,4 +1,4 @@
-name: TicWatch KSU 3.4.0 SuSFS Compatibility Probe
+name: TicWatch KSU 3.4.0 Latest SuSFS Compatibility Probe
 
 on:
   push:
@@ -33,9 +33,9 @@ jobs:
 
           git init -q SUSFS
           git -C SUSFS remote add origin https://github.com/ShirkNeko/susfs4ksu.git
-          git -C SUSFS fetch -q --depth=1 origin 65ea8683c794cc309c3b0c4e6b57c1d972ca9a76
+          git -C SUSFS fetch -q --depth=1 origin 687d2d18d94cb2e3e72d1074778d58384d58e379
           git -C SUSFS checkout -q --detach FETCH_HEAD
-          test "$(git -C SUSFS rev-parse HEAD)" = 65ea8683c794cc309c3b0c4e6b57c1d972ca9a76
+          test "$(git -C SUSFS rev-parse HEAD)" = 687d2d18d94cb2e3e72d1074778d58384d58e379
           echo SOURCE_GATE=PASS
 
       - name: Split and test filtered SuSFS patch file-by-file
@@ -131,7 +131,7 @@ jobs:
       - name: Upload compatibility probe
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: TicWatch-KSU340-SuSFS220-Compatibility-Probe
+          name: TicWatch-KSU340-Latest-SuSFS-Compatibility-Probe
           path: probe/
           if-no-files-found: error
           retention-days: 30
