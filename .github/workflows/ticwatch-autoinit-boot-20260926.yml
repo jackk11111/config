@@ -33,6 +33,8 @@ env:
   KSU_NEXT_MANAGER_HASH: '3bc9938c38106bcf618bbe1d37ad4adde8a49c659e2860709bbfc341f7e749f2'
   KSU_STABLE_MANAGER_SIZE: '964'
   KSU_STABLE_MANAGER_HASH: '595a383e2babd847a4e1f42cd19fd16644cd36d3f4222ea6cc42e2c4f4f3986e'
+  KSUN_CORE_TAG: 'v3.4.0'
+  KSUN_CORE_SHA: '1a879d6a866f80b1fa1c1009a2ffa747873cbb5e'
   KMI_CRC_MAP_REL: '.github/data/ticwatch-stock379-kmi-crc-overrides-337.tsv'
   HISTORICAL_V2_COMMIT: 'be11c389636d0d7fadd9c258e1895b42c8b85a2d'
   FINAL_KNOWN_GOOD_REPO_COMMIT: 'c0c32179666db0f318ab7f9d14ed7e540696c907'
@@ -160,9 +162,42 @@ jobs:
         shell: bash
         run: python3 /tmp/run-step.py /tmp/v2.yml "Reproduce verified source uplift to 5.15.220"
 
-      - name: Resume proven KSU Next and SuSFS integration
+      - name: Integrate exact KernelSU Next 3.4.0 with proven SuSFS recipe
         shell: bash
-        run: python3 /tmp/run-step.py /tmp/v2.yml "Resume proven KSU Next and SuSFS integration"
+        run: |
+          set -Eeuo pipefail
+
+          git checkout -- ticwatch-ultimate/preflight.sh
+
+          sed -i 's/v3\.3\.0/v3.4.0/g' ticwatch-ultimate/preflight.sh
+          sed -i             -e "s|^KSUN_TAG=.*|KSUN_TAG=\"$KSUN_CORE_TAG\"|"             -e "s|^KSUN_SHA=.*|KSUN_SHA=\"$KSUN_CORE_SHA\"|"             -e "s|^KSUN_MANAGER=.*|KSUN_MANAGER=\"$MANAGER_APK\"|"             -e "s|^KSUN_MANAGER_SHA256=.*|KSUN_MANAGER_SHA256=\"$MANAGER_APK_SHA256\"|"             ticwatch-ultimate/preflight.sh
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('ticwatch-ultimate/preflight.sh')
+          s=p.read_text()
+
+          old='mkdir -p "$(dirname "$REPORT")"\nrm -rf "$ROOT"\nmkdir -p "$ROOT"\n: > "$REPORT"\n'
+          new='mkdir -p "$(dirname "$REPORT")"\n[ -d "$ROOT/common/.git" ] || { echo "FAIL: verified 5.15.220 common tree missing" >&2; exit 1; }\n: >> "$REPORT"\n'
+          if s.count(old) != 1:
+              raise SystemExit('preflight resume anchor changed')
+          s=s.replace(old,new,1)
+
+          start=s.index('log "TicWatch Ultimate 5.15 / KernelSU Next v3.4.0 + SuSFS v2.2.0 preflight"')
+          end=s.index('log "[2/11] Fetch exact KernelSU Next v3.4.0 source"')
+          intro='log "TicWatch FINAL 5.15.220 / KSU Next 3.4.0 + SuSFS 2.2.0"\nlog "REUSE_VERIFIED_INCREMENTAL_UPLIFT=1"\nlog ""\n'
+          p.write_text(s[:start] + intro + s[end:])
+          PY
+
+          grep -Fqx 'KSUN_TAG="v3.4.0"' ticwatch-ultimate/preflight.sh
+          grep -Fqx 'KSUN_SHA="1a879d6a866f80b1fa1c1009a2ffa747873cbb5e"' ticwatch-ultimate/preflight.sh
+
+          bash ticwatch-ultimate/preflight.sh
+          grep -Fqx 'RESULT=PASS' ticwatch-ultimate-results/preflight.txt
+          grep -Fqx "KSUN_SHA=$KSUN_CORE_SHA" ticwatch-ultimate-results/preflight.txt
+          test "$(make -s -C .ticwatch-preflight/common kernelversion)" = '5.15.220'
+          test "$(git -C .ticwatch-preflight/common/KernelSU-Next rev-parse HEAD)" = "$KSUN_CORE_SHA"
+          echo 'KSU340_SUSFS_PREFLIGHT_RESULT=PASS'
 
       - name: Apply proven KSU SuSFS Seccomp and hardened SafeKey fixes
         shell: bash
