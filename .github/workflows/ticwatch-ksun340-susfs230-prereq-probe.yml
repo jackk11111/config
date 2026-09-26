@@ -47,10 +47,14 @@ jobs:
 
           git -C KSUN apply --check ../prereq.patch
           git -C KSUN apply ../prereq.patch
+          git -C KSUN add kernel/Kbuild kernel/hook/syscall_event_bridge.c kernel/runtime/ksud_integration.c
+          git -C KSUN -c user.name='TicWatch Probe' -c user.email='probe@local' commit -q -m 'temporary SuSFS prerequisite preimage'
 
           git -C KSUN cherry-pick -n "$SUS"
 
           test -z "$(git -C KSUN diff --name-only --diff-filter=U)"
+          git -C KSUN reset --soft "$BASE"
+          test "$(git -C KSUN rev-parse HEAD)" = "$BASE"
           grep -Fq 'ifneq ($(strip $(CONFIG_KSU_SUSFS)),y)' KSUN/kernel/Kbuild
           grep -Fq 'kernelsu-objs += hook/$(KSU_ARCH)/syscall_hook.o' KSUN/kernel/Kbuild
           grep -Fq 'static_branch_likely(&ksu_su_compat_enabled)' KSUN/kernel/hook/syscall_event_bridge.c
