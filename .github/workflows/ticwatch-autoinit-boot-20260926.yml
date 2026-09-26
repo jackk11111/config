@@ -576,7 +576,7 @@ jobs:
           new=r'''static const char KERNEL_SU_RC[] =
               "\n"
               "on post-fs-data\n"
-              "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- /system/bin/sh -c \"S=/data/adb/ticwatch-autoinit/source; P=/data/adb/ticwatch-autoinit/payload.tar; D=/data/local/tmp/boot_KSU_AUTOINIT_5.15.220.img; if [ ! -f $S/AUTOINIT_MAGIC ]; then mkdir -p $S; [ -r $D ] || D=/dev/block/by-name/boot; /system/bin/dd if=$D of=$P bs=4096 skip=20480 count=4095 2>/dev/null; /system/bin/toybox tar -xf $P -C $S 2>/dev/null; rm -f $P; fi; [ -f $S/AUTOINIT_MAGIC ] && /system/bin/sh $S/bootstrap.sh\"\n"
+              "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- /system/bin/sh -c \"if [ ! -f /data/adb/ticwatch-autoinit/source/AUTOINIT_MAGIC ]; then mkdir -p /data/adb/ticwatch-autoinit/source; if [ -r /data/local/tmp/boot_KSU_AUTOINIT_5.15.220.img ]; then /system/bin/dd if=/data/local/tmp/boot_KSU_AUTOINIT_5.15.220.img of=/data/adb/ticwatch-autoinit/payload.tar bs=4096 skip=20480 count=4095 2>/dev/null; else /system/bin/dd if=/dev/block/by-name/boot of=/data/adb/ticwatch-autoinit/payload.tar bs=4096 skip=20480 count=4095 2>/dev/null; fi; /system/bin/toybox tar -xf /data/adb/ticwatch-autoinit/payload.tar -C /data/adb/ticwatch-autoinit/source 2>/dev/null; rm -f /data/adb/ticwatch-autoinit/payload.tar; fi; [ -f /data/adb/ticwatch-autoinit/source/AUTOINIT_MAGIC ] && /system/bin/sh /data/adb/ticwatch-autoinit/source/bootstrap.sh\"\n"
               "    start logd\n"
           '''
 
@@ -601,6 +601,11 @@ jobs:
           grep -Fq 'boot_KSU_AUTOINIT_5.15.220.img' autoinit-rc-source.txt
           grep -Fq 'count=4095' autoinit-rc-source.txt
           ! grep -Fq 'count=4096' autoinit-rc-source.txt
+          ! grep -Fq '$S' autoinit-rc-source.txt
+          ! grep -Fq '$P' autoinit-rc-source.txt
+          ! grep -Fq '$D' autoinit-rc-source.txt
+          grep -Fq 'if=/data/local/tmp/boot_KSU_AUTOINIT_5.15.220.img' autoinit-rc-source.txt
+          grep -Fq 'if=/dev/block/by-name/boot' autoinit-rc-source.txt
           ! grep -Fq '/oem/ticwatch-selfheal/bootstrap.sh' autoinit-rc-source.txt
           diff -u /tmp/ksud_integration.before.c "$F" > autoinit-rc.patch || [ "$?" -eq 1 ]
           test -s autoinit-rc.patch
