@@ -82,6 +82,9 @@ jobs:
           test -s /tmp/current.yml
 
           cp "$KMI_CRC_MAP_REL" /tmp/ticwatch-stock379-kmi-crc-overrides-337.tsv
+          cp ticwatch-autoinit/integrate-ksun340-susfs230.sh /tmp/integrate-ksun340-susfs230.sh
+          cp ticwatch-autoinit/apply-ack-515220-timer-compat.sh /tmp/apply-ack-515220-timer-compat.sh
+          chmod +x /tmp/integrate-ksun340-susfs230.sh /tmp/apply-ack-515220-timer-compat.sh
 
           python3 - /tmp/current.yml "$CURRENT_BASELINE_SOURCE_DATE_EPOCH" "$CURRENT_BASELINE_BUILD_TIMESTAMP" <<'PY'
           from pathlib import Path
@@ -455,7 +458,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          bash ticwatch-autoinit/integrate-ksun340-susfs230.sh
+          bash /tmp/integrate-ksun340-susfs230.sh
           grep -Fqx 'RESULT=PASS' ksun340-susfs230-audit/PROVENANCE.txt
           grep -Fqx "KSUN_BASE=$KSUN_CORE_SHA" ksun340-susfs230-audit/PROVENANCE.txt
           grep -Fqx "SUSFS_INTEGRATION=$SUSFS_KSU_INTEGRATION_SHA" ksun340-susfs230-audit/PROVENANCE.txt
@@ -467,7 +470,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          bash ticwatch-autoinit/apply-ack-515220-timer-compat.sh "$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          bash /tmp/apply-ack-515220-timer-compat.sh "$GITHUB_WORKSPACE/.ticwatch-preflight/common"
           echo "ACK_515220_TIMER_COMPAT=PASS"
 
       - name: Restore proven Slatecom PM fix after source reset
