@@ -11,6 +11,7 @@ AUDIT="$WS/ksun340-susfs230-audit"
 : "${SUSFS_KSU_INTEGRATION_SHA:=34d71c4d10a53cecb9759b4787944a2a65bb3d8d}"
 : "${SUSFS_KSU_PARENT_SHA:=c61d876480976e553060789759cc4b54c9e7d816}"
 : "${SUSFS_CORE_SHA:=687d2d18d94cb2e3e72d1074778d58384d58e379}"
+: "${KSUN_ARCH_SYSCALL_COMPAT_SHA:=4bc78d770605be30a1f4b0cb93e2e4f024b407c2}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -37,6 +38,7 @@ git -C "$KSUN" checkout -q --detach FETCH_HEAD
 [ "$(git -C "$KSUN" rev-parse HEAD)" = "$KSUN_CORE_SHA" ] || fail "KSU 3.4 source mismatch"
 git -C "$KSUN" remote add pershoot https://github.com/pershoot/KernelSU-Next.git
 git -C "$KSUN" fetch -q --no-tags pershoot "$SUSFS_KSU_PARENT_SHA" "$SUSFS_KSU_INTEGRATION_SHA"
+git -C "$KSUN" fetch -q --no-tags origin "$KSUN_ARCH_SYSCALL_COMPAT_SHA"
 git -C "$KSUN" cat-file -e "${SUSFS_KSU_PARENT_SHA}^{commit}"
 git -C "$KSUN" cat-file -e "${SUSFS_KSU_INTEGRATION_SHA}^{commit}"
 [ "$(git -C "$KSUN" rev-parse "$SUSFS_KSU_INTEGRATION_SHA^")" = "$SUSFS_KSU_PARENT_SHA" ] || fail "SuSFS integration parent mismatch"
@@ -101,6 +103,19 @@ grep -Fq 'ksu_handle_sys_read(fd, NULL, NULL);' "$KSUN/kernel/runtime/ksud_integ
 grep -Fq 'DEFINE_STATIC_KEY_TRUE(is_first_zygote);' "$KSUN/kernel/runtime/ksud_integration.c"
 grep -Fq 'static_branch_disable(&is_first_zygote);' "$KSUN/kernel/runtime/ksud_integration.c"
 grep -Fq 'config KSU_SUSFS' "$KSUN/kernel/Kconfig"
+
+echo "=== BACKPORT EXACT UPSTREAM PT_REGS_SYSCALL_PARM1 COMPAT ==="
+compat_parent="$(git -C "$KSUN" rev-parse "$KSUN_ARCH_SYSCALL_COMPAT_SHA^")"
+git -C "$KSUN" diff --binary "$compat_parent" "$KSUN_ARCH_SYSCALL_COMPAT_SHA" -- kernel/include/arch.h \
+  > "$AUDIT/ksun-arch-syscall-compat.patch"
+test -s "$AUDIT/ksun-arch-syscall-compat.patch"
+grep -Fq '#define PT_REGS_SYSCALL_PARM1(x)' "$AUDIT/ksun-arch-syscall-compat.patch"
+grep -Fq '#define __PT_SYSCALL_PARM1_REG __PT_PARM1_REG' "$AUDIT/ksun-arch-syscall-compat.patch"
+git -C "$KSUN" apply --check "$AUDIT/ksun-arch-syscall-compat.patch"
+git -C "$KSUN" apply "$AUDIT/ksun-arch-syscall-compat.patch"
+grep -Fq '#define PT_REGS_SYSCALL_PARM1(x)' "$KSUN/kernel/include/arch.h"
+grep -Fq '#define __PT_SYSCALL_PARM1_REG __PT_PARM1_REG' "$KSUN/kernel/include/arch.h"
+echo "KSUN_ARCH_SYSCALL_COMPAT=PASS"
 
 echo "=== EXACT CURRENT ANDROID13-5.15 SUSFS 2.3 KERNEL SIDE ==="
 rm -rf "$SUSROOT"
@@ -280,6 +295,7 @@ test -s "$AUDIT/ticwatch-kernel-susfs230.patch"
   echo "SUSFS_INTEGRATION_PARENT=$SUSFS_KSU_PARENT_SHA"
   echo "SUSFS_KERNEL_SOURCE=$SUSFS_CORE_SHA"
   echo "SUSFS_VERSION=$susver"
+  echo "KSUN_ARCH_SYSCALL_COMPAT=$KSUN_ARCH_SYSCALL_COMPAT_SHA"
   echo "SAFEKEY=VOLUMEDOWN_OR_KEY_MENU_REAL_DOWN_ONLY"
   echo "MANAGER_SECCOMP=FILTER_PRESERVED_REBOOT_SUPERCALL_ALLOWED"
   echo "ARM32_SUSFS_C_LONG_FIX=YES"
