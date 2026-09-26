@@ -21,6 +21,10 @@ mkdir -p "$AUDIT"
 
 echo "=== RESET TO VERIFIED LINUX 5.15.220 SOURCE ==="
 git -C "$K" reset --hard HEAD
+# KernelSU-Next is a nested Git repository, so git clean -fdx deliberately
+# does not remove it. Delete only that old KSU 3.3 source tree explicitly;
+# the exact v3.4.0 tree is fetched immediately below.
+rm -rf "$KSUN"
 git -C "$K" clean -fdx
 test -z "$(git -C "$K" status --porcelain)"
 
