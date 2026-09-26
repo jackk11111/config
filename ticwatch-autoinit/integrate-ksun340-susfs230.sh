@@ -61,6 +61,13 @@ grep -Fq 'PT_REGS_SYSCALL_PARM1(regs)' "$AUDIT/pershoot-parent-prereq.patch"
 git -C "$KSUN" apply --check "$AUDIT/pershoot-parent-prereq.patch"
 git -C "$KSUN" apply "$AUDIT/pershoot-parent-prereq.patch"
 
+# Cherry-pick requires a clean worktree. Commit only the audited three-file
+# prerequisite preimage locally, apply SuSFS, then move HEAD back to the exact
+# official v3.4.0 tag while retaining the complete delta staged for audit/build.
+git -C "$KSUN" add kernel/Kbuild kernel/hook/syscall_event_bridge.c kernel/runtime/ksud_integration.c
+git -C "$KSUN" -c user.name='TicWatch Build' -c user.email='build@local' \
+  commit -q -m 'temporary SuSFS prerequisite preimage'
+
 echo "=== PORT PERSHOOT SUSFS 2.3 INTEGRATION ON TOP OF v3.4.0 + AUDITED PREREQS ==="
 set +e
 git -C "$KSUN" cherry-pick -n "$SUSFS_KSU_INTEGRATION_SHA" >"$AUDIT/cherry-pick.log" 2>&1
@@ -73,6 +80,8 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 [ -z "$(git -C "$KSUN" diff --name-only --diff-filter=U)" ] || fail "unmerged KSU files remain"
+git -C "$KSUN" reset --soft "$KSUN_CORE_SHA"
+[ "$(git -C "$KSUN" rev-parse HEAD)" = "$KSUN_CORE_SHA" ] || fail "KSU HEAD did not return to official v3.4.0"
 
 # Normalize only whitespace introduced by the upstream integration commit.
 sed -i 's/[[:space:]]\+$//' "$KSUN/kernel/selinux/selinux.c" "$KSUN/kernel/supercall/dispatch.c"
