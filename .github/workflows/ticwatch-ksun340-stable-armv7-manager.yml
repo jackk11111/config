@@ -114,29 +114,8 @@ jobs:
           from pathlib import Path
           import sys
           p=Path(sys.argv[1]); s=p.read_text()
-          old='''#[cfg(all(target_arch = "aarch64", target_os = "android"))]
-#[derive(RustEmbed)]
-#[folder = "bin/aarch64"]
-struct Asset;
-
-// If not Android, ie. macos, linux, windows, include both
-#[cfg(not(target_os = "android"))]
-#[derive(RustEmbed)]
-#[folder = "bin"]
-struct Asset;
-'''
-          new='''// TicWatch ARM32 compatibility: preserve the exact v3.3.0 behavior.
-#[cfg(all(target_os = "android", not(target_arch = "x86_64")))]
-#[derive(RustEmbed)]
-#[folder = "bin/aarch64"]
-struct Asset;
-
-// Non-Android host tools keep the normal aggregate asset tree.
-#[cfg(not(target_os = "android"))]
-#[derive(RustEmbed)]
-#[folder = "bin"]
-struct Asset;
-'''
+          old='#[cfg(all(target_arch = "aarch64", target_os = "android"))]\n#[derive(RustEmbed)]\n#[folder = "bin/aarch64"]\nstruct Asset;\n\n// If not Android, ie. macos, linux, windows, include both\n#[cfg(not(target_os = "android"))]\n#[derive(RustEmbed)]\n#[folder = "bin"]\nstruct Asset;\n'
+          new='// TicWatch ARM32 compatibility: preserve the exact v3.3.0 behavior.\n#[cfg(all(target_os = "android", not(target_arch = "x86_64")))]\n#[derive(RustEmbed)]\n#[folder = "bin/aarch64"]\nstruct Asset;\n\n// Non-Android host tools keep the normal aggregate asset tree.\n#[cfg(not(target_os = "android"))]\n#[derive(RustEmbed)]\n#[folder = "bin"]\nstruct Asset;\n'
           if s.count(old)!=1:
               raise SystemExit('v3.4 assets anchor changed')
           s=s.replace(old,new,1)
