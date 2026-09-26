@@ -104,6 +104,49 @@ jobs:
           grep -Fq 'SYS_reboot as c_long' "$F"
           echo "ARM32_SUSFS_ABI_FIX=PASS"
 
+      - name: Restore proven v3.3 ARM32 asset fallback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F=KSUN/userspace/ksud/src/assets.rs
+          cp "$F" /tmp/assets-v340.before.rs
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          old='''#[cfg(all(target_arch = "aarch64", target_os = "android"))]
+#[derive(RustEmbed)]
+#[folder = "bin/aarch64"]
+struct Asset;
+
+// If not Android, ie. macos, linux, windows, include both
+#[cfg(not(target_os = "android"))]
+#[derive(RustEmbed)]
+#[folder = "bin"]
+struct Asset;
+'''
+          new='''// TicWatch ARM32 compatibility: preserve the exact v3.3.0 behavior.
+#[cfg(all(target_os = "android", not(target_arch = "x86_64")))]
+#[derive(RustEmbed)]
+#[folder = "bin/aarch64"]
+struct Asset;
+
+// Non-Android host tools keep the normal aggregate asset tree.
+#[cfg(not(target_os = "android"))]
+#[derive(RustEmbed)]
+#[folder = "bin"]
+struct Asset;
+'''
+          if s.count(old)!=1:
+              raise SystemExit('v3.4 assets anchor changed')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          diff -u /tmp/assets-v340.before.rs "$F" > arm32-assets-v340.patch || [ "$?" -eq 1 ]
+          test -s arm32-assets-v340.patch
+          grep -Fq 'not(target_arch = "x86_64")' "$F"
+          echo "ARM32_ASSET_FALLBACK_MATCHES_V330=PASS"
+
       - name: Build v3.4.0 ksud for armeabi-v7a
         env:
           BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi: >-
@@ -248,7 +291,7 @@ jobs:
           cp ksud-v340-armv7-corrected libadbroot-v340-armv7.so bundle/
           cp manager-v340-identity.txt manager-v340-sha256.txt native-v340-file-report.txt bundle/
           cp ksud-v340-armv7-file.txt ksud-v340-armv7-sha256.txt ksud-v340-strings.txt bundle/
-          cp arm32-susfs-v340.patch manager-v340-build.log apk-v340-contents.txt bundle/
+          cp arm32-susfs-v340.patch arm32-assets-v340.patch manager-v340-build.log apk-v340-contents.txt bundle/
           cat > bundle/README.txt <<'EOF'
           PURPOSE=KernelSU Next 3.4.0 TicWatch Pro 5 Enduro ARM32 candidate
           PACKAGE=qpczqz.fbrkit.ricycb
