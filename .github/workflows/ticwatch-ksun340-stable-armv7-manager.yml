@@ -1,0 +1,262 @@
+name: TicWatch KSU Next 3.4.0 - Stable armv7 Manager Candidate
+
+on:
+  push:
+    branches: [ticwatch-autoinit-boot-20260926]
+    paths:
+      - '.github/workflows/ticwatch-ksun340-stable-armv7-manager.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  manager:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      KSUN_SHA: '1a879d6a866f80b1fa1c1009a2ffa747873cbb5e'
+      FIXED_PACKAGE: 'qpczqz.fbrkit.ricycb'
+      NDK_VERSION: '27.3.13750724'
+
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-autoinit-boot-20260926
+          fetch-depth: 1
+
+      - name: Install host dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends build-essential libclang-dev file unzip zip
+
+      - name: Setup Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install pinned NDK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sdkmanager "ndk;$NDK_VERSION"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Fetch exact KernelSU Next v3.4.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git init -q KSUN
+          git -C KSUN remote add origin https://github.com/KernelSU-Next/KernelSU-Next.git
+          git -C KSUN fetch -q --depth=1 origin "$KSUN_SHA"
+          git -C KSUN checkout -q --detach FETCH_HEAD
+          test "$(git -C KSUN rev-parse HEAD)" = "$KSUN_SHA"
+          grep -Fqx 'use libc::{syscall, SYS_reboot, c_char};' KSUN/userspace/ksud/src/susfsd.rs
+          grep -Fq 'abiFilters("arm64-v8a", "x86_64")' KSUN/manager/build.gradle.kts
+          grep -Fq 'abiFilters += listOf("arm64-v8a", "x86_64")' KSUN/manager/build.gradle.kts
+          echo "KSUN340_SOURCE_GATE=PASS"
+
+      - name: Apply proven TicWatch ARM32 SuSFS ABI fix
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F=KSUN/userspace/ksud/src/susfsd.rs
+          cp "$F" /tmp/susfsd.before.rs
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          old='use libc::{syscall, SYS_reboot, c_char};'
+          if s.count(old)!=1:
+              raise SystemExit('ARM32 susfs import anchor changed')
+          s=s.replace(old,'use libc::{syscall, SYS_reboot, c_char, c_long};',1)
+          repl={
+            'syscall(SYS_reboot, KSU_INSTALL_MAGIC1, SUSFS_MAGIC, CMD_SUSFS_SHOW_VERSION, &mut cmd as *mut _);':
+            'syscall(SYS_reboot as c_long, KSU_INSTALL_MAGIC1 as c_long, SUSFS_MAGIC as c_long, CMD_SUSFS_SHOW_VERSION as c_long, &mut cmd as *mut _);',
+            'syscall(SYS_reboot, KSU_INSTALL_MAGIC1, SUSFS_MAGIC, CMD_SUSFS_SHOW_VARIANT, &mut cmd as *mut _);':
+            'syscall(SYS_reboot as c_long, KSU_INSTALL_MAGIC1 as c_long, SUSFS_MAGIC as c_long, CMD_SUSFS_SHOW_VARIANT as c_long, &mut cmd as *mut _);',
+            'syscall(SYS_reboot, KSU_INSTALL_MAGIC1, SUSFS_MAGIC, CMD_SUSFS_SHOW_ENABLED_FEATURES, &mut cmd as *mut _);':
+            'syscall(SYS_reboot as c_long, KSU_INSTALL_MAGIC1 as c_long, SUSFS_MAGIC as c_long, CMD_SUSFS_SHOW_ENABLED_FEATURES as c_long, &mut cmd as *mut _);'
+          }
+          for a,b in repl.items():
+              if s.count(a)!=1:
+                  raise SystemExit('ARM32 susfs syscall anchor changed')
+              s=s.replace(a,b,1)
+          p.write_text(s)
+          PY
+          diff -u /tmp/susfsd.before.rs "$F" > arm32-susfs-v340.patch || [ "$?" -eq 1 ]
+          test -s arm32-susfs-v340.patch
+          grep -Fq 'SYS_reboot as c_long' "$F"
+          echo "ARM32_SUSFS_ABI_FIX=PASS"
+
+      - name: Build v3.4.0 ksud for armeabi-v7a
+        env:
+          BINDGEN_EXTRA_CLANG_ARGS_armv7_linux_androideabi: >-
+            --sysroot=${{ env.ANDROID_NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot
+            -I${{ env.ANDROID_NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include/arm-linux-androideabi
+            -I${{ env.ANDROID_NDK_ROOT }}/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rustup target add armv7-linux-androideabi
+          cargo install cargo-ndk --locked
+          cd KSUN/userspace/ksud
+          cargo ndk -t armeabi-v7a -P 26 build --release
+          K=target/armv7-linux-androideabi/release/ksud
+          file "$K" | tee "$GITHUB_WORKSPACE/ksud-v340-armv7-file.txt"
+          file "$K" | grep -Fq 'ELF 32-bit'
+          file "$K" | grep -Fq 'ARM'
+          sha256sum "$K" | tee "$GITHUB_WORKSPACE/ksud-v340-armv7-sha256.txt"
+          strings "$K" | grep -E 'ksud|uapi|3\.4' | head -n 100 > "$GITHUB_WORKSPACE/ksud-v340-strings.txt" || true
+
+      - name: Apply deterministic TicWatch spoof and force armv7
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd KSUN/manager
+
+          # Same transform as upstream spoof, but deterministic so future updates
+          # keep the same Android package name.
+          find . -depth -type d -name 'com' -execdir mv {} qpczqz \;
+          find . -depth -type d -name 'rifsxd' -execdir mv {} fbrkit \;
+          find . -depth -type d -name 'ksunext' -execdir mv {} ricycb \;
+          find . -type f -exec sed -i             -e 's/com\.rifsxd\.ksunext/qpczqz.fbrkit.ricycb/g'             -e 's/com\/rifsxd\/ksunext/qpczqz\/fbrkit\/ricycb/g'             -e 's/com_rifsxd_ksunext/qpczqz_fbrkit_ricycb/g' {} +
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p=Path('build.gradle.kts'); s=p.read_text()
+          a='val managerVersionName by extra(getVersionName())'
+          b=a+'\nval managerVersionNameSpoofed = "${managerVersionName}-spoofed"'
+          if s.count(a)!=1: raise SystemExit('managerVersionName anchor changed')
+          s=s.replace(a,b,1)
+          a='versionName = managerVersionName'
+          if s.count(a)!=1: raise SystemExit('versionName anchor changed')
+          s=s.replace(a,'versionName = managerVersionNameSpoofed',1)
+          p.write_text(s)
+
+          p=Path('app/build.gradle.kts'); s=p.read_text()
+          a='val managerVersionName: String by rootProject.extra'
+          b=a+'\nval managerVersionNameSpoofed = "${managerVersionName}-spoofed"'
+          if s.count(a)!=1: raise SystemExit('app managerVersionName anchor changed')
+          s=s.replace(a,b,1)
+          a='outputFileName = "KernelSU_Next_${managerVersionName}_${managerVersionCode}-$name.apk"'
+          b='outputFileName = "KernelSU_Next_${managerVersionNameSpoofed}_${managerVersionCode}-$name.apk"'
+          if s.count(a)!=1: raise SystemExit('output filename anchor changed')
+          s=s.replace(a,b,1)
+          p.write_text(s)
+
+          p=Path('build.gradle.kts'); s=p.read_text()
+          a='abiFilters("arm64-v8a", "x86_64")'
+          b='abiFilters("armeabi-v7a")'
+          if s.count(a)!=1: raise SystemExit('abiFilters anchor1 changed')
+          s=s.replace(a,b,1)
+          a='abiFilters += listOf("arm64-v8a", "x86_64")'
+          b='abiFilters += listOf("armeabi-v7a")'
+          if s.count(a)!=1: raise SystemExit('abiFilters anchor2 changed')
+          s=s.replace(a,b,1)
+          p.write_text(s)
+          PY
+
+          grep -Fq 'namespace = "qpczqz.fbrkit.ricycb"' app/build.gradle.kts
+          grep -Fq 'abiFilters("armeabi-v7a")' build.gradle.kts
+          grep -Fq 'abiFilters += listOf("armeabi-v7a")' build.gradle.kts
+          {
+            echo "PACKAGE=$FIXED_PACKAGE"
+            grep -E 'namespace =|managerVersionNameSpoofed' app/build.gradle.kts
+          } | tee "$GITHUB_WORKSPACE/manager-v340-identity.txt"
+          echo "DETERMINISTIC_TICWATCH_IDENTITY=PASS"
+
+      - name: Install corrected armv7 ksud into Manager
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p KSUN/manager/app/src/main/jniLibs/armeabi-v7a
+          cp KSUN/userspace/ksud/target/armv7-linux-androideabi/release/ksud              KSUN/manager/app/src/main/jniLibs/armeabi-v7a/libksud.so
+          file KSUN/manager/app/src/main/jniLibs/armeabi-v7a/libksud.so
+
+      - name: Create temporary build-only signing key
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd KSUN/manager
+          keytool -genkeypair -noprompt             -keystore temp-build-only.jks -storepass temporary340 -keypass temporary340             -alias temp340 -keyalg RSA -keysize 3072 -validity 30             -dname 'CN=TEMP-DO-NOT-INSTALL'
+          {
+            echo 'KEYSTORE_PASSWORD=temporary340'
+            echo 'KEY_ALIAS=temp340'
+            echo 'KEY_PASSWORD=temporary340'
+            echo 'KEYSTORE_FILE=temp-build-only.jks'
+          } >> gradle.properties
+          echo "TEMP_SIGNING_KEY=DO_NOT_PAIR_WITH_KERNEL"
+
+      - name: Build temporary-signed v3.4.0 armv7 APK
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd KSUN/manager
+          ./gradlew --no-daemon clean assembleRelease 2>&1 | tee "$GITHUB_WORKSPACE/manager-v340-build.log"
+          APK="$(find app/build/outputs/apk/release -maxdepth 1 -name '*.apk' -type f | head -n1)"
+          test -n "$APK" -a -s "$APK"
+          cp "$APK" "$GITHUB_WORKSPACE/KernelSU_Next_v3.4.0-TicWatch-armv7-TEMP_SIGNED_DO_NOT_INSTALL.apk"
+
+      - name: Verify v3.4.0 ARM32 payload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          APK=KernelSU_Next_v3.4.0-TicWatch-armv7-TEMP_SIGNED_DO_NOT_INSTALL.apk
+          unzip -l "$APK" | tee apk-v340-contents.txt
+          for lib in libksud.so libkernelsu.so libadbroot.so; do
+            unzip -l "$APK" | grep -Fq "lib/armeabi-v7a/$lib"
+          done
+          if unzip -l "$APK" | grep -Eq 'lib/(arm64-v8a|x86_64|x86)/'; then
+            echo 'Unexpected non-armv7 native library' >&2
+            exit 1
+          fi
+          rm -rf native-v340 && mkdir native-v340
+          unzip -q "$APK" 'lib/armeabi-v7a/*' -d native-v340
+          for f in native-v340/lib/armeabi-v7a/libksud.so                    native-v340/lib/armeabi-v7a/libkernelsu.so                    native-v340/lib/armeabi-v7a/libadbroot.so; do
+            file "$f" | tee -a native-v340-file-report.txt
+            file "$f" | grep -Fq 'ELF 32-bit'
+            file "$f" | grep -Fq 'ARM'
+          done
+          sha256sum "$APK" native-v340/lib/armeabi-v7a/* | tee manager-v340-sha256.txt
+          cp native-v340/lib/armeabi-v7a/libksud.so ksud-v340-armv7-corrected
+          cp native-v340/lib/armeabi-v7a/libadbroot.so libadbroot-v340-armv7.so
+          echo "MANAGER340_ARM32_PAYLOAD_GATE=PASS"
+
+      - name: Package candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p bundle
+          cp KernelSU_Next_v3.4.0-TicWatch-armv7-TEMP_SIGNED_DO_NOT_INSTALL.apk bundle/
+          cp ksud-v340-armv7-corrected libadbroot-v340-armv7.so bundle/
+          cp manager-v340-identity.txt manager-v340-sha256.txt native-v340-file-report.txt bundle/
+          cp ksud-v340-armv7-file.txt ksud-v340-armv7-sha256.txt ksud-v340-strings.txt bundle/
+          cp arm32-susfs-v340.patch manager-v340-build.log apk-v340-contents.txt bundle/
+          cat > bundle/README.txt <<'EOF'
+          PURPOSE=KernelSU Next 3.4.0 TicWatch Pro 5 Enduro ARM32 candidate
+          PACKAGE=qpczqz.fbrkit.ricycb
+          SOURCE=v3.4.0 / 1a879d6a866f80b1fa1c1009a2ffa747873cbb5e
+          ABI=armeabi-v7a only
+          ARM32_SUSFS_C_LONG_FIX=YES
+          APK_SIGNATURE=TEMPORARY BUILD-ONLY KEY
+          INSTALL_THIS_APK=NO
+          NEXT=RE-SIGN WITH USER STABLE TICWATCH KSU MANAGER KEY, THEN PAIR FINAL KERNEL CERT GATE
+          EOF
+          (cd bundle && sha256sum * > SHA256SUMS.txt)
+
+      - name: Upload Manager candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: KernelSU-Next-v3.4.0-TicWatch-armv7-CANDIDATE
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 30
