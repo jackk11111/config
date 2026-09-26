@@ -39,15 +39,23 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install pinned NDK
+      - name: Install pinned NDK using runner Android SDK
         shell: bash
         run: |
           set -Eeuo pipefail
-          sdkmanager "ndk;$NDK_VERSION"
+          : "${ANDROID_SDK_ROOT:=/usr/local/lib/android/sdk}"
+          export ANDROID_SDK_ROOT
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/16.0/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || { echo "sdkmanager not found"; exit 1; }
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "ndk;$NDK_VERSION"
+          test -d "$ANDROID_SDK_ROOT/ndk/$NDK_VERSION"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+          echo "RUNNER_ANDROID_SDK_GATE=PASS"
 
       - name: Fetch exact KernelSU Next v3.4.0
         shell: bash
