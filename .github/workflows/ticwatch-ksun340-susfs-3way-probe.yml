@@ -1,0 +1,89 @@
+name: TicWatch KSU 3.4.0 SuSFS 3-Way Probe
+
+on:
+  push:
+    branches: [ticwatch-autoinit-boot-20260926]
+    paths:
+      - '.github/workflows/ticwatch-ksun340-susfs-3way-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Fetch exact sources
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git init KSUN
+          git -C KSUN remote add origin https://github.com/KernelSU-Next/KernelSU-Next.git
+          git -C KSUN fetch --depth=1 origin 1a879d6a866f80b1fa1c1009a2ffa747873cbb5e
+          git -C KSUN fetch --depth=1 origin 3b18216f71df189ab3d1b1ce0bdb21be1268e771
+          git -C KSUN checkout --detach 1a879d6a866f80b1fa1c1009a2ffa747873cbb5e
+
+          git init SUSFS
+          git -C SUSFS remote add origin https://github.com/ShirkNeko/susfs4ksu.git
+          git -C SUSFS fetch --depth=1 origin 687d2d18d94cb2e3e72d1074778d58384d58e379
+          git -C SUSFS checkout --detach FETCH_HEAD
+
+      - name: Build filtered patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          src=Path('SUSFS/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch').read_text()
+          chunks=re.split(r'(?=^diff --git )',src,flags=re.M)
+          skip={
+            'kernel/Kbuild','kernel/Kconfig','kernel/core/init.c',
+            'kernel/feature/kernel_umount.c','kernel/feature/sucompat.c',
+            'kernel/hook/setuid_hook.c','kernel/supercall/supercall.c'
+          }
+          out=[]
+          for c in chunks:
+              if not c.startswith('diff --git '):
+                  continue
+              m=re.match(r'diff --git a/(\S+) b/(\S+)',c)
+              if not m: raise SystemExit('bad header')
+              if m.group(1) not in skip:
+                  out.append(c)
+          Path('filtered.patch').write_text(''.join(out))
+          PY
+          test -s filtered.patch
+
+      - name: Try 3-way apply
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p probe
+          cp filtered.patch probe/
+          cd KSUN
+          set +e
+          git apply --3way ../filtered.patch >../probe/3way.log 2>&1
+          rc=$?
+          set -e
+          echo "THREEWAY_RC=$rc" | tee ../probe/summary.txt
+          cat ../probe/3way.log
+          git status --short | tee ../probe/status.txt
+          git diff --check | tee ../probe/diff-check.txt || true
+          git diff | tee ../probe/working.diff >/dev/null || true
+          git diff --cc | tee ../probe/conflicts.diff >/dev/null || true
+          if git ls-files -u | grep -q .; then
+            echo "UNMERGED=YES" | tee -a ../probe/summary.txt
+            git ls-files -u | tee ../probe/unmerged.txt
+          else
+            echo "UNMERGED=NO" | tee -a ../probe/summary.txt
+          fi
+
+      - name: Upload 3-way probe
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-KSU340-SuSFS-3Way-Probe
+          path: probe/
+          if-no-files-found: error
+          retention-days: 30
