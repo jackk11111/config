@@ -1,0 +1,137 @@
+name: TicWatch KSU 3.4.0 SuSFS Compatibility Probe
+
+on:
+  push:
+    branches: [ticwatch-autoinit-boot-20260926]
+    paths:
+      - '.github/workflows/ticwatch-ksun340-susfs-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout orchestrator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-autoinit-boot-20260926
+          fetch-depth: 1
+
+      - name: Fetch exact KSU 3.4.0 and SuSFS 2.2.0-era source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git init -q KSUN
+          git -C KSUN remote add origin https://github.com/KernelSU-Next/KernelSU-Next.git
+          git -C KSUN fetch -q --depth=1 origin 1a879d6a866f80b1fa1c1009a2ffa747873cbb5e
+          git -C KSUN checkout -q --detach FETCH_HEAD
+          test "$(git -C KSUN rev-parse HEAD)" = 1a879d6a866f80b1fa1c1009a2ffa747873cbb5e
+
+          git init -q SUSFS
+          git -C SUSFS remote add origin https://github.com/ShirkNeko/susfs4ksu.git
+          git -C SUSFS fetch -q --depth=1 origin 65ea8683c794cc309c3b0c4e6b57c1d972ca9a76
+          git -C SUSFS checkout -q --detach FETCH_HEAD
+          test "$(git -C SUSFS rev-parse HEAD)" = 65ea8683c794cc309c3b0c4e6b57c1d972ca9a76
+          echo SOURCE_GATE=PASS
+
+      - name: Split and test filtered SuSFS patch file-by-file
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p probe/patches probe/logs
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          src=Path('SUSFS/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch').read_text()
+          chunks=re.split(r'(?=^diff --git )',src,flags=re.M)
+          skip={
+            'kernel/Kbuild','kernel/Kconfig','kernel/core/init.c',
+            'kernel/feature/kernel_umount.c','kernel/feature/sucompat.c',
+            'kernel/hook/setuid_hook.c','kernel/supercall/supercall.c'
+          }
+          n=0
+          manifest=[]
+          for c in chunks:
+              if not c.startswith('diff --git '):
+                  continue
+              m=re.match(r'diff --git a/(\S+) b/(\S+)',c)
+              if not m:
+                  raise SystemExit('bad diff header')
+              p=m.group(1)
+              if p in skip:
+                  continue
+              n+=1
+              name=f'{n:02d}__'+p.replace('/','__')+'.patch'
+              Path('probe/patches',name).write_text(c)
+              manifest.append((name,p))
+          Path('probe/manifest.tsv').write_text(''.join(f'{a}\t{b}\n' for a,b in manifest))
+          print(f'FILTERED_FILES={n}')
+          PY
+
+          : > probe/results.tsv
+          while IFS=$'\t' read -r patch file; do
+            set +e
+            (
+              cd KSUN
+              git apply --check "../probe/patches/$patch"
+            ) >"probe/logs/$patch.log" 2>&1
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              printf 'PASS\t%s\t%s\n' "$file" "$patch" | tee -a probe/results.tsv
+            else
+              printf 'FAIL\t%s\t%s\n' "$file" "$patch" | tee -a probe/results.tsv
+            fi
+          done < probe/manifest.tsv
+
+          echo
+          echo '=== FAILURES ==='
+          grep '^FAIL' probe/results.tsv || true
+
+          while IFS=$'\t' read -r status file patch; do
+            [ "$status" = FAIL ] || continue
+            echo
+            echo "===== $file ====="
+            cat "probe/logs/$patch.log"
+          done < probe/results.tsv
+
+          fail_count="$(grep -c '^FAIL' probe/results.tsv || true)"
+          echo "FAIL_COUNT=$fail_count" | tee probe/summary.txt
+          echo "PASS_COUNT=$(grep -c '^PASS' probe/results.tsv || true)" | tee -a probe/summary.txt
+
+      - name: Capture v3.3-v3.4 source diffs for failing paths
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git init -q KSUN330
+          git -C KSUN330 remote add origin https://github.com/KernelSU-Next/KernelSU-Next.git
+          git -C KSUN330 fetch -q --depth=1 origin 3b18216f71df189ab3d1b1ce0bdb21be1268e771
+          git -C KSUN330 checkout -q --detach FETCH_HEAD
+
+          mkdir -p probe/source-diffs
+          while IFS=$'\t' read -r status file patch; do
+            [ "$status" = FAIL ] || continue
+            old="KSUN330/$file"
+            new="KSUN/$file"
+            if [ -f "$old" ] && [ -f "$new" ]; then
+              diff -u "$old" "$new" > "probe/source-diffs/$(echo "$file" | tr '/' '_').diff" || [ "$?" -eq 1 ]
+            else
+              {
+                echo "OLD_EXISTS=$([ -f "$old" ] && echo yes || echo no)"
+                echo "NEW_EXISTS=$([ -f "$new" ] && echo yes || echo no)"
+              } > "probe/source-diffs/$(echo "$file" | tr '/' '_').diff"
+            fi
+          done < probe/results.tsv
+
+      - name: Upload compatibility probe
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-KSU340-SuSFS220-Compatibility-Probe
+          path: probe/
+          if-no-files-found: error
+          retention-days: 30
