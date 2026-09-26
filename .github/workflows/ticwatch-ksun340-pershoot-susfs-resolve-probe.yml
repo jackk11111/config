@@ -1,0 +1,141 @@
+name: TicWatch KSU 3.4.0 Pershoot SuSFS Resolve Probe
+
+on:
+  push:
+    branches: [ticwatch-autoinit-boot-20260926]
+    paths:
+      - '.github/workflows/ticwatch-ksun340-pershoot-susfs-resolve-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Resolve exact v3.4.0 plus SuSFS integration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone --no-checkout https://github.com/KernelSU-Next/KernelSU-Next.git KSUN
+          git -C KSUN checkout --detach 1a879d6a866f80b1fa1c1009a2ffa747873cbb5e
+          git -C KSUN remote add pershoot https://github.com/pershoot/KernelSU-Next.git
+          git -C KSUN fetch --no-tags pershoot 34d71c4d10a53cecb9759b4787944a2a65bb3d8d
+
+          mkdir -p probe
+          set +e
+          git -C KSUN cherry-pick -n 34d71c4d10a53cecb9759b4787944a2a65bb3d8d >probe/cherry-pick.log 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -ne 0 ] || { echo "Expected conflict set changed"; exit 10; }
+
+          mapfile -t U < <(git -C KSUN diff --name-only --diff-filter=U)
+          printf '%s\n' "${U[@]}" | tee probe/unmerged-before.txt
+          [ "${#U[@]}" -eq 3 ] || { echo "Unexpected conflict count: ${#U[@]}"; exit 11; }
+          printf '%s\n' "${U[@]}" | grep -Fxq 'kernel/Kbuild'
+          printf '%s\n' "${U[@]}" | grep -Fxq 'kernel/hook/syscall_event_bridge.c'
+          printf '%s\n' "${U[@]}" | grep -Fxq 'kernel/runtime/ksud_integration.c'
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def resolve(path, old, new):
+              p=Path("KSUN")/path
+              s=p.read_text()
+              if s.count(old) != 1:
+                  raise SystemExit(f"{path}: conflict anchor count={s.count(old)}")
+              p.write_text(s.replace(old,new,1))
+
+          resolve("kernel/Kbuild",
+          """<<<<<<< HEAD
+          ifeq ($(CONFIG_ARM64),y)
+          kernelsu-objs += hook/arm64/patch_memory.o
+          kernelsu-objs += hook/arm64/syscall_hook.o
+          else ifeq ($(CONFIG_X86_64),y)
+          kernelsu-objs += hook/x86_64/patch_memory.o
+          kernelsu-objs += hook/x86_64/syscall_hook.o
+          =======
+          ifdef KSU_ARCH
+          kernelsu-objs += hook/$(KSU_ARCH)/syscall_hook.o
+          >>>>>>> 34d71c4d (kernel: susfs (v2.3.0): Introduce SuSFS)
+          """,
+          """ifdef KSU_ARCH
+          kernelsu-objs += hook/$(KSU_ARCH)/syscall_hook.o
+          """)
+
+          resolve("kernel/hook/syscall_event_bridge.c",
+          """<<<<<<< HEAD
+              const char __user **filename_user =
+                  execveat ? (const char __user **)&PT_REGS_PARM2(regs) : (const char __user **)&PT_REGS_PARM1(regs);
+              const char __user *const __user *argv_user = execveat ? (const char __user *const __user *)PT_REGS_PARM3(regs) :
+                                                                      (const char __user *const __user *)PT_REGS_PARM2(regs);
+              bool current_is_init = is_init(current_cred());
+              struct ksu_sulog_pending_event *pending_root_execve = NULL;
+              long ret;
+          =======
+          \tconst char __user **filename_user =
+          \t\texecveat ? (const char __user **)&PT_REGS_PARM2(regs) : (const char __user **)&PT_REGS_SYSCALL_PARM1(regs);
+          \tconst char __user *const __user *argv_user = execveat ? (const char __user *const __user *)PT_REGS_PARM3(regs) :
+          \t\t\t\t\t\t\t\t(const char __user *const __user *)PT_REGS_PARM2(regs);
+          \tbool current_is_init = is_init(current_cred());
+          \tstruct ksu_sulog_pending_event *pending_root_execve = NULL;
+          \tlong ret;
+          >>>>>>> 34d71c4d (kernel: susfs (v2.3.0): Introduce SuSFS)
+          """,
+          """\tconst char __user **filename_user =
+          \t\texecveat ? (const char __user **)&PT_REGS_PARM2(regs) : (const char __user **)&PT_REGS_SYSCALL_PARM1(regs);
+          \tconst char __user *const __user *argv_user = execveat ? (const char __user *const __user *)PT_REGS_PARM3(regs) :
+          \t\t\t\t\t\t\t\t(const char __user *const __user *)PT_REGS_PARM2(regs);
+          \tbool current_is_init = is_init(current_cred());
+          \tstruct ksu_sulog_pending_event *pending_root_execve = NULL;
+          \tlong ret;
+          """)
+
+          resolve("kernel/runtime/ksud_integration.c",
+          """<<<<<<< HEAD
+              unsigned int fd = PT_REGS_PARM1(regs);
+              char __user **buf_ptr = (char __user **)&PT_REGS_PARM2(regs);
+              size_t *count_ptr = (size_t *)&PT_REGS_PARM3(regs);
+          =======
+              unsigned int fd = PT_REGS_SYSCALL_PARM1(regs);
+          >>>>>>> 34d71c4d (kernel: susfs (v2.3.0): Introduce SuSFS)
+          """,
+          """    unsigned int fd = PT_REGS_SYSCALL_PARM1(regs);
+          """)
+          PY
+
+          ! grep -R -nE '^(<<<<<<<|=======|>>>>>>>)' KSUN/kernel
+
+          git -C KSUN add kernel/Kbuild kernel/hook/syscall_event_bridge.c kernel/runtime/ksud_integration.c
+          [ -z "$(git -C KSUN diff --name-only --diff-filter=U)" ]
+          git -C KSUN diff --cached --check
+
+          # Hard semantic gates for the selected resolutions.
+          grep -Fq 'ifneq ($(strip $(CONFIG_KSU_SUSFS)),y)' KSUN/kernel/Kbuild
+          grep -Fq 'kernelsu-objs += hook/$(KSU_ARCH)/syscall_hook.o' KSUN/kernel/Kbuild
+          grep -Fq 'static_branch_likely(&ksu_su_compat_enabled)' KSUN/kernel/hook/syscall_event_bridge.c
+          grep -Fq 'PT_REGS_SYSCALL_PARM1(regs)' KSUN/kernel/runtime/ksud_integration.c
+          grep -Fq 'ksu_handle_sys_read(fd, NULL, NULL);' KSUN/kernel/runtime/ksud_integration.c
+          grep -Fq 'static const char KERNEL_SU_RC[]' KSUN/kernel/runtime/ksud_integration.c
+          grep -Fq 'config KSU_SUSFS' KSUN/kernel/Kconfig
+          grep -R -Fq 'SUSFS_MAGIC' KSUN/kernel
+
+          git -C KSUN diff --cached --stat | tee probe/stat.txt
+          git -C KSUN diff --cached > probe/resolved-susfs-on-v340.patch
+          sha256sum probe/resolved-susfs-on-v340.patch | tee probe/SHA256.txt
+
+          echo 'BASE_KSUN=1a879d6a866f80b1fa1c1009a2ffa747873cbb5e' | tee probe/summary.txt
+          echo 'SUSFS_INTEGRATION=34d71c4d10a53cecb9759b4787944a2a65bb3d8d' | tee -a probe/summary.txt
+          echo 'CONFLICTS_RESOLVED=3' | tee -a probe/summary.txt
+          echo 'UNMERGED=NO' | tee -a probe/summary.txt
+          echo 'RESOLUTION_GATE=PASS' | tee -a probe/summary.txt
+
+      - name: Upload resolved integration
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-KSU340-Pershoot-SuSFS-Resolved
+          path: probe/
+          if-no-files-found: error
+          retention-days: 30
