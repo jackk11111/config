@@ -1,0 +1,584 @@
+name: TicWatch AUTOINIT BootPayload 5.15.220
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ticwatch-autoinit-boot-20260926]
+    paths:
+      - '.github/workflows/ticwatch-autoinit-boot-20260926.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ticwatch-autoinit-boot-20260926
+  cancel-in-progress: true
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  LLVM_VERSION: '20.1.0'
+  LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
+  BASE_KERNEL_SHA: '3929c55fbc7559af6df290d2c0f66dc551af161a'
+  AOSP_ASB_TIP: '56cdb4d13a91efb666d571084ab82de351cc4900'
+  TARGET_STABLE_TAG: 'v5.15.220'
+  UPLIFT_ORCHESTRATOR_SHA: 'ba33c66c36981cd024e48326b459684605c667a9'
+  EXPECTED_UTS_PREFIX: '5.15.220-Xinran_StarBai-Test'
+  PREVIOUS_RUN_ID: '34655933953'
+  PREVIOUS_ARTIFACT: 'TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter'
+  PREVIOUS_ANYKERNEL: 'TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter.zip'
+  MANAGER_APK: 'KernelSU_Next_v3.3.0-spoofed-TicWatch-armeabi-v7a-release.apk'
+  MANAGER_APK_SHA256: '8310faebd2b592ccddd6a15a6d996c70d89cd679eb51835e84d18f531471357b'
+  KSU_NEXT_MANAGER_SIZE: '0x3c2'
+  KSU_NEXT_MANAGER_HASH: '3bc9938c38106bcf618bbe1d37ad4adde8a49c659e2860709bbfc341f7e749f2'
+  KMI_CRC_MAP_REL: '.github/data/ticwatch-stock379-kmi-crc-overrides-337.tsv'
+  HISTORICAL_V2_COMMIT: 'be11c389636d0d7fadd9c258e1895b42c8b85a2d'
+  FINAL_KNOWN_GOOD_REPO_COMMIT: 'c0c32179666db0f318ab7f9d14ed7e540696c907'
+  CURRENT_BASELINE_COMMIT: 'b8e04cbb8962990296fbefb8bbffb4155ab3d118'
+  CURRENT_BASELINE_RUN_ID: '34957108624'
+  CURRENT_BASELINE_ARTIFACT: 'TicWatch-KEXEC-ARM64-RELOC-INTERNAL-PROBE-CANDIDATE'
+  CURRENT_BASELINE_IMAGE_SHA256: '976c4b7a27679bf7afb1c62ed3937f5f8f494d09860ff2d8d04b6132889aed18'
+  CURRENT_BASELINE_SOURCE_DELTA_SHA256: 'b416e989cd01011ce394e5ffc7edfeec0801a4538b44558947e8031a2c627c17'
+  CURRENT_BASELINE_FINAL_CONFIG_SHA256: '9e63ad86d97fa6d6ce1914efeb8035dafb9043819796f0784a1bdf10a2557b54'
+  CURRENT_BASELINE_MODULE_SYMVERS_SHA256: '39c1019ed73a00b2ba8a9ab5f3a057d8cb0a8be1e285762b7cd56cb0bf95cea0'
+  EXPECTED_FINAL_CONFIG_SHA: '9e63ad86d97fa6d6ce1914efeb8035dafb9043819796f0784a1bdf10a2557b54'
+  EXPECTED_MODULE_SYMVERS_SHA: '39c1019ed73a00b2ba8a9ab5f3a057d8cb0a8be1e285762b7cd56cb0bf95cea0'
+  CURRENT_BASELINE_SOURCE_DATE_EPOCH: '1789467983'
+  CURRENT_BASELINE_BUILD_TIMESTAMP: 'Tue Sep 15 10:26:23 UTC 2026'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout SELFHEAL branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ticwatch-autoinit-boot-20260926
+          fetch-depth: 1
+
+      - name: Pin exact historical build recipes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin "$HISTORICAL_V2_COMMIT" "$FINAL_KNOWN_GOOD_REPO_COMMIT" "$CURRENT_BASELINE_COMMIT"
+          git cat-file -e "${HISTORICAL_V2_COMMIT}^{commit}"
+          git cat-file -e "${FINAL_KNOWN_GOOD_REPO_COMMIT}^{commit}"
+          git cat-file -e "${CURRENT_BASELINE_COMMIT}^{commit}"
+
+          git show "$HISTORICAL_V2_COMMIT:.github/workflows/ticwatch-max-lts-220-final-build-v2.yml" > /tmp/v2.yml
+          git show "$FINAL_KNOWN_GOOD_REPO_COMMIT:.github/workflows/ticwatch-max-lts-220-final-build-v5kmi-fixed.yml" > /tmp/final.yml
+          git show "$CURRENT_BASELINE_COMMIT:.github/workflows/ticwatch-kexec-arm64-reloc-internal-probe.yml" > /tmp/current.yml
+
+          test -s /tmp/v2.yml
+          test -s /tmp/final.yml
+          test -s /tmp/current.yml
+
+          cp "$KMI_CRC_MAP_REL" /tmp/ticwatch-stock379-kmi-crc-overrides-337.tsv
+
+          python3 - /tmp/current.yml "$CURRENT_BASELINE_SOURCE_DATE_EPOCH" "$CURRENT_BASELINE_BUILD_TIMESTAMP" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); epoch=sys.argv[2]; stamp=sys.argv[3]
+          s=p.read_text()
+          old='export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"'
+          new=f'export SOURCE_DATE_EPOCH="{epoch}"\n          export KBUILD_BUILD_TIMESTAMP="{stamp}"'
+          if s.count(old) != 1:
+              raise SystemExit(f'current baseline SOURCE_DATE_EPOCH anchor mismatch: {s.count(old)}')
+          p.write_text(s.replace(old,new,1))
+          PY
+
+          git checkout --detach "$HISTORICAL_V2_COMMIT"
+          mkdir -p "$(dirname "$KMI_CRC_MAP_REL")"
+          cp /tmp/ticwatch-stock379-kmi-crc-overrides-337.tsv "$KMI_CRC_MAP_REL"
+
+          cat > /tmp/run-step.py <<'PY'
+          from pathlib import Path
+          import subprocess, sys
+
+          workflow, step = sys.argv[1], sys.argv[2]
+          lines = Path(workflow).read_text().splitlines()
+          marker = f"      - name: {step}"
+          matches = [i for i, line in enumerate(lines) if line == marker]
+          if len(matches) != 1:
+              raise SystemExit(f"step anchor mismatch: {step}: {len(matches)}")
+
+          i = matches[0] + 1
+          run_i = None
+          while i < len(lines):
+              line = lines[i]
+              if line.startswith("      - name: ") or line.startswith("      - uses: "):
+                  break
+              if line.startswith("        run:"):
+                  run_i = i
+                  break
+              i += 1
+
+          if run_i is None:
+              raise SystemExit(f"run directive not found inside step: {step}")
+
+          stripped = lines[run_i].strip()
+          if stripped == "run: |":
+              i = run_i + 1
+              out = []
+              while i < len(lines):
+                  line = lines[i]
+                  if line.startswith("      - name: ") or line.startswith("      - uses: "):
+                      break
+                  if line and not line.startswith("          "):
+                      raise SystemExit(f"unexpected indentation in {step}: {line!r}")
+                  out.append(line[10:] if line else "")
+                  i += 1
+              script = "\n".join(out) + "\n"
+          elif stripped.startswith("run: "):
+              script = stripped[len("run: "):] + "\n"
+          else:
+              raise SystemExit(f"unsupported run syntax in {step}: {stripped!r}")
+
+          subprocess.run(["bash", "-Eeuo", "pipefail", "-c", script], check=True)
+          PY
+
+          grep -Fq "      - name: Dependencies and known-good bundle" /tmp/v2.yml
+          echo "HISTORICAL_RECIPES_PINNED=PASS"
+
+      - name: Dependencies and known-good bundle
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/v2.yml "Dependencies and known-good bundle"
+
+      - name: Install exact LLVM 20.1.0
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/v2.yml "Install exact LLVM 20.1.0"
+
+      - name: Materialize exact proven uplift engine
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/v2.yml "Materialize exact proven uplift engine"
+
+      - name: Reproduce verified source uplift to 5.15.220
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/v2.yml "Reproduce verified source uplift to 5.15.220"
+
+      - name: Resume proven KSU Next and SuSFS integration
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/v2.yml "Resume proven KSU Next and SuSFS integration"
+
+      - name: Apply proven KSU SuSFS Seccomp and hardened SafeKey fixes
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/v2.yml "Apply proven KSU SuSFS Seccomp and hardened SafeKey fixes"
+
+      - name: Keep proven Slatecom PM fix
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/v2.yml "Keep proven Slatecom PM fix"
+
+      - name: Configure Wear7-ready final kernel
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/v2.yml "Configure Wear7-ready final kernel"
+
+      - name: Reproduce exact installed 976c KEXEC baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf current-baseline
+          mkdir -p current-baseline
+          gh run download "$CURRENT_BASELINE_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "$CURRENT_BASELINE_ARTIFACT" --dir current-baseline
+
+          test -s current-baseline/Image
+          test -s current-baseline/audit/probe-source-delta.patch
+          echo "$CURRENT_BASELINE_IMAGE_SHA256  current-baseline/Image" | sha256sum -c -
+          echo "$CURRENT_BASELINE_SOURCE_DELTA_SHA256  current-baseline/audit/probe-source-delta.patch" | sha256sum -c -
+          echo "$CURRENT_BASELINE_FINAL_CONFIG_SHA256  current-baseline/audit/final.config" | sha256sum -c -
+          echo "$CURRENT_BASELINE_MODULE_SYMVERS_SHA256  current-baseline/audit/Module.symvers" | sha256sum -c -
+
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          git -C "$K" apply --check "$GITHUB_WORKSPACE/current-baseline/audit/probe-source-delta.patch"
+          git -C "$K" apply "$GITHUB_WORKSPACE/current-baseline/audit/probe-source-delta.patch"
+
+          grep -Fq 'TWKEXEC_PROBE: ENTRY BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'TWKEXEC_PROBE: ENTRY RETURNED' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'TWKEXEC_PROBE: TTBR1_SWITCH BEFORE' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'TWKEXEC_PROBE: TTBR1_SWITCH RETURNED' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'kernel_reloc(kimage, 0);' "$K/arch/arm64/kernel/machine_kexec.c"
+          grep -Fq 'Lticwatch_probe_ttbr1' "$K/arch/arm64/kernel/relocate_kernel.S"
+          grep -Fq 'TWKEXEC: GENI UART platform shutdown skipped' "$K/drivers/base/platform.c"
+          grep -Fq 'TWKEXEC: MMC0 card shutdown skipped' "$K/drivers/mmc/core/bus.c"
+          grep -Fq 'TWKEXEC: BT541 I2C shutdown skipped' "$K/drivers/i2c/i2c-core-base.c"
+          grep -Fq 'TWKEXEC_PATH: MACHINE_KEXEC BEFORE' "$K/kernel/kexec_core.c"
+          grep -Fq 'del_timer_sync(&uap->dmarx.timer);' "$K/drivers/tty/serial/amba-pl011.c"
+          ! grep -Fq 'timer_delete_sync(&uap->dmarx.timer);' "$K/drivers/tty/serial/amba-pl011.c"
+
+          echo "$CURRENT_BASELINE_FINAL_CONFIG_SHA256  final.config" | sha256sum -c -
+          echo "CURRENT_INSTALLED_976C_SOURCE_GATE=PASS"
+
+      - name: Install targeted genksyms CRC preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F="$GITHUB_WORKSPACE/.ticwatch-preflight/common/scripts/genksyms/genksyms.c"
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+
+          p=Path(sys.argv[1]); s=p.read_text()
+          marker='static unsigned long ticwatch_kmi_crc_override('
+          call='\t\tcrc = ticwatch_kmi_crc_override(name, crc);\n'
+          helper='''static unsigned long ticwatch_kmi_crc_override(const char *name, unsigned long crc)\n{\n    const char *path = getenv("TICWATCH_KMI_CRC_MAP");\n    FILE *f;\n    char line[512];\n    char sym[256];\n    unsigned long expected;\n\n    if (!path || !*path)\n        return crc;\n    f = fopen(path, "r");\n    if (!f) {\n        perror(path);\n        exit(2);\n    }\n    while (fgets(line, sizeof(line), f)) {\n        if (line[0] == '#' || line[0] == '\\n')\n            continue;\n        if (sscanf(line, "%255s %lx", sym, &expected) == 2 && strcmp(sym, name) == 0) {\n            fclose(f);\n            return expected;\n        }\n    }\n    fclose(f);\n    return crc;\n}\n\n'''
+
+          state=(s.count(marker), s.count(call))
+          if state == (0, 0):
+              print('KMI_PRESTATE=CLEAN')
+          elif state == (1, 1):
+              if s.count(helper) != 1:
+                  raise SystemExit('KMI preexisting helper differs from historical helper')
+              s=s.replace(helper,'',1)
+              s=s.replace(call,'',1)
+              if s.count(marker) or s.count(call):
+                  raise SystemExit('KMI normalization failed')
+              p.write_text(s)
+              print('KMI_PRESTATE=NORMALIZED_TO_HISTORICAL_INPUT')
+          else:
+              raise SystemExit(f'KMI prestate ambiguous={state}')
+          PY
+
+          python3 /tmp/run-step.py /tmp/final.yml "Install targeted genksyms CRC preservation"
+          grep -Fq 'ticwatch_kmi_crc_override' "$F"
+          [ "$(grep -c 'static unsigned long ticwatch_kmi_crc_override' "$F")" -eq 1 ]
+          [ "$(grep -c 'crc = ticwatch_kmi_crc_override(name, crc);' "$F")" -eq 1 ]
+          echo "KMI_CRC_OVERRIDE_FINAL_COUNT=PASS"
+
+      - name: Compile exact installed 976c baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 /tmp/run-step.py /tmp/current.yml "Compile internal-probe kernel"
+
+          mkdir -p baseline-diagnostic
+          cp Image baseline-diagnostic/rebuilt-Image
+          cp current-baseline/Image baseline-diagnostic/historical-976c-Image
+          cp final.config Module.symvers System.map kernelrelease.txt baseline-diagnostic/
+          cp current-baseline/audit/final.config baseline-diagnostic/historical-final.config
+          cp current-baseline/audit/Module.symvers baseline-diagnostic/historical-Module.symvers
+          cp current-baseline/audit/System.map baseline-diagnostic/historical-System.map
+
+          echo "$CURRENT_BASELINE_FINAL_CONFIG_SHA256  final.config" | sha256sum -c -
+          echo "$CURRENT_BASELINE_MODULE_SYMVERS_SHA256  Module.symvers" | sha256sum -c -
+          grep -Fqx '5.15.220-Xinran_StarBai-Test+' kernelrelease.txt
+
+          python3 - \
+            current-baseline/Image Image \
+            current-baseline/audit/System.map System.map \
+            current-baseline/audit/final.config final.config \
+            current-baseline/audit/Module.symvers Module.symvers \
+            "$CURRENT_BASELINE_BUILD_TIMESTAMP" \
+            <<'PY' | tee baseline-equivalence.txt
+          from pathlib import Path
+          import hashlib, io, lzma, sys, tarfile
+
+          old_img_p,new_img_p,old_map_p,new_map_p,old_cfg_p,new_cfg_p,old_sym_p,new_sym_p,stamp = sys.argv[1:]
+          old_img=Path(old_img_p).read_bytes()
+          new_img=Path(new_img_p).read_bytes()
+
+          def sha(b): return hashlib.sha256(b).hexdigest()
+
+          print("HISTORICAL_IMAGE_SHA256="+sha(old_img))
+          print("REBUILT_IMAGE_SHA256="+sha(new_img))
+          if len(old_img) != len(new_img):
+              raise SystemExit(f"IMAGE_SIZE_MISMATCH old={len(old_img)} new={len(new_img)}")
+          print(f"IMAGE_SIZE_MATCH={len(old_img)}")
+
+          if Path(old_cfg_p).read_bytes() != Path(new_cfg_p).read_bytes():
+              raise SystemExit("CONFIG_NOT_IDENTICAL")
+          if Path(old_sym_p).read_bytes() != Path(new_sym_p).read_bytes():
+              raise SystemExit("MODULE_SYMVERS_NOT_IDENTICAL")
+          print("CONFIG_EXACT=PASS")
+          print("MODULE_SYMVERS_EXACT=PASS")
+
+          def parse_map(path):
+              rows=[]
+              for line in Path(path).read_text(errors="replace").splitlines():
+                  f=line.split()
+                  if len(f) < 3:
+                      continue
+                  try: addr=int(f[0],16)
+                  except ValueError: continue
+                  rows.append((addr,f[1],f[2]))
+              return rows
+
+          oldm=parse_map(old_map_p); newm=parse_map(new_map_p)
+          if len(oldm) != len(newm):
+              raise SystemExit(f"SYSTEM_MAP_COUNT_MISMATCH {len(oldm)} != {len(newm)}")
+
+          old_names=[(t,n) for _,t,n in oldm]
+          new_names=[(t,n) for _,t,n in newm]
+          if old_names != new_names:
+              raise SystemExit("SYSTEM_MAP_SYMBOL_SEQUENCE_OR_TYPE_MISMATCH")
+
+          od={n:a for a,_,n in oldm}
+          nd={n:a for a,_,n in newm}
+          for req in ("_text","kernel_headers_data","kernel_headers_data_end"):
+              if req not in od or req not in nd:
+                  raise SystemExit(f"MISSING_REQUIRED_SYMBOL={req}")
+
+          if od["_text"] != nd["_text"]:
+              raise SystemExit("TEXT_BASE_CHANGED")
+          if od["kernel_headers_data"] != nd["kernel_headers_data"]:
+              raise SystemExit("KHEADERS_START_CHANGED")
+
+          idx={name: next(i for i,(_,_,n) in enumerate(oldm) if n==name)
+               for name in ("kernel_headers_data_end","udivslot_table","__end_rodata","__init_begin")}
+          if not (idx["kernel_headers_data_end"] < idx["udivslot_table"] < idx["__end_rodata"] < idx["__init_begin"]):
+              raise SystemExit("SYSTEM_MAP_BOUNDARY_ORDER_BAD")
+
+          shift_kh = nd["kernel_headers_data_end"] - od["kernel_headers_data_end"]
+          shift_mid = nd["udivslot_table"] - od["udivslot_table"]
+          shift_ro = nd["__end_rodata"] - od["__end_rodata"]
+
+          expected_shifts = {
+              "KHEADERS_END": -3576,
+              "MID_RODATA": -3584,
+              "END_RODATA": -4096,
+          }
+          actual_shifts = {
+              "KHEADERS_END": shift_kh,
+              "MID_RODATA": shift_mid,
+              "END_RODATA": shift_ro,
+          }
+          if actual_shifts != expected_shifts:
+              raise SystemExit(f"SYSTEM_MAP_EXPECTED_SHIFT_MISMATCH actual={actual_shifts} expected={expected_shifts}")
+
+          bad=[]
+          counts={}
+          ranges=[
+              (0, idx["kernel_headers_data_end"], 0, "PRE_KHEADERS_END"),
+              (idx["kernel_headers_data_end"], idx["udivslot_table"], shift_kh, "KHEADERS_TAIL"),
+              (idx["udivslot_table"], idx["__end_rodata"], shift_mid, "MID_RODATA"),
+              (idx["__end_rodata"], idx["__init_begin"], shift_ro, "RODATA_PAGE_ALIGN"),
+              (idx["__init_begin"], len(oldm), 0, "POST_INIT_BEGIN"),
+          ]
+          for lo,hi,shift,label in ranges:
+              n=0
+              for i in range(lo,hi):
+                  oa,ot,on=oldm[i]; na,nt,nn=newm[i]
+                  if na-oa != shift:
+                      bad.append((label,on,oa,na,shift))
+                      if len(bad)>=20: break
+                  n+=1
+              counts[label]=n
+              if bad: break
+          if bad:
+              raise SystemExit("SYSTEM_MAP_NON_ALLOWED_LAYOUT_DELTA="+repr(bad))
+
+          print(f"SYSTEM_MAP_SYMBOLS={len(oldm)}")
+          print(f"KHEADERS_LAYOUT_SHIFT={shift_kh}")
+          print(f"MID_RODATA_LAYOUT_SHIFT={shift_mid}")
+          print(f"END_RODATA_LAYOUT_SHIFT={shift_ro}")
+          for k,v in counts.items():
+              print(f"SYSTEM_MAP_{k}_COUNT={v}")
+          print("SYSTEM_MAP_EQUIVALENCE=PASS")
+
+          base=od["_text"]
+          def kheaders_blob(img, mp):
+              a=mp["kernel_headers_data"]-base
+              b=mp["kernel_headers_data_end"]-base
+              blob=img[a:b]
+              if not blob.startswith(b"\xfd7zXZ\x00"):
+                  raise SystemExit("IKHEADERS_NOT_XZ")
+              return blob
+
+          old_blob=kheaders_blob(old_img,od)
+          new_blob=kheaders_blob(new_img,nd)
+          print(f"IKHEADERS_OLD_SIZE={len(old_blob)}")
+          print(f"IKHEADERS_NEW_SIZE={len(new_blob)}")
+          print(f"IKHEADERS_SIZE_DELTA={len(new_blob)-len(old_blob)}")
+          if len(new_blob)-len(old_blob) != shift_kh:
+              raise SystemExit(f"IKHEADERS_SIZE_SHIFT_MISMATCH blob_delta={len(new_blob)-len(old_blob)} map_shift={shift_kh}")
+
+          def manifest(blob):
+              dec=lzma.decompress(blob)
+              tf=tarfile.open(fileobj=io.BytesIO(dec),mode="r:*")
+              out=[]
+              for m in tf.getmembers():
+                  data=b""
+                  if m.isfile():
+                      fp=tf.extractfile(m)
+                      data=fp.read() if fp else b""
+                  out.append((m.name,m.size,m.mode,m.uid,m.gid,m.type,
+                              hashlib.sha256(data).hexdigest() if m.isfile() else ""))
+              return out
+
+          om=manifest(old_blob); nm=manifest(new_blob)
+          if om != nm:
+              for i,(a,b) in enumerate(zip(om,nm)):
+                  if a!=b:
+                      raise SystemExit(f"IKHEADERS_LOGICAL_MISMATCH index={i} old={a} new={b}")
+              raise SystemExit(f"IKHEADERS_MEMBER_COUNT_MISMATCH old={len(om)} new={len(nm)}")
+
+          print(f"IKHEADERS_MEMBERS={len(om)}")
+          print("IKHEADERS_LOGICAL_CONTENT=PASS")
+
+          old_strings=old_img.decode("latin1",errors="ignore")
+          new_strings=new_img.decode("latin1",errors="ignore")
+          wanted=f"#0 SMP PREEMPT {stamp}"
+          if wanted not in new_strings:
+              raise SystemExit("REBUILT_UTS_TIMESTAMP_NOT_PINNED")
+          print("REBUILT_UTS_TIMESTAMP_PINNED=PASS")
+
+          if old_img == new_img:
+              print("BYTE_IDENTITY=PASS")
+          else:
+              print("BYTE_IDENTITY=NOT_REQUIRED_IKHEADERS_MTIME_VARIANCE")
+
+          print("CURRENT_INSTALLED_976C_STRUCTURAL_EQUIVALENCE=PASS")
+          PY
+
+          cp baseline-equivalence.txt baseline-diagnostic/
+          cp Image baseline-diagnostic/baseline-equivalent-Image
+          cp System.map baseline-diagnostic/baseline-equivalent-System.map
+          echo "CURRENT_INSTALLED_976C_BASELINE_GATE=PASS"
+
+      - name: Upload 976c baseline diagnostic on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-976c-Baseline-Mismatch-Diagnostic
+          path: baseline-diagnostic/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Patch AUTOINIT static KSU init RC
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F="$GITHUB_WORKSPACE/.ticwatch-preflight/common/KernelSU-Next/kernel/runtime/ksud_integration.c"
+          test -s "$F"
+          cp "$F" /tmp/ksud_integration.before.c
+
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+
+          p=Path(sys.argv[1])
+          s=p.read_text()
+
+          old=r'''static const char KERNEL_SU_RC[] =
+              "\n"
+              "on post-fs-data\n"
+              "    start logd\n"
+          '''
+          new=r'''static const char KERNEL_SU_RC[] =
+              "\n"
+              "on post-fs-data\n"
+              "    exec u:r:" KERNEL_SU_DOMAIN ":s0 root -- /system/bin/sh -c \"S=/data/adb/ticwatch-autoinit/source; P=/data/adb/ticwatch-autoinit/payload.tar; D=/data/local/tmp/boot_KSU_AUTOINIT_5.15.220.img; if [ ! -f $S/AUTOINIT_MAGIC ]; then mkdir -p $S; [ -r $D ] || D=/dev/block/by-name/boot; [ -r $D ] || D=/dev/block/mmcblk0p6; /system/bin/dd if=$D of=$P bs=4096 skip=20480 count=4096 2>/dev/null; /system/bin/toybox tar -xf $P -C $S 2>/dev/null; rm -f $P; fi; [ -f $S/AUTOINIT_MAGIC ] && /system/bin/sh $S/bootstrap.sh\"\n"
+              "    start logd\n"
+          '''
+
+          if s.count(old) != 1:
+              raise SystemExit(f"AUTOINIT_RC_ANCHOR_MISMATCH count={s.count(old)}")
+
+          s=s.replace(old,new,1)
+          p.write_text(s)
+
+          marker='AUTOINIT_MAGIC'
+          if s.count(marker) != 2:
+              raise SystemExit(f"AUTOINIT_MARKER_COUNT_BAD count={s.count(marker)}")
+          if '/oem/ticwatch-selfheal/bootstrap.sh' in s:
+              raise SystemExit("AUTOINIT_STILL_DEPENDS_ON_OEM")
+
+          print("AUTOINIT_RC_PATCH=PASS")
+          PY
+
+          grep -n -A12 -B2 'static const char KERNEL_SU_RC' "$F" | tee autoinit-rc-source.txt
+          grep -Fq 'AUTOINIT_MAGIC' autoinit-rc-source.txt
+          grep -Fq '/dev/block/by-name/boot' autoinit-rc-source.txt
+          grep -Fq 'boot_KSU_AUTOINIT_5.15.220.img' autoinit-rc-source.txt
+          ! grep -Fq '/oem/ticwatch-selfheal/bootstrap.sh' autoinit-rc-source.txt
+          diff -u /tmp/ksud_integration.before.c "$F" > autoinit-rc.patch || [ "$?" -eq 1 ]
+          test -s autoinit-rc.patch
+          echo "AUTOINIT_SOURCE_DELTA_GATE=PASS"
+
+      - name: Compile AUTOINIT kernel
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/current.yml "Compile internal-probe kernel"
+
+      - name: KMI and config hard gate
+        shell: bash
+        run: python3 /tmp/run-step.py /tmp/current.yml "Exact KMI and config hard gate"
+
+      - name: AUTOINIT binary and delta gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -s Image
+          test -s Module.symvers
+          test -s final.config
+
+          COUNT="$(grep -aoF 'AUTOINIT_MAGIC' Image | wc -l | tr -d ' ')"
+          [ "$COUNT" = "2" ] || { echo "BAD_AUTOINIT_MARKER_COUNT=$COUNT"; exit 70; }
+          grep -aFq '/dev/block/by-name/boot' Image
+          grep -aFq '/data/adb/ticwatch-autoinit/source' Image
+          grep -aFq 'boot_KSU_AUTOINIT_5.15.220.img' Image
+          ! grep -aFq '/oem/ticwatch-selfheal/bootstrap.sh' Image
+
+          grep -Fqx 'CONFIG_KSU=y' final.config
+          grep -Fqx 'CONFIG_KSU_SUSFS=y' final.config
+          grep -Fqx 'CONFIG_MODVERSIONS=y' final.config
+          grep -Fqx 'CONFIG_SECCOMP=y' final.config
+          grep -Fqx 'CONFIG_SECCOMP_FILTER=y' final.config
+          echo "$CURRENT_BASELINE_FINAL_CONFIG_SHA256  final.config" | sha256sum -c -
+          echo "$CURRENT_BASELINE_MODULE_SYMVERS_SHA256  Module.symvers" | sha256sum -c -
+          test -s baseline-equivalence.txt
+          grep -Fqx 'CURRENT_INSTALLED_976C_STRUCTURAL_EQUIVALENCE=PASS' baseline-equivalence.txt
+          strings -a Image | grep -Fq "#0 SMP PREEMPT $CURRENT_BASELINE_BUILD_TIMESTAMP"
+
+          echo "AUTOINIT_MARKER_COUNT=$COUNT"
+          echo "CURRENT_INSTALLED_976C_STRUCTURAL_EQUIVALENCE=PASS"
+          echo "CURRENT_INSTALLED_976C_KMI_CONFIG_GATE=PASS"
+          sha256sum Image final.config Module.symvers System.map kernelrelease.txt autoinit-rc.patch autoinit-rc-source.txt kmi-crc-audit.txt > AUTOINIT_SHA256SUMS.txt
+          echo "AUTOINIT_BINARY_GATE=PASS"
+
+      - name: Package AUTOINIT audit artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p bundle/audit
+          cp Image bundle/
+          cp final.config Module.symvers System.map kernelrelease.txt bundle/audit/
+          cp autoinit-rc.patch autoinit-rc-source.txt kmi-crc-audit.txt AUTOINIT_SHA256SUMS.txt bundle/audit/
+          cp baseline-equivalence.txt bundle/audit/
+          cp current-baseline/audit/probe-source-delta.patch bundle/audit/current-baseline-probe-source-delta.patch
+          cp "$KMI_CRC_MAP_REL" bundle/audit/
+
+          cat > bundle/README_AUTOINIT.txt <<EOF
+          DEVICE=TicWatch Pro 5 Enduro (dace)
+          BASE_REPO_COMMIT=$CURRENT_BASELINE_COMMIT
+          BASE_INSTALLED_IMAGE_SHA256=$CURRENT_BASELINE_IMAGE_SHA256
+          BASE_SOURCE_DELTA_SHA256=$CURRENT_BASELINE_SOURCE_DELTA_SHA256
+          KERNEL_RELEASE=$(cat kernelrelease.txt)
+          CHANGE=one static KernelSU init.rc AUTOINIT extractor before normal ksud post-fs-data
+          SOURCE_PRIMARY=/data/adb/ticwatch-autoinit/source
+          TEST_IMAGE_SOURCE=/data/local/tmp/boot_KSU_AUTOINIT_5.15.220.img
+          PERSISTENT_BOOT_SOURCE=/dev/block/by-name/boot
+          BOOT_PAYLOAD_OFFSET=83886080
+          BOOT_PAYLOAD_RESERVED_SIZE=16777216
+          OEM_PAYLOAD_REQUIRED=NO
+          VENDOR_BOOT_CHANGE=NONE
+          INIT_BOOT_CHANGE=NONE
+          SUPER_CHANGE=NONE
+          UID2000_RESCUE_BYPASS=NO
+          STOCK379_KMI_TARGETED_GATE=PASS
+          CURRENT_INSTALLED_976C_SOURCE_GATE=PASS
+          CURRENT_INSTALLED_976C_STRUCTURAL_EQUIVALENCE=PASS
+          CURRENT_INSTALLED_976C_KMI_CONFIG_GATE=PASS
+          FLASH_PERFORMED=NO
+          TEST_PLAN=REPACK_KNOWN_GOOD_BOOT_WITH_TAIL_PAYLOAD_AND_FASTBOOT_BOOT_TEMPORARILY_FIRST
+          EOF
+
+          (cd bundle && sha256sum Image README_AUTOINIT.txt audit/* > SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
+
+      - name: Upload AUTOINIT artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-AUTOINIT-BOOTPAYLOAD-5.15.220-CURRENT976C
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 90
