@@ -463,12 +463,7 @@ jobs:
           h=sys.argv[3]
           s=p.read_text()
           old='return check_v2_signature(path, EXPECTED_MANAGER_SIZE, EXPECTED_MANAGER_HASH);'
-          new=f'''if (check_v2_signature(path, EXPECTED_MANAGER_SIZE, EXPECTED_MANAGER_HASH)) {{
-        return true;
-    }}
-
-    /* Stable TicWatch Manager signing certificate for future ARM32 updates. */
-    return check_v2_signature(path, {size}u, "{h}");'''
+          new=f'if (check_v2_signature(path, EXPECTED_MANAGER_SIZE, EXPECTED_MANAGER_HASH)) {{\n        return true;\n    }}\n\n    /* Stable TicWatch Manager signing certificate for future ARM32 updates. */\n    return check_v2_signature(path, {size}u, "{h}");'
           if s.count(old) != 1:
               raise SystemExit(f'DUAL_MANAGER_ANCHOR_MISMATCH count={s.count(old)}')
           s=s.replace(old,new,1)
