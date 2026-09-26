@@ -41,6 +41,7 @@ env:
   HISTORICAL_V2_COMMIT: 'be11c389636d0d7fadd9c258e1895b42c8b85a2d'
   FINAL_KNOWN_GOOD_REPO_COMMIT: 'c0c32179666db0f318ab7f9d14ed7e540696c907'
   CURRENT_BASELINE_COMMIT: 'b8e04cbb8962990296fbefb8bbffb4155ab3d118'
+  AUTOINIT_RECIPE_COMMIT: '49085727295a402d1d6a89438b14403fb7ce7987'
   CURRENT_BASELINE_RUN_ID: '34957108624'
   CURRENT_BASELINE_ARTIFACT: 'TicWatch-KEXEC-ARM64-RELOC-INTERNAL-PROBE-CANDIDATE'
   CURRENT_BASELINE_IMAGE_SHA256: '976c4b7a27679bf7afb1c62ed3937f5f8f494d09860ff2d8d04b6132889aed18'
@@ -68,10 +69,11 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          git fetch --no-tags origin "$HISTORICAL_V2_COMMIT" "$FINAL_KNOWN_GOOD_REPO_COMMIT" "$CURRENT_BASELINE_COMMIT"
+          git fetch --no-tags origin "$HISTORICAL_V2_COMMIT" "$FINAL_KNOWN_GOOD_REPO_COMMIT" "$CURRENT_BASELINE_COMMIT" "$AUTOINIT_RECIPE_COMMIT"
           git cat-file -e "${HISTORICAL_V2_COMMIT}^{commit}"
           git cat-file -e "${FINAL_KNOWN_GOOD_REPO_COMMIT}^{commit}"
           git cat-file -e "${CURRENT_BASELINE_COMMIT}^{commit}"
+          git cat-file -e "${AUTOINIT_RECIPE_COMMIT}^{commit}"
 
           git show "$HISTORICAL_V2_COMMIT:.github/workflows/ticwatch-max-lts-220-final-build-v2.yml" > /tmp/v2.yml
           git show "$FINAL_KNOWN_GOOD_REPO_COMMIT:.github/workflows/ticwatch-max-lts-220-final-build-v5kmi-fixed.yml" > /tmp/final.yml
@@ -82,8 +84,8 @@ jobs:
           test -s /tmp/current.yml
 
           cp "$KMI_CRC_MAP_REL" /tmp/ticwatch-stock379-kmi-crc-overrides-337.tsv
-          cp ticwatch-autoinit/integrate-ksun340-susfs230.sh /tmp/integrate-ksun340-susfs230.sh
-          cp ticwatch-autoinit/apply-ack-515220-timer-compat.sh /tmp/apply-ack-515220-timer-compat.sh
+          git show "$AUTOINIT_RECIPE_COMMIT:ticwatch-autoinit/integrate-ksun340-susfs230.sh" > /tmp/integrate-ksun340-susfs230.sh
+          git show "$AUTOINIT_RECIPE_COMMIT:ticwatch-autoinit/apply-ack-515220-timer-compat.sh" > /tmp/apply-ack-515220-timer-compat.sh
           chmod +x /tmp/integrate-ksun340-susfs230.sh /tmp/apply-ack-515220-timer-compat.sh
 
           python3 - /tmp/current.yml "$CURRENT_BASELINE_SOURCE_DATE_EPOCH" "$CURRENT_BASELINE_BUILD_TIMESTAMP" <<'PY'
