@@ -17,6 +17,7 @@ jobs:
     env:
       KSUN_SHA: '1a879d6a866f80b1fa1c1009a2ffa747873cbb5e'
       FIXED_PACKAGE: 'qpczqz.fbrkit.ricycb'
+      OFFICIAL_MANAGER_VERSION_CODE: '33294'
       NDK_VERSION: '27.3.13750724'
 
     steps:
@@ -163,6 +164,10 @@ jobs:
           from pathlib import Path
 
           p=Path('build.gradle.kts'); s=p.read_text()
+          a='val managerVersionCode by extra(getVersionCode())'
+          b=f'val managerVersionCode by extra({__import__("os").environ["OFFICIAL_MANAGER_VERSION_CODE"]})'
+          if s.count(a)!=1: raise SystemExit('managerVersionCode anchor changed')
+          s=s.replace(a,b,1)
           a='val managerVersionName by extra(getVersionName())'
           b=a+'\nval managerVersionNameSpoofed = "${managerVersionName}-spoofed"'
           if s.count(a)!=1: raise SystemExit('managerVersionName anchor changed')
@@ -196,6 +201,7 @@ jobs:
           PY
 
           grep -Fq 'namespace = "qpczqz.fbrkit.ricycb"' app/build.gradle.kts
+          grep -Fq "val managerVersionCode by extra(${OFFICIAL_MANAGER_VERSION_CODE})" build.gradle.kts
           grep -Fq 'abiFilters("armeabi-v7a")' build.gradle.kts
           grep -Fq 'abiFilters += listOf("armeabi-v7a")' build.gradle.kts
           {
