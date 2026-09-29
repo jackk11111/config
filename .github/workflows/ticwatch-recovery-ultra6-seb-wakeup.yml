@@ -39,9 +39,8 @@ jobs:
           set -Eeuo pipefail
           sudo apt-get update -y >/dev/null
           sudo apt-get install -y --no-install-recommends build-essential flex bison bc python3 python-is-python3 libssl-dev libelf-dev dwarves make curl wget git kmod binutils-aarch64-linux-gnu zstd xz-utils >/dev/null
-          mkdir -p "$GITHUB_WORKSPACE/aosp-clang"
-          curl -fL --retry 4 --retry-delay 3             "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android13-release/${AOSP_CLANG_REV}.tar.gz"             -o "$RUNNER_TEMP/${AOSP_CLANG_REV}.tar.gz"
-          tar -xzf "$RUNNER_TEMP/${AOSP_CLANG_REV}.tar.gz" -C "$GITHUB_WORKSPACE/aosp-clang"
+          git clone --depth=1 --single-branch --branch "$AOSP_CLANG_REV"             https://gitlab.com/Neebe3289/android_prebuilts_clang_host_linux-x86.git             "$GITHUB_WORKSPACE/aosp-clang"
+          rm -rf "$GITHUB_WORKSPACE/aosp-clang/.git"
           test -x "$GITHUB_WORKSPACE/aosp-clang/bin/clang"
           echo "AOSP_CLANG_PATH=$GITHUB_WORKSPACE/aosp-clang" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/aosp-clang/bin" >> "$GITHUB_PATH"
