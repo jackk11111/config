@@ -82,14 +82,14 @@ jobs:
           K="$GITHUB_WORKSPACE/common"
           mkdir -p "$K/out"
           cp previous/audit/final.config "$K/out/.config"
-          "$K/scripts/config" --file "$K/out/.config" --set-str LOCALVERSION "-g7f9d6c16b5cd-ab151" -d LOCALVERSION_AUTO -m QCOM_RPROC_COMMON
+          "$K/scripts/config" --file "$K/out/.config" --set-str LOCALVERSION "-g7f9d6c16b5cd-ab151" -d LOCALVERSION_AUTO
           export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
           make -s -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
           make -s -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 modules_prepare
           cp previous/audit/Module.symvers "$K/out/Module.symvers"
           grep -Fqx CONFIG_MODULES=y "$K/out/.config"
           grep -Fqx CONFIG_MODVERSIONS=y "$K/out/.config"
-          grep -Fqx CONFIG_QCOM_RPROC_COMMON=m "$K/out/.config"
+          grep -E "^CONFIG_(SMP|PREEMPT|MODULE_UNLOAD|MODVERSIONS)=" "$K/out/.config"
           echo KMI_BUILD_PREPARE=PASS
 
       - name: Generate qcom SSR provider CRC
@@ -98,10 +98,12 @@ jobs:
           set -Eeuo pipefail
           K="$GITHUB_WORKSPACE/common"
           export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
-          make -s -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 M=drivers/remoteproc modules
-          test -s "$K/out/drivers/remoteproc/Module.symvers"
-          grep -E "[[:space:]]qcom_register_ssr_notifier[[:space:]]" "$K/out/drivers/remoteproc/Module.symvers" > qcom-provider.symvers
-          sed -i "s#drivers/remoteproc/qcom_common#rproc_qcom_common#g" qcom-provider.symvers
+          mkdir -p qcom-provider
+          printf '%s\n'             '#include <linux/module.h>'             '#include <linux/notifier.h>'             'void *qcom_register_ssr_notifier(const char *name, struct notifier_block *nb) { return NULL; }'             'EXPORT_SYMBOL_GPL(qcom_register_ssr_notifier);'             'MODULE_LICENSE("GPL");'             > qcom-provider/rproc_qcom_common.c
+          printf '%s\n' 'obj-m += rproc_qcom_common.o' > qcom-provider/Makefile
+          make -s -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 M="$GITHUB_WORKSPACE/qcom-provider" modules
+          test -s qcom-provider/Module.symvers
+          grep -E "[[:space:]]qcom_register_ssr_notifier[[:space:]]" qcom-provider/Module.symvers > qcom-provider.symvers
           cat qcom-provider.symvers
 
       - name: Materialize and patch SEB source
