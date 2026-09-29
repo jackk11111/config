@@ -160,16 +160,7 @@ jobs:
           grep -q qcom_register_ssr_notifier out-artifact/modversions.txt
           grep -q seb_channel_init out-artifact/modversions.txt
           grep -q seb_rpmsg_tx_msg out-artifact/modversions.txt
-          grep -Eq '[[:space:]]__cfi_check
-
-      - name: Upload patched module
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: TicWatch-Recovery-ULTRA6-SEB-WAKEUP-CLANG14-CFI
-          path: out-artifact/
-          if-no-files-found: error
-          retention-days: 90
- out-artifact/all-symbols.txt
+          grep -Eq '[[:space:]]__cfi_check$' out-artifact/all-symbols.txt
           {
             echo CFI_MODULE_CHECK_SYMBOL=PASS
             if grep -q __cfi_slowpath_diag out-artifact/modversions.txt; then
@@ -183,7 +174,7 @@ jobs:
       - name: Upload patched module
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: TicWatch-Recovery-ULTRA6-SEB-WAKEUP-CLANG14
+          name: TicWatch-Recovery-ULTRA6-SEB-WAKEUP-CLANG14-CFI
           path: out-artifact/
           if-no-files-found: error
           retention-days: 90
