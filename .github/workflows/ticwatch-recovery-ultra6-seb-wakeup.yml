@@ -38,7 +38,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           sudo apt-get update -y >/dev/null
-          sudo apt-get install -y --no-install-recommends build-essential flex bison bc python3 python-is-python3 libssl-dev libelf-dev dwarves make curl wget git kmod binutils-aarch64-linux-gnu zstd xz-utils >/dev/null
+          sudo apt-get install -y --no-install-recommends build-essential flex bison bc python3 python-is-python3 libssl-dev libelf-dev dwarves make curl wget git kmod binutils-aarch64-linux-gnu zstd xz-utils clang lld llvm >/dev/null
 
       - name: Restore known-good TicWatch KMI material
         shell: bash
@@ -64,16 +64,12 @@ jobs:
           test "$(make -s -C common kernelversion)" = 5.15.211
           echo K211_SOURCE_RECONSTRUCT=PASS
 
-      - name: Install LLVM
+      - name: Toolchain info
         shell: bash
         run: |
           set -Eeuo pipefail
-          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/$LLVM_ARCHIVE"
-          tar -xJf "$LLVM_ARCHIVE"
-          mv "LLVM-$LLVM_VERSION-Linux-X64" "$GITHUB_WORKSPACE/llvm"
-          rm -f "$LLVM_ARCHIVE"
-          echo "$GITHUB_WORKSPACE/llvm/bin" >> "$GITHUB_PATH"
-          "$GITHUB_WORKSPACE/llvm/bin/clang" --version | head -n 1
+          clang --version | head -n 1
+          llvm-nm --version | head -n 1
 
       - name: Prepare stock-compatible KMI build
         shell: bash
@@ -83,7 +79,6 @@ jobs:
           mkdir -p "$K/out"
           cp previous/audit/final.config "$K/out/.config"
           "$K/scripts/config" --file "$K/out/.config" --set-str LOCALVERSION "-g7f9d6c16b5cd-ab151" -d LOCALVERSION_AUTO
-          export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
           make -s -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
           make -s -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 modules_prepare
           cp previous/audit/Module.symvers "$K/out/Module.symvers"
@@ -97,7 +92,6 @@ jobs:
         run: |
           set -Eeuo pipefail
           K="$GITHUB_WORKSPACE/common"
-          export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
           mkdir -p qcom-provider
           printf '%s\n'             '#include <linux/module.h>'             '#include <linux/notifier.h>'             'void *qcom_register_ssr_notifier(const char *name, struct notifier_block *nb) { return NULL; }'             'EXPORT_SYMBOL_GPL(qcom_register_ssr_notifier);'             'MODULE_LICENSE("GPL");'             > qcom-provider/rproc_qcom_common.c
           printf '%s\n' 'obj-m += rproc_qcom_common.o' > qcom-provider/Makefile
@@ -122,7 +116,7 @@ jobs:
           diff -u seb/slate_events_bridge.ORIGINAL.c seb/slate_events_bridge.c > seb-wakeup.patch || true
           grep -Fq "wake_up(&dev->link_state_wait);" seb/slate_events_bridge.c
           test "$(grep -Fc "wake_up(&dev->link_state_wait);" seb/slate_events_bridge.c)" -eq 2
-          printf '%s\n' "obj-m += slate_events_bridge_rpmsg.o" "obj-m += slate_events_bridge.o" 'ccflags-y += -I$(src)/include' > seb/Makefile
+          printf '%s\n' "obj-m += slate_events_bridge_rpmsg.o" "obj-m += slate_events_bridge.o" 'ccflags-y += -I$(src)/include' 'ccflags-y += -DCONFIG_QCOM_RPROC_COMMON=1' > seb/Makefile
           echo SEB_SOURCE_PATCH=PASS
 
       - name: Compile patched SEB
@@ -130,7 +124,6 @@ jobs:
         run: |
           set -Eeuo pipefail
           K="$GITHUB_WORKSPACE/common"
-          export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
           make -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 M="$GITHUB_WORKSPACE/seb" KBUILD_EXTRA_SYMBOLS="$GITHUB_WORKSPACE/qcom-provider.symvers" KBUILD_MODPOST_WARN=1 modules 2>&1 | tee seb-build.log
           test -s seb/slate_events_bridge.ko
           test -s seb/slate_events_bridge_rpmsg.ko
@@ -146,8 +139,8 @@ jobs:
           cp seb-wakeup.patch seb-build.log qcom-provider.symvers out-artifact/
           modinfo out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko > out-artifact/modinfo.txt
           modprobe --dump-modversions out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | sort > out-artifact/modversions.txt
-          "$GITHUB_WORKSPACE/llvm/bin/llvm-nm" -u out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | sort -u > out-artifact/undefined-symbols.txt
-          "$GITHUB_WORKSPACE/llvm/bin/llvm-objdump" -dr out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko > out-artifact/disassembly.txt
+          llvm-nm -u out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | sort -u > out-artifact/undefined-symbols.txt
+          llvm-objdump -dr out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko > out-artifact/disassembly.txt
           sha256sum out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko > out-artifact/SHA256SUMS
           python3 .github/scripts/ultra6_compare_kmi.py previous/audit/Module.symvers out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | tee out-artifact/KMI_COMPARE.txt
           modinfo -F vermagic out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | grep -Fq "$TARGET_VERMAGIC_RELEASE SMP preempt mod_unload modversions aarch64"
