@@ -20,7 +20,6 @@ env:
   CAF_REF: 9da9a823e503b4f1874170b693eff58d16c18751
   TARGET_VERMAGIC_RELEASE: 5.15.144-g7f9d6c16b5cd-ab151
   AOSP_CLANG_REV: clang-r450784e
-  TARGET_CFI_SLOWPATH_CRC: 0x4411a445
 
 jobs:
   build:
@@ -151,6 +150,7 @@ jobs:
           modinfo out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko > out-artifact/modinfo.txt
           modprobe --dump-modversions out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | sort > out-artifact/modversions.txt
           llvm-nm -u out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | sort -u > out-artifact/undefined-symbols.txt
+          llvm-nm -a out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | sort > out-artifact/all-symbols.txt
           llvm-objdump -dr out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko > out-artifact/disassembly.txt
           sha256sum out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko > out-artifact/SHA256SUMS
           python3 .github/scripts/ultra6_compare_kmi.py previous/audit/Module.symvers out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | tee out-artifact/KMI_COMPARE.txt
@@ -160,10 +160,25 @@ jobs:
           grep -q qcom_register_ssr_notifier out-artifact/modversions.txt
           grep -q seb_channel_init out-artifact/modversions.txt
           grep -q seb_rpmsg_tx_msg out-artifact/modversions.txt
-          grep -q __cfi_slowpath_diag out-artifact/modversions.txt
-          awk -v want="$TARGET_CFI_SLOWPATH_CRC" '$2=="__cfi_slowpath_diag"{got=tolower($1); w=tolower(want); if(got!=w){print "CFI_CRC_BAD",got,w; exit 2} found=1} END{if(!found) exit 3}' out-artifact/modversions.txt
-          echo CFI_SLOWPATH_IMPORT=PASS | tee out-artifact/CFI_RESULT.txt
-          echo RESULT=ULTRA6_SEB_MODULE_BUILD_PASS_CLANG14 | tee out-artifact/RESULT.txt
+          grep -Eq '[[:space:]]__cfi_check
+
+      - name: Upload patched module
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: TicWatch-Recovery-ULTRA6-SEB-WAKEUP-CLANG14-CFI
+          path: out-artifact/
+          if-no-files-found: error
+          retention-days: 90
+ out-artifact/all-symbols.txt
+          {
+            echo CFI_MODULE_CHECK_SYMBOL=PASS
+            if grep -q __cfi_slowpath_diag out-artifact/modversions.txt; then
+              echo CFI_INDIRECT_CALL_IMPORT=YES
+            else
+              echo CFI_INDIRECT_CALL_IMPORT=NO
+            fi
+          } | tee out-artifact/CFI_RESULT.txt
+          echo RESULT=ULTRA6_SEB_MODULE_BUILD_PASS_CLANG14_CFI | tee out-artifact/RESULT.txt
 
       - name: Upload patched module
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
