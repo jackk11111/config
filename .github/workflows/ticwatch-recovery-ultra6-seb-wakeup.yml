@@ -1,11 +1,11 @@
-name: TicWatch Recovery ULTRA6 SEB Wakeup Module
+name: TicWatch Recovery ULTRA6 SEB Wakeup
 
 on:
   push:
     branches:
       - ticwatch-recovery-ultra6-seb-wakeup-20260929
     paths:
-      - '.github/workflows/ticwatch-recovery-ultra6-seb-wakeup.yml'
+      - .github/workflows/ticwatch-recovery-ultra6-seb-wakeup.yml
   workflow_dispatch:
 
 permissions:
@@ -14,21 +14,21 @@ permissions:
 
 env:
   GH_TOKEN: ${{ github.token }}
-  PREVIOUS_RUN_ID: '34655933953'
-  PREVIOUS_ARTIFACT: 'TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter'
-  BASE_KERNEL_SHA: '3929c55fbc7559af6df290d2c0f66dc551af161a'
-  CAF_REF: '9da9a823e503b4f1874170b693eff58d16c18751'
-  TARGET_VERMAGIC_RELEASE: '5.15.144-g7f9d6c16b5cd-ab151'
-  LLVM_VERSION: '20.1.0'
-  LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
+  PREVIOUS_RUN_ID: "34655933953"
+  PREVIOUS_ARTIFACT: TicWatch-MAX-LTS-5.15.211-KSUN330-SuSFS-SeccompFilter
+  BASE_KERNEL_SHA: 3929c55fbc7559af6df290d2c0f66dc551af161a
+  CAF_REF: 9da9a823e503b4f1874170b693eff58d16c18751
+  TARGET_VERMAGIC_RELEASE: 5.15.144-g7f9d6c16b5cd-ab151
+  LLVM_VERSION: 20.1.0
+  LLVM_ARCHIVE: LLVM-20.1.0-Linux-X64.tar.xz
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
-
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Checkout orchestration
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ticwatch-recovery-ultra6-seb-wakeup-20260929
           fetch-depth: 1
@@ -38,237 +38,125 @@ jobs:
         run: |
           set -Eeuo pipefail
           sudo apt-get update -y >/dev/null
-          sudo apt-get install -y --no-install-recommends \
-            build-essential flex bison bc python3 python-is-python3 \
-            libssl-dev libelf-dev dwarves make curl wget git kmod \
-            binutils-aarch64-linux-gnu zstd xz-utils >/dev/null
+          sudo apt-get install -y --no-install-recommends build-essential flex bison bc python3 python-is-python3 libssl-dev libelf-dev dwarves make curl wget git kmod binutils-aarch64-linux-gnu zstd xz-utils >/dev/null
 
-      - name: Restore known-good TicWatch 5.15.211 KMI source material
+      - name: Restore known-good TicWatch KMI material
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p previous
-          gh run download "$PREVIOUS_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "$PREVIOUS_ARTIFACT" --dir previous
+          gh run download "$PREVIOUS_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$PREVIOUS_ARTIFACT" --dir previous
           test -s previous/audit/kernel-source-lts211-clean.patch
           test -s previous/audit/Module.symvers
           test -s previous/audit/final.config
+          echo KMI_ARTIFACT_RESTORE=PASS
 
-          git clone -q https://github.com/Winkmoon/android_kernel_TicWatch-Pro5.git common
-          git -C common checkout -q "$BASE_KERNEL_SHA"
+      - name: Reconstruct known-good source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git init -q common
+          git -C common remote add origin https://github.com/Winkmoon/android_kernel_TicWatch-Pro5.git
+          git -C common fetch -q --depth=1 origin "$BASE_KERNEL_SHA"
+          git -C common checkout -q --detach FETCH_HEAD
           git -C common apply --check "$GITHUB_WORKSPACE/previous/audit/kernel-source-lts211-clean.patch"
           git -C common apply "$GITHUB_WORKSPACE/previous/audit/kernel-source-lts211-clean.patch"
-
-          test "$(make -s -C common kernelversion)" = "5.15.211"
-          echo "K211_SOURCE_RECONSTRUCT=PASS"
+          test "$(make -s -C common kernelversion)" = 5.15.211
+          echo K211_SOURCE_RECONSTRUCT=PASS
 
       - name: Install LLVM
         shell: bash
         run: |
           set -Eeuo pipefail
-          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
+          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-$LLVM_VERSION/$LLVM_ARCHIVE"
           tar -xJf "$LLVM_ARCHIVE"
-          mv "LLVM-${LLVM_VERSION}-Linux-X64" "$GITHUB_WORKSPACE/llvm"
+          mv "LLVM-$LLVM_VERSION-Linux-X64" "$GITHUB_WORKSPACE/llvm"
           rm -f "$LLVM_ARCHIVE"
           echo "$GITHUB_WORKSPACE/llvm/bin" >> "$GITHUB_PATH"
           "$GITHUB_WORKSPACE/llvm/bin/clang" --version | head -n 1
 
-      - name: Configure module build against known-good stock-compatible KMI
+      - name: Prepare stock-compatible KMI build
         shell: bash
         run: |
           set -Eeuo pipefail
           K="$GITHUB_WORKSPACE/common"
           mkdir -p "$K/out"
           cp previous/audit/final.config "$K/out/.config"
-
-          "$K/scripts/config" --file "$K/out/.config" \
-            --set-str LOCALVERSION "-g7f9d6c16b5cd-ab151" \
-            -d LOCALVERSION_AUTO \
-            -m QCOM_RPROC_COMMON
-
+          "$K/scripts/config" --file "$K/out/.config" --set-str LOCALVERSION "-g7f9d6c16b5cd-ab151" -d LOCALVERSION_AUTO -m QCOM_RPROC_COMMON
           export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
           make -s -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
           make -s -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 modules_prepare
-
-          # Preserve the already runtime-qualified KMI CRC table from the known-good 5.15.211 build.
           cp previous/audit/Module.symvers "$K/out/Module.symvers"
+          grep -Fqx CONFIG_MODULES=y "$K/out/.config"
+          grep -Fqx CONFIG_MODVERSIONS=y "$K/out/.config"
+          grep -Fqx CONFIG_QCOM_RPROC_COMMON=m "$K/out/.config"
+          echo KMI_BUILD_PREPARE=PASS
 
-          grep -Fqx 'CONFIG_MODULES=y' "$K/out/.config"
-          grep -Fqx 'CONFIG_MODVERSIONS=y' "$K/out/.config"
-          grep -Fqx 'CONFIG_QCOM_RPROC_COMMON=m' "$K/out/.config"
-
-      - name: Build qcom rproc common symbol provider
+      - name: Generate qcom SSR provider CRC
         shell: bash
         run: |
           set -Eeuo pipefail
           K="$GITHUB_WORKSPACE/common"
           export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
-
-          make -s -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
-            M=drivers/remoteproc modules
-
-          test -s "$K/out/drivers/remoteproc/qcom_common.ko"
+          make -s -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 M=drivers/remoteproc modules
           test -s "$K/out/drivers/remoteproc/Module.symvers"
-          grep -E '[[:space:]]qcom_register_ssr_notifier[[:space:]]' \
-            "$K/out/drivers/remoteproc/Module.symvers"
+          grep -E "[[:space:]]qcom_register_ssr_notifier[[:space:]]" "$K/out/drivers/remoteproc/Module.symvers" > qcom-provider.symvers
+          sed -i "s#drivers/remoteproc/qcom_common#rproc_qcom_common#g" qcom-provider.symvers
+          cat qcom-provider.symvers
 
-      - name: Materialize Qualcomm SEB source and apply only wakeup fix
+      - name: Materialize and patch SEB source
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p seb/include/linux/soc/qcom
           BASE="https://raw.githubusercontent.com/arter97-mirror/caf_msm-5.15/$CAF_REF"
-
           curl -fsSL "$BASE/drivers/soc/qcom/slate_events_bridge.c" -o seb/slate_events_bridge.c
           curl -fsSL "$BASE/drivers/soc/qcom/slate_events_bridge.h" -o seb/slate_events_bridge.h
           curl -fsSL "$BASE/drivers/soc/qcom/slate_events_bridge_rpmsg.c" -o seb/slate_events_bridge_rpmsg.c
           curl -fsSL "$BASE/drivers/soc/qcom/slate_events_bridge_rpmsg.h" -o seb/slate_events_bridge_rpmsg.h
-          curl -fsSL "$BASE/include/linux/soc/qcom/slate_events_bridge_intf.h" \
-            -o seb/include/linux/soc/qcom/slate_events_bridge_intf.h
-
+          curl -fsSL "$BASE/include/linux/soc/qcom/slate_events_bridge_intf.h" -o seb/include/linux/soc/qcom/slate_events_bridge_intf.h
           cp seb/slate_events_bridge.c seb/slate_events_bridge.ORIGINAL.c
+          python3 .github/scripts/ultra6_patch_seb.py seb/slate_events_bridge.c
+          diff -u seb/slate_events_bridge.ORIGINAL.c seb/slate_events_bridge.c > seb-wakeup.patch || true
+          grep -Fq "wake_up(&dev->link_state_wait);" seb/slate_events_bridge.c
+          test "$(grep -Fc "wake_up(&dev->link_state_wait);" seb/slate_events_bridge.c)" -eq 2
+          printf '%s\n' "obj-m += slate_events_bridge_rpmsg.o" "obj-m += slate_events_bridge.o" 'ccflags-y += -I$(src)/include' > seb/Makefile
+          echo SEB_SOURCE_PATCH=PASS
 
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path("seb/slate_events_bridge.c")
-          s=p.read_text()
-          old='''\tpr_info("%s: glink channel state: %d\\n", __func__, state);
-\tdev->seb_rpmsg = state;
-}'''
-          new='''\tpr_info("%s: glink channel state: %d\\n", __func__, state);
-\tdev->seb_rpmsg = state;
-\twake_up(&dev->link_state_wait);
-}'''
-          if s.count(old) != 1:
-              raise SystemExit("SEB wakeup patch anchor mismatch")
-          p.write_text(s.replace(old,new,1))
-          PY
-
-          diff -u seb/slate_events_bridge.ORIGINAL.c seb/slate_events_bridge.c | tee seb-wakeup.patch || true
-          grep -Fq 'wake_up(&dev->link_state_wait);' seb/slate_events_bridge.c
-          test "$(grep -Fc 'wake_up(&dev->link_state_wait);' seb/slate_events_bridge.c)" -eq 2
-
-          cat > seb/Makefile <<'EOF'
-          obj-m += slate_events_bridge_rpmsg.o
-          obj-m += slate_events_bridge.o
-          ccflags-y += -I$(src)/include
-          EOF
-
-      - name: Compile patched SEB modules
+      - name: Compile patched SEB
         shell: bash
         run: |
           set -Eeuo pipefail
           K="$GITHUB_WORKSPACE/common"
           export PATH="$GITHUB_WORKSPACE/llvm/bin:$PATH"
-
-          EXTRA="$K/out/drivers/remoteproc/Module.symvers"
-
-          make -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 \
-            M="$GITHUB_WORKSPACE/seb" \
-            KBUILD_EXTRA_SYMBOLS="$EXTRA" \
-            KBUILD_MODPOST_WARN=1 \
-            modules 2>&1 | tee seb-build.log
-
+          make -C "$K" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 M="$GITHUB_WORKSPACE/seb" KBUILD_EXTRA_SYMBOLS="$GITHUB_WORKSPACE/qcom-provider.symvers" KBUILD_MODPOST_WARN=1 modules 2>&1 | tee seb-build.log
           test -s seb/slate_events_bridge.ko
           test -s seb/slate_events_bridge_rpmsg.ko
+          echo SEB_COMPILE=PASS
 
-      - name: Force exact stock recovery vermagic string and audit ABI
+      - name: Normalize vermagic and audit
         shell: bash
         run: |
           set -Eeuo pipefail
-
-          python3 - "$TARGET_VERMAGIC_RELEASE" seb/slate_events_bridge.ko <<'PY'
-          import sys
-          release=sys.argv[1].encode()
-          path=sys.argv[2]
-          data=bytearray(open(path,'rb').read())
-          key=b'vermagic='
-          i=data.find(key)
-          if i < 0:
-              raise SystemExit('vermagic key not found')
-          j=data.find(b'\0', i)
-          if j < 0:
-              raise SystemExit('vermagic terminator not found')
-          old=bytes(data[i:j])
-          # Preserve all flags exactly as produced; replace only release token.
-          text=old.decode('ascii')
-          parts=text.split(' ',1)
-          if len(parts) != 2:
-              raise SystemExit(f'unexpected vermagic: {text}')
-          new=('vermagic='+release.decode()+' '+parts[1]).encode()
-          if len(new) > len(old):
-              raise SystemExit(f'target vermagic too long: old={len(old)} new={len(new)} oldstr={text}')
-          data[i:i+len(old)] = new + b'\0'*(len(old)-len(new))
-          open(path,'wb').write(data)
-          print('OLD_'+text)
-          print('NEW_'+new.decode())
-          PY
-
+          python3 .github/scripts/ultra6_patch_vermagic.py "$TARGET_VERMAGIC_RELEASE" seb/slate_events_bridge.ko
           mkdir -p out-artifact
           cp seb/slate_events_bridge.ko out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko
-          cp seb-wakeup.patch seb-build.log out-artifact/
+          cp seb-wakeup.patch seb-build.log qcom-provider.symvers out-artifact/
+          modinfo out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko > out-artifact/modinfo.txt
+          modprobe --dump-modversions out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | sort > out-artifact/modversions.txt
+          "$GITHUB_WORKSPACE/llvm/bin/llvm-nm" -u out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | sort -u > out-artifact/undefined-symbols.txt
+          "$GITHUB_WORKSPACE/llvm/bin/llvm-objdump" -dr out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko > out-artifact/disassembly.txt
+          sha256sum out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko > out-artifact/SHA256SUMS
+          python3 .github/scripts/ultra6_compare_kmi.py previous/audit/Module.symvers out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | tee out-artifact/KMI_COMPARE.txt
+          modinfo -F vermagic out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | grep -Fq "$TARGET_VERMAGIC_RELEASE SMP preempt mod_unload modversions aarch64"
+          modinfo -F depends out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | tee out-artifact/depends.txt
+          grep -q __wake_up out-artifact/modversions.txt
+          grep -q qcom_register_ssr_notifier out-artifact/modversions.txt
+          grep -q seb_channel_init out-artifact/modversions.txt
+          grep -q seb_rpmsg_tx_msg out-artifact/modversions.txt
+          echo RESULT=ULTRA6_SEB_MODULE_BUILD_PASS | tee out-artifact/RESULT.txt
 
-          {
-            echo "===== MODINFO ====="
-            modinfo out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko || true
-            echo
-            echo "===== SHA256 ====="
-            sha256sum out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko
-            echo
-            echo "===== DUMP MODVERSIONS ====="
-            modprobe --dump-modversions out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | sort || true
-            echo
-            echo "===== UNDEFINED SYMBOLS ====="
-            "$GITHUB_WORKSPACE/llvm/bin/llvm-nm" -u out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko | sort -u || true
-            echo
-            echo "===== CALLBACK DISASM ====="
-            "$GITHUB_WORKSPACE/llvm/bin/llvm-objdump" -dr \
-              --disassemble-symbols=seb_notify_glink_channel_state \
-              out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko || true
-          } | tee out-artifact/ULTRA6_SEB_AUDIT.txt
-
-          modinfo -F vermagic out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko \
-            | grep -Fq "$TARGET_VERMAGIC_RELEASE SMP preempt mod_unload modversions aarch64"
-
-          modprobe --dump-modversions out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko \
-            | grep -q '__wake_up'
-
-          # Every vmlinux-provided symbol must retain the CRC from the already
-          # runtime-qualified 5.15.211 TicWatch KMI table.
-          python3 - previous/audit/Module.symvers out-artifact/slate_events_bridge.ULTRA6_WAKEUP.ko <<'PY' \
-            | tee out-artifact/KMI_COMPARE.txt
-          import subprocess,sys,re
-          symvers,ko=sys.argv[1:]
-          exp={}
-          for line in open(symvers,errors='ignore'):
-              f=line.split()
-              if len(f)>=4 and f[2]=='vmlinux':
-                  exp[f[1]]=f[0].lower().replace('0x','')
-          out=subprocess.check_output(['modprobe','--dump-modversions',ko],text=True,stderr=subprocess.STDOUT)
-          got={}
-          for line in out.splitlines():
-              m=re.match(r'0x([0-9a-fA-F]+)\s+(\S+)',line)
-              if m: got[m.group(2)]=m.group(1).lower()
-          checked=0; bad=[]; vendor=[]
-          for s,c in got.items():
-              if s in exp:
-                  checked+=1
-                  if c != exp[s]:
-                      bad.append((s,c,exp[s]))
-              else:
-                  vendor.append((s,c))
-          print('VMLINUX_CRC_CHECKED',checked)
-          print('VMLINUX_CRC_MISMATCH',len(bad))
-          for x in bad: print('BAD',*x)
-          print('NON_VMLINUX_OR_VENDOR_SYMBOLS',len(vendor))
-          for x in vendor: print('VENDOR',*x)
-          if bad:
-              raise SystemExit(2)
-          PY
-
-          echo "RESULT=ULTRA6_SEB_MODULE_BUILD_PASS" | tee -a out-artifact/ULTRA6_SEB_AUDIT.txt
-
-      - name: Upload ULTRA6 patched module
+      - name: Upload patched module
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: TicWatch-Recovery-ULTRA6-SEB-WAKEUP
