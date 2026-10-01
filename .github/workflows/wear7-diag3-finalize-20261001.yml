@@ -1,0 +1,324 @@
+name: Wear7 DIAG3 Finalize 20261001
+
+on:
+  push:
+    branches: [wear7-diag3-finalize-20261001]
+    paths: ['.github/workflows/wear7-diag3-finalize-20261001.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc || true
+          mkdir -p "$RUNNER_TEMP/w7/base" "$RUNNER_TEMP/w7/bootchain" "$RUNNER_TEMP/w7/diag3" "$RUNNER_TEMP/w7/tools" out/bootchain out/split
+
+      - name: Download exact historical DIAG2 super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG2-Super
+          path: ${{ runner.temp }}/w7/base
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35444837392'
+
+      - name: Download exact historical DIAG2 bootchain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG2-Bootchain
+          path: ${{ runner.temp }}/w7/bootchain
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35444837392'
+
+      - name: Download exact historical DIAG3 delta package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-V11-DIAG3-ChargerInit
+          path: ${{ runner.temp }}/w7/diag3
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '35454923626'
+
+      - name: Verify bootchain identity and historical DIAG3 inputs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          echo '===== DIAG2 BOOTCHAIN FILES =====' | tee out/BOOTCHAIN_AUDIT.txt
+          find "$W/bootchain" -maxdepth 1 -type f -printf '%f\n' | sort | tee -a out/BOOTCHAIN_AUDIT.txt
+          echo '===== SHA256 =====' | tee -a out/BOOTCHAIN_AUDIT.txt
+          (cd "$W/bootchain" && sha256sum boot.img init_boot.img vendor_boot.img dtbo.img vbmeta.img vbmeta_system.img) | tee -a out/BOOTCHAIN_AUDIT.txt
+          echo '===== CANDIDATE =====' | tee -a out/BOOTCHAIN_AUDIT.txt
+          cat "$W/bootchain/CANDIDATE.json" | tee -a out/BOOTCHAIN_AUDIT.txt
+          echo '===== HISTORICAL SHA256SUMS =====' | tee -a out/BOOTCHAIN_AUDIT.txt
+          cat "$W/bootchain/SHA256SUMS.txt" | tee -a out/BOOTCHAIN_AUDIT.txt
+
+          test -f "$W/diag3/segments/seg00.bin"
+          test "$(stat -c %s "$W/diag3/segments/seg00.bin")" = 4096
+          echo 'da1e102938e9d21e3029263768c175f43fd52a1b7c2a3147ecc7f7769591d69a  '"$W/diag3/segments/seg00.bin" | sha256sum -c -
+          grep -q '"base_raw_sha256": "0298d8676c8e6e4de81ad100f3b74dbc6795046eebfb39951a339dc485547cfb"' "$W/diag3/DELTA_REPORT.json"
+          grep -q '"target_raw_sha256": "725df162529100ddb924caa22a1f72db77189b00620d27a2450da4e9351e913e"' "$W/diag3/DELTA_REPORT.json"
+          grep -q '"reconstruction_exact": true' "$W/diag3/DELTA_REPORT.json"
+          cat "$W/diag3/DELTA_REPORT.json" | tee out/HISTORICAL_DIAG3_DELTA_REPORT.json
+          cp "$W/diag3/DIAG3_MAPPING.txt" out/
+
+      - name: Fetch pinned Android sparse tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/','lib64/','lib/')):
+                      p=(out/n).resolve()
+                      if not p.is_relative_to(out): raise SystemExit('unsafe path')
+                      z.extract(n,out)
+          PY
+          rm "$ZIP"
+          chmod +x "$W/tools/extracted/bin/"* || true
+
+      - name: Reconstruct exact historical CURRENT raw state
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
+          simg2img "$W/base/super.img" "$W/diag2.raw"
+          cp --reflink=auto "$W/diag2.raw" "$W/current.raw"
+          python3 - "$W/current.raw" <<'PY'
+          import mmap,sys,hashlib,pathlib
+          p=pathlib.Path(sys.argv[1])
+          edits=[
+            (3702792344,b'e',b'#'),
+            (3702792441,b'e',b'#'),
+            (744284211,b'e',b'#'),
+            (744288307,b'e',b'#'),
+            (744288391,b'e',b'#'),
+          ]
+          with p.open('r+b') as f:
+              mm=mmap.mmap(f.fileno(),0)
+              try:
+                  for off,old,new in edits:
+                      got=mm[off:off+1]
+                      if got != old:
+                          raise SystemExit(f'BSSL base mismatch at {off}: {got!r} != {old!r}')
+                      mm[off:off+1]=new
+                  mm.flush()
+              finally:
+                  mm.close()
+          h=hashlib.sha256(p.read_bytes()).hexdigest()
+          exp='0298d8676c8e6e4de81ad100f3b74dbc6795046eebfb39951a339dc485547cfb'
+          if h != exp: raise SystemExit(f'CURRENT raw SHA mismatch {h} != {exp}')
+          print('CURRENT_RAW_SHA256='+h)
+          PY
+
+      - name: Apply exact historical DIAG3 block and prove target raw hash
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          cp --reflink=auto "$W/current.raw" "$W/target.raw"
+          python3 - "$W/target.raw" "$W/diag3/segments/seg00.bin" <<'PY'
+          import pathlib,sys,hashlib
+          p=pathlib.Path(sys.argv[1]); seg=pathlib.Path(sys.argv[2])
+          bs=4096; block=432712; off=block*bs
+          data=seg.read_bytes()
+          if len(data)!=bs: raise SystemExit('DIAG3 segment size != 4096')
+          if hashlib.sha256(data).hexdigest()!='da1e102938e9d21e3029263768c175f43fd52a1b7c2a3147ecc7f7769591d69a':
+              raise SystemExit('DIAG3 segment SHA mismatch')
+          with p.open('r+b',buffering=0) as f:
+              f.seek(off); f.write(data); f.flush()
+          h=hashlib.sha256(p.read_bytes()).hexdigest()
+          exp='725df162529100ddb924caa22a1f72db77189b00620d27a2450da4e9351e913e'
+          if h!=exp: raise SystemExit(f'DIAG3 target raw SHA mismatch {h} != {exp}')
+          print('DIAG3_TARGET_RAW_SHA256='+h)
+          PY
+
+      - name: Build sparse final super and round-trip verify
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          export PATH="$W/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$W/tools/extracted/lib64:$W/tools/extracted/lib"
+          img2simg "$W/target.raw" out/super_WEAR7_V11_DIAG3_FINAL.img
+          simg2img out/super_WEAR7_V11_DIAG3_FINAL.img "$W/roundtrip.raw"
+          RAW_SHA=$(sha256sum "$W/roundtrip.raw" | awk '{print $1}')
+          test "$RAW_SHA" = 725df162529100ddb924caa22a1f72db77189b00620d27a2450da4e9351e913e
+          SPARSE_SHA=$(sha256sum out/super_WEAR7_V11_DIAG3_FINAL.img | awk '{print $1}')
+          SPARSE_SIZE=$(stat -c %s out/super_WEAR7_V11_DIAG3_FINAL.img)
+          {
+            echo 'BUILD=WEAR7_V11_DIAG3_FINAL_20261001'
+            echo 'SOURCE_DIAG2_RUN=35444837392'
+            echo 'SOURCE_DIAG3_RUN=35454923626'
+            echo 'CURRENT_RAW_SHA256=0298d8676c8e6e4de81ad100f3b74dbc6795046eebfb39951a339dc485547cfb'
+            echo 'TARGET_RAW_SHA256=725df162529100ddb924caa22a1f72db77189b00620d27a2450da4e9351e913e'
+            echo "FINAL_SPARSE_SHA256=$SPARSE_SHA"
+            echo "FINAL_SPARSE_SIZE=$SPARSE_SIZE"
+            echo 'ROUNDTRIP_RAW_SHA=PASS'
+            echo 'DIAG3_BLOCK=432712'
+            echo 'DIAG3_SEGMENT_SHA256=da1e102938e9d21e3029263768c175f43fd52a1b7c2a3147ecc7f7769591d69a'
+          } | tee out/FINAL_MANIFEST.txt
+          lpdump "$W/target.raw" > out/LPDUMP_FINAL.txt
+
+      - name: Build no-super flash kits
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          cp "$W/bootchain/boot.img" out/bootchain/
+          cp "$W/bootchain/init_boot.img" out/bootchain/
+          cp "$W/bootchain/vendor_boot.img" out/bootchain/
+          cp "$W/bootchain/dtbo.img" out/bootchain/
+          cp "$W/bootchain/vbmeta.img" out/bootchain/
+          cp "$W/bootchain/vbmeta_system.img" out/bootchain/
+          cp "$W/bootchain/CANDIDATE.json" out/bootchain/
+          cp "$W/bootchain/SHA256SUMS.txt" out/bootchain/HISTORICAL_SHA256SUMS.txt
+          (cd out/bootchain && sha256sum boot.img init_boot.img vendor_boot.img dtbo.img vbmeta.img vbmeta_system.img > SHA256SUMS_DIAG2_BOOTCHAIN.txt)
+
+          cat > out/FLASH_WEAR7_DIAG3_LINUX.sh <<'SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          FB=${FB:-fastboot}
+          ROOT="$(cd "$(dirname "$0")" && pwd)"
+          B="$ROOT/bootchain"
+          S="$ROOT/super_WEAR7_V11_DIAG3_FINAL.img"
+          test -f "$S" || { echo 'Manca super_WEAR7_V11_DIAG3_FINAL.img nella stessa cartella.'; exit 1; }
+          "$FB" devices
+          "$FB" flash super "$S"
+          "$FB" flash vendor_boot "$B/vendor_boot.img"
+          "$FB" flash init_boot "$B/init_boot.img"
+          "$FB" flash dtbo "$B/dtbo.img"
+          "$FB" flash boot "$B/boot.img"
+          "$FB" flash vbmeta_system "$B/vbmeta_system.img"
+          "$FB" flash vbmeta "$B/vbmeta.img"
+          "$FB" reboot
+          SH
+          chmod +x out/FLASH_WEAR7_DIAG3_LINUX.sh
+
+          cat > out/FLASH_WEAR7_DIAG3_WINDOWS.cmd <<'CMD'
+          @echo off
+          setlocal
+          set FB=fastboot.exe
+          if not exist super_WEAR7_V11_DIAG3_FINAL.img echo Manca super_WEAR7_V11_DIAG3_FINAL.img & exit /b 1
+          %FB% devices || exit /b 1
+          %FB% flash super super_WEAR7_V11_DIAG3_FINAL.img || exit /b 1
+          %FB% flash vendor_boot bootchain\vendor_boot.img || exit /b 1
+          %FB% flash init_boot bootchain\init_boot.img || exit /b 1
+          %FB% flash dtbo bootchain\dtbo.img || exit /b 1
+          %FB% flash boot bootchain\boot.img || exit /b 1
+          %FB% flash vbmeta_system bootchain\vbmeta_system.img || exit /b 1
+          %FB% flash vbmeta bootchain\vbmeta.img || exit /b 1
+          %FB% reboot || exit /b 1
+          CMD
+
+          cat > out/README_FIRST_FLASH.txt <<'EOF'
+          TICWATCH PRO 5 ENDURO / DACE — WEAR7 V11 DIAG3 FINAL
+          - NON flasha recovery.
+          - NON tocca metadata, userdata, misc o firmware Qualcomm.
+          - NON esegue fastboot -w.
+          - Usa la bootchain DIAG2 storica accoppiata allo stato DIAG3.
+          - Il super finale ricostruisce esattamente il raw target storico DIAG3 SHA256 725df162...
+          - Recovery CEV2 corrente deve rimanere installata per la diagnostica post-boot.
+          EOF
+
+      - name: Split final sparse super for archival retrieval
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          split -b 400M -d -a 2 out/super_WEAR7_V11_DIAG3_FINAL.img out/split/super_WEAR7_V11_DIAG3_FINAL.img.part
+          sha256sum out/split/* > out/SPLIT_SHA256SUMS.txt
+          stat -c '%n %s' out/split/* > out/SPLIT_SIZES.txt
+          COUNT=$(find out/split -type f | wc -l)
+          echo "PART_COUNT=$COUNT" | tee -a out/FINAL_MANIFEST.txt
+          test "$COUNT" -le 10
+
+      - name: Upload reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-DIAG3-Final-Reports
+          path: |
+            out/FINAL_MANIFEST.txt
+            out/BOOTCHAIN_AUDIT.txt
+            out/HISTORICAL_DIAG3_DELTA_REPORT.json
+            out/DIAG3_MAPPING.txt
+            out/LPDUMP_FINAL.txt
+            out/SPLIT_SHA256SUMS.txt
+            out/SPLIT_SIZES.txt
+          compression-level: 9
+          retention-days: 60
+
+      - name: Upload no-super flash kit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-DIAG3-Final-FlashKit-NoSuper
+          path: |
+            out/bootchain/
+            out/FLASH_WEAR7_DIAG3_LINUX.sh
+            out/FLASH_WEAR7_DIAG3_WINDOWS.cmd
+            out/README_FIRST_FLASH.txt
+            out/FINAL_MANIFEST.txt
+          compression-level: 0
+          retention-days: 60
+
+      - name: Upload full final super
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-DIAG3-Final-Super
+          path: out/super_WEAR7_V11_DIAG3_FINAL.img
+          compression-level: 0
+          retention-days: 60
+
+      - name: Upload split part00
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: Wear7-DIAG3-Final-part00, path: out/split/super_WEAR7_V11_DIAG3_FINAL.img.part00, compression-level: 0, retention-days: 2}
+      - name: Upload split part01
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: Wear7-DIAG3-Final-part01, path: out/split/super_WEAR7_V11_DIAG3_FINAL.img.part01, compression-level: 0, retention-days: 2}
+      - name: Upload split part02
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: Wear7-DIAG3-Final-part02, path: out/split/super_WEAR7_V11_DIAG3_FINAL.img.part02, compression-level: 0, retention-days: 2}
+      - name: Upload split part03
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: Wear7-DIAG3-Final-part03, path: out/split/super_WEAR7_V11_DIAG3_FINAL.img.part03, compression-level: 0, retention-days: 2}
+      - name: Upload split part04
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: Wear7-DIAG3-Final-part04, path: out/split/super_WEAR7_V11_DIAG3_FINAL.img.part04, compression-level: 0, retention-days: 2}
+      - name: Upload split part05
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: Wear7-DIAG3-Final-part05, path: out/split/super_WEAR7_V11_DIAG3_FINAL.img.part05, compression-level: 0, retention-days: 2}
+      - name: Upload split part06
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: Wear7-DIAG3-Final-part06, path: out/split/super_WEAR7_V11_DIAG3_FINAL.img.part06, compression-level: 0, retention-days: 2}
+      - name: Upload split part07
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: Wear7-DIAG3-Final-part07, path: out/split/super_WEAR7_V11_DIAG3_FINAL.img.part07, compression-level: 0, retention-days: 2}
+      - name: Upload split part08
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: Wear7-DIAG3-Final-part08, path: out/split/super_WEAR7_V11_DIAG3_FINAL.img.part08, compression-level: 0, retention-days: 2}
+      - name: Upload split part09 if present
+        if: always()
+        shell: bash
+        run: |
+          if [ -f out/split/super_WEAR7_V11_DIAG3_FINAL.img.part09 ]; then echo yes > out/PART09_PRESENT; else echo no > out/PART09_PRESENT; fi
+      - name: Upload split part09
+        if: ${{ hashFiles('out/split/super_WEAR7_V11_DIAG3_FINAL.img.part09') != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with: {name: Wear7-DIAG3-Final-part09, path: out/split/super_WEAR7_V11_DIAG3_FINAL.img.part09, compression-level: 0, retention-days: 2}
