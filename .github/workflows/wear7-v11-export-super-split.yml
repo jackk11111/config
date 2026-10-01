@@ -1,0 +1,126 @@
+name: Wear7 V11 export super split
+
+on:
+  push:
+    branches:
+      - wear7-recovery-export-20261001
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  split-super:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Download exact V11 Super artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          curl -fL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/10577539790/zip" \
+            -o Wear7-V11-Super.zip
+          ls -lh Wear7-V11-Super.zip
+          sha256sum Wear7-V11-Super.zip | tee ORIGINAL_SHA256.txt
+          test "$(sha256sum Wear7-V11-Super.zip | awk '{print $1}')" = "501a66996443aeae88580a6d55c6dbeea61c985e3bba8b60a273ea156a22d78b"
+
+      - name: Split into sub-512MiB chunks and build manifest
+        run: |
+          set -euo pipefail
+          mkdir -p parts manifest
+          split -b 400M -d -a 2 Wear7-V11-Super.zip parts/Wear7-V11-Super.zip.part
+          count=$(find parts -maxdepth 1 -type f | wc -l)
+          test "$count" -eq 10
+          sha256sum parts/* | tee manifest/PARTS_SHA256.txt
+          cp ORIGINAL_SHA256.txt manifest/ORIGINAL_SHA256.txt
+          stat -c '%n %s bytes' Wear7-V11-Super.zip parts/* | tee manifest/SIZES.txt
+          cat > manifest/REASSEMBLE.txt <<'EOF'
+          Reassemble in lexical order:
+          cat Wear7-V11-Super.zip.part00 Wear7-V11-Super.zip.part01 Wear7-V11-Super.zip.part02 Wear7-V11-Super.zip.part03 Wear7-V11-Super.zip.part04 Wear7-V11-Super.zip.part05 Wear7-V11-Super.zip.part06 Wear7-V11-Super.zip.part07 Wear7-V11-Super.zip.part08 Wear7-V11-Super.zip.part09 > Wear7-V11-Super.zip
+          Expected SHA256:
+          501a66996443aeae88580a6d55c6dbeea61c985e3bba8b60a273ea156a22d78b
+          EOF
+
+      - name: Upload manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-manifest
+          path: manifest/
+          compression-level: 9
+          retention-days: 2
+
+      - name: Upload part00
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-part00
+          path: parts/Wear7-V11-Super.zip.part00
+          compression-level: 0
+          retention-days: 2
+      - name: Upload part01
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-part01
+          path: parts/Wear7-V11-Super.zip.part01
+          compression-level: 0
+          retention-days: 2
+      - name: Upload part02
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-part02
+          path: parts/Wear7-V11-Super.zip.part02
+          compression-level: 0
+          retention-days: 2
+      - name: Upload part03
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-part03
+          path: parts/Wear7-V11-Super.zip.part03
+          compression-level: 0
+          retention-days: 2
+      - name: Upload part04
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-part04
+          path: parts/Wear7-V11-Super.zip.part04
+          compression-level: 0
+          retention-days: 2
+      - name: Upload part05
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-part05
+          path: parts/Wear7-V11-Super.zip.part05
+          compression-level: 0
+          retention-days: 2
+      - name: Upload part06
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-part06
+          path: parts/Wear7-V11-Super.zip.part06
+          compression-level: 0
+          retention-days: 2
+      - name: Upload part07
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-part07
+          path: parts/Wear7-V11-Super.zip.part07
+          compression-level: 0
+          retention-days: 2
+      - name: Upload part08
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-part08
+          path: parts/Wear7-V11-Super.zip.part08
+          compression-level: 0
+          retention-days: 2
+      - name: Upload part09
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-V11-Super-split-part09
+          path: parts/Wear7-V11-Super.zip.part09
+          compression-level: 0
+          retention-days: 2
