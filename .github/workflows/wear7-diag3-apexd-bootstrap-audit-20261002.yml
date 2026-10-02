@@ -1,0 +1,159 @@
+name: Wear7 DIAG3 apexd bootstrap audit
+
+on:
+  push:
+    branches: [wear7-diag4-init-bisect-20261002]
+    paths:
+      - '.github/workflows/wear7-diag3-apexd-bootstrap-audit-20261002.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare exact DIAG3 logical partitions
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p parts work/tools work/parts work/mnt
+          gh release download wear7-diag3-final-20261002 --repo "$GITHUB_REPOSITORY" --pattern 'super_WEAR7_V11_DIAG3_FINAL.img.part*' --dir parts
+          cat parts/super_WEAR7_V11_DIAG3_FINAL.img.part* > work/super.img
+          echo '75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329  work/super.img' | sha256sum -c -
+          ZIP=work/tools/otatools.zip
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo 'f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  work/tools/otatools.zip' | sha256sum -c -
+          python3 - "$ZIP" work/tools/extracted <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/','lib64/','lib/')):
+                      p=(out/n).resolve()
+                      if not p.is_relative_to(out): raise SystemExit('unsafe')
+                      z.extract(n,out)
+          PY
+          T="$PWD/work/tools/extracted"
+          chmod +x "$T/bin/"*
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          simg2img work/super.img work/super.raw
+          lpunpack work/super.raw work/parts
+          for p in system system_ext product vendor; do mkdir -p "work/mnt/$p"; sudo mount -o loop,ro,noload "work/parts/$p.img" "work/mnt/$p"; done
+
+      - name: Audit bootstrap path and all pre-init reboot-capable services
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SYS=work/mnt/system/system
+          SX=work/mnt/system_ext
+          PROD=work/mnt/product
+          VEN=work/mnt/vendor
+
+          echo '===== EXACT APEXD.RC ====='
+          cat "$SYS/etc/init/apexd.rc"
+
+          echo '===== EXACT APEXD BINARY ====='
+          ls -l "$SYS/bin/apexd" || true
+          file "$SYS/bin/apexd" || true
+          readelf -h "$SYS/bin/apexd" 2>/dev/null | grep -E 'Class:|Machine:' || true
+          readelf -d "$SYS/bin/apexd" 2>/dev/null | grep NEEDED || true
+          sha256sum "$SYS/bin/apexd" || true
+
+          echo '===== EARLY EXEC_START DEFINITIONS ====='
+          python3 - "$SYS" "$SX" "$PROD" "$VEN" <<'PY'
+          from pathlib import Path
+          import re,sys
+          roots=[('system',Path(sys.argv[1])),('system_ext',Path(sys.argv[2])),('product',Path(sys.argv[3])),('vendor',Path(sys.argv[4]))]
+          svcs={}; execs=[]
+          for part,root in roots:
+              idir=root/'etc/init'
+              if not idir.exists(): continue
+              for f in sorted(idir.rglob('*.rc')):
+                  L=f.read_text(errors='replace').splitlines(); i=0
+                  while i<len(L):
+                      m=re.match(r'^service\s+(\S+)\s+(.+)$',L[i])
+                      if m:
+                          name=m.group(1); cmd=m.group(2); b=[]; i+=1
+                          while i<len(L) and (not L[i] or L[i][0].isspace() or L[i].lstrip().startswith('#')):
+                              b.append(L[i]); i+=1
+                          svcs[name]=(part,str(f),cmd,b); continue
+                      m=re.match(r'^on\s+(.+)$',L[i])
+                      if m:
+                          trig=m.group(1); b=[]; i+=1
+                          while i<len(L) and (not L[i] or L[i][0].isspace() or L[i].lstrip().startswith('#')):
+                              b.append(L[i]); i+=1
+                          if trig=='early-init':
+                              for x in b:
+                                  q=re.match(r'\s*exec_start\s+(\S+)',x)
+                                  if q: execs.append((q.group(1),part,str(f),trig))
+                          continue
+                      i+=1
+          for name,part,f,trig in execs:
+              print(f'--- EXEC_START {name} from {part}:{f} ---')
+              ent=svcs.get(name)
+              if not ent:
+                  print('NO_SERVICE_DEFINITION'); continue
+              p,ff,cmd,b=ent
+              print('definition_partition='+p)
+              print('definition_file='+ff)
+              print('cmd='+cmd)
+              for x in b:
+                  t=x.strip()
+                  if t and not t.startswith('#'): print('  '+t)
+          print('EARLY_EXEC_START_COUNT='+str(len(execs)))
+          PY
+
+          echo '===== APEX KEY / PAYLOAD INVENTORY ====='
+          for f in "$SYS/etc/security/apexkeys.txt" "$SX/etc/security/apexkeys.txt" "$PROD/etc/security/apexkeys.txt" "$VEN/etc/security/apexkeys.txt"; do
+            [ -f "$f" ] || continue
+            echo "--- $f ---"
+            wc -l "$f"
+            head -n 12 "$f"
+          done
+          for d in "$SYS/apex" "$SX/apex" "$PROD/apex" "$VEN/apex"; do
+            [ -d "$d" ] || continue
+            echo "--- $d ---"
+            find "$d" -maxdepth 1 -type f -printf '%f\n' | sort | head -n 80
+          done
+
+          echo '===== ACTIVE PRE-INIT REBOOT_ON_FAILURE REACHABILITY ====='
+          python3 - "$SYS" "$SX" "$PROD" "$VEN" <<'PY'
+          from pathlib import Path
+          import re,sys
+          roots=[('system',Path(sys.argv[1])),('system_ext',Path(sys.argv[2])),('product',Path(sys.argv[3])),('vendor',Path(sys.argv[4]))]
+          service={}; early_starts=[]
+          for part,root in roots:
+              idir=root/'etc/init'
+              if not idir.exists(): continue
+              for f in sorted(idir.rglob('*.rc')):
+                  L=f.read_text(errors='replace').splitlines(); i=0
+                  while i<len(L):
+                      m=re.match(r'^service\s+(\S+)\s+(.+)$',L[i])
+                      if m:
+                          n=m.group(1); b=[]; i+=1
+                          while i<len(L) and (not L[i] or L[i][0].isspace() or L[i].lstrip().startswith('#')): b.append(L[i]); i+=1
+                          service[n]=(part,str(f),b); continue
+                      m=re.match(r'^on\s+(.+)$',L[i])
+                      if m:
+                          trig=m.group(1); b=[]; i+=1
+                          while i<len(L) and (not L[i] or L[i][0].isspace() or L[i].lstrip().startswith('#')): b.append(L[i]); i+=1
+                          if trig=='early-init':
+                              for x in b:
+                                  q=re.match(r'\s*(?:start|exec_start)\s+(\S+)',x)
+                                  if q: early_starts.append((q.group(1),x.strip(),part,str(f)))
+                          continue
+                      i+=1
+          for n,how,part,f in early_starts:
+              ent=service.get(n)
+              rof=[] if not ent else [x.strip() for x in ent[2] if 'reboot_on_failure' in x]
+              crit=[] if not ent else [x.strip() for x in ent[2] if x.strip()=='critical']
+              print(f'{n} | via={how} | trigger={part}:{f} | reboot_on_failure={rof or "NO"} | critical={bool(crit)}')
+          PY
+
+          echo 'RESULT=APEXD_BOOTSTRAP_AUDIT_PASS'
