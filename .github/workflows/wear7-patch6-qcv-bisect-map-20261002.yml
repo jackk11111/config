@@ -1,5 +1,6 @@
 name: Wear7 PATCH6 QCV early-init bisect map
 
+# Diagnostic mapper: no image is published or flashed.
 on:
   push:
     branches: [wear7-diag4-init-bisect-20261002]
@@ -63,10 +64,8 @@ jobs:
 
           exec_line=b'    exec u:r:vendor_qti_init_shell:s0 -- /vendor/bin/init.qti.qcv.sh\n'
           if old.count(exec_line)!=1: raise SystemExit(f'QCV_EXEC_COUNT={old.count(exec_line)}')
-          pos=old.index(exec_line)
           before=b'    chmod 0777 /metadata/vold/a\n'
           after =b'    chmod 0777 /metadata/vold/b\n'
-          # Drop only the explanatory comment immediately preceding QCV exec, preserve every executable command.
           lines=old.splitlines(keepends=True)
           out=[]; inserted=False
           for line in lines:
@@ -78,7 +77,6 @@ jobs:
                   out.append(line)
           if not inserted: raise SystemExit('QCV_INSERT_FAILED')
           new=b''.join(out)
-          # Compact indentation only if needed; Android init accepts one leading space for action commands.
           if len(new)>len(old):
               ls=new.splitlines(keepends=True)
               new=b''.join((b' '+x.lstrip() if x[:1] in (b' ',b'\t') else x) for x in ls)
@@ -86,14 +84,12 @@ jobs:
           new += b' '*(len(old)-len(new))
           if len(new)!=len(old): raise SystemExit('SIZE_MISMATCH')
 
-          # Prove all original executable commands remain, in order.
           def cmds(b):
               return [x.strip() for x in b.splitlines() if x.strip() and not x.lstrip().startswith(b'#') and not x.startswith(b'on ')]
           oc=cmds(old); nc=[x for x in cmds(new) if not x.startswith(b'chmod 0777 /metadata/vold/')]
           if oc!=nc:
               print('OLD_CMDS=',oc); print('NEW_CMDS=',nc); raise SystemExit('SEMANTIC_COMMAND_MISMATCH')
 
-          # Physical block map of this tiny rc file.
           txt=subprocess.check_output(['debugfs','-R',f'blocks {rel}',str(vendor)],text=True,stderr=subprocess.DEVNULL)
           maxblk=vendor.stat().st_size//BS
           blocks=[int(x) for x in re.findall(r'\b\d+\b',txt) if 0<int(x)<maxblk]
@@ -109,7 +105,6 @@ jobs:
           patched[:len(new)]=new
           newblk=bytes(patched)
 
-          # Find this exact vendor filesystem block uniquely in expanded 4 GiB super.
           raw=source_raw.read_bytes()
           hits=[]; at=0
           while True:
@@ -119,7 +114,6 @@ jobs:
           if len(hits)!=1 or hits[0]%BS: raise SystemExit(f'RAW_HITS={hits}')
           rawoff=hits[0]; rawblock=rawoff//BS
 
-          # Emit minimal byte runs so Termux can patch a pulled 4K block while SHA-guarding source/current state.
           runs=[]; i=0
           while i<BS:
               if oldblk[i]==newblk[i]: i+=1; continue
@@ -135,8 +129,7 @@ jobs:
             'qcv_old_size':len(old),'qcv_new_size':len(new),
             'runs':runs,
           }
-          pathlib.Path('PATCH6_QCV.json').write_text(json.dumps(desc,indent=2)+'\n')
-          print('===== PATCH6 QCV BISect =====')
+          print('===== PATCH6 QCV BISECT =====')
           print('QCV_FILE='+rel)
           print('QCV_FILE_SIZE='+str(len(old)))
           print('VENDOR_FS_BLOCK='+str(fsblk))
