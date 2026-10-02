@@ -1,0 +1,170 @@
+name: Wear7 Publish DIAG3 Final Release 20261002
+
+on:
+  push:
+    branches: [wear7-diag3-finalize-20261001]
+    paths: ['.github/workflows/wear7-publish-diag3-release-20261002.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p work/parts work/kit work/reports release
+
+      - name: Download exact V2 split parts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: Wear7-DIAG3-Final-V2-part*
+          path: work/parts
+          merge-multiple: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '36913721664'
+
+      - name: Download exact V2 flash kit
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-DIAG3-Final-FlashKit-NoSuper-V2
+          path: work/kit
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '36913721664'
+
+      - name: Download exact V2 reports
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-DIAG3-Final-Reports-V2
+          path: work/reports
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '36913721664'
+
+      - name: Verify and package release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ls -lh work/parts
+          COUNT=$(find work/parts -maxdepth 1 -type f -name 'super_WEAR7_V11_DIAG3_FINAL.img.part*' | wc -l)
+          test "$COUNT" = 10
+
+          cp work/parts/super_WEAR7_V11_DIAG3_FINAL.img.part* release/
+          cp work/reports/FINAL_MANIFEST.txt release/
+          cp work/reports/SPLIT_SHA256SUMS.txt release/
+          cp work/reports/SPLIT_SIZES.txt release/
+          cp work/reports/DIAG3_MAPPING.txt release/
+          cp work/reports/HISTORICAL_DIAG3_DELTA_REPORT.json release/
+          cp work/reports/BOOTCHAIN_AUDIT.txt release/
+
+          (cd work/kit && zip -qr "$GITHUB_WORKSPACE/release/Wear7-DIAG3-Final-FlashKit-NoSuper-V2.zip" .)
+
+          (cd release && sha256sum super_WEAR7_V11_DIAG3_FINAL.img.part* Wear7-DIAG3-Final-FlashKit-NoSuper-V2.zip > RELEASE_SHA256SUMS.txt)
+
+          cat > release/GET_WEAR7_DIAG3_FINAL.sh <<'SH'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          TAG='wear7-diag3-final-20261002'
+          REPO='jackk11111/config'
+          BASE="https://github.com/$REPO/releases/download/$TAG"
+          DIR="${1:-$PWD/Wear7_DIAG3_FINAL}"
+          mkdir -p "$DIR"
+          cd "$DIR"
+
+          echo 'Downloading manifest/checksums...'
+          curl -fL --retry 3 -O "$BASE/FINAL_MANIFEST.txt"
+          curl -fL --retry 3 -O "$BASE/SPLIT_SHA256SUMS.txt"
+          curl -fL --retry 3 -O "$BASE/RELEASE_SHA256SUMS.txt"
+          curl -fL --retry 3 -O "$BASE/Wear7-DIAG3-Final-FlashKit-NoSuper-V2.zip"
+
+          i=0
+          while [ "$i" -le 9 ]; do
+            n=$(printf '%02d' "$i")
+            f="super_WEAR7_V11_DIAG3_FINAL.img.part$n"
+            echo "Downloading $f..."
+            curl -fL --retry 3 -C - -o "$f" "$BASE/$f"
+            i=$((i+1))
+          done
+
+          echo 'Verifying release assets...'
+          sha256sum -c RELEASE_SHA256SUMS.txt
+
+          echo 'Reconstructing super...'
+          cat super_WEAR7_V11_DIAG3_FINAL.img.part00 \
+              super_WEAR7_V11_DIAG3_FINAL.img.part01 \
+              super_WEAR7_V11_DIAG3_FINAL.img.part02 \
+              super_WEAR7_V11_DIAG3_FINAL.img.part03 \
+              super_WEAR7_V11_DIAG3_FINAL.img.part04 \
+              super_WEAR7_V11_DIAG3_FINAL.img.part05 \
+              super_WEAR7_V11_DIAG3_FINAL.img.part06 \
+              super_WEAR7_V11_DIAG3_FINAL.img.part07 \
+              super_WEAR7_V11_DIAG3_FINAL.img.part08 \
+              super_WEAR7_V11_DIAG3_FINAL.img.part09 \
+              > super_WEAR7_V11_DIAG3_FINAL.img
+
+          GOT=$(sha256sum super_WEAR7_V11_DIAG3_FINAL.img | awk '{print $1}')
+          EXP='75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329'
+          [ "$GOT" = "$EXP" ] || { echo "FINAL SUPER SHA MISMATCH: $GOT"; exit 1; }
+
+          unzip -qo Wear7-DIAG3-Final-FlashKit-NoSuper-V2.zip -d flashkit
+          cp super_WEAR7_V11_DIAG3_FINAL.img flashkit/
+          echo 'READY=YES'
+          echo "DIR=$DIR"
+          echo "SUPER_SHA256=$GOT"
+          echo 'Next: use the flash script only with the TicWatch Pro 5 Enduro in physical fastboot.'
+          SH
+          chmod +x release/GET_WEAR7_DIAG3_FINAL.sh
+
+          cat > release/README_RELEASE.txt <<'EOF'
+          TicWatch Pro 5 Enduro / dace — Wear 7 V11 DIAG3 recovered final
+
+          Source successful run: 36913721664
+          Source commit: a7efe1f4418151315d26f34c2a951997babf5826
+          Historical current raw SHA256:
+            0298d8676c8e6e4de81ad100f3b74dbc6795046eebfb39951a339dc485547cfb
+          DIAG3 target raw SHA256:
+            725df162529100ddb924caa22a1f72db77189b00620d27a2450da4e9351e913e
+          Final sparse super SHA256:
+            75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329
+
+          Recovery is deliberately NOT included/flashed.
+          No automatic fastboot -w.
+          No metadata, misc, persist or Qualcomm firmware flashing.
+          Keep the current CEV2 recovery installed for the first diagnostic boot.
+          EOF
+
+      - name: Publish stable GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          TAG='wear7-diag3-final-20261002'
+          TARGET='a7efe1f4418151315d26f34c2a951997babf5826'
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" release/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$TARGET" \
+              --title 'TicWatch Pro 5 Enduro Wear7 V11 DIAG3 Final' \
+              --notes 'Recovered and exactly reconstructed Wear7 V11 DIAG3 final. The current recovery partition is intentionally untouched. This is a diagnostic bring-up package, not a finished ROM.'
+          fi
+
+      - name: Verify public release metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release view wear7-diag3-final-20261002 --repo "$GITHUB_REPOSITORY" --json tagName,targetCommitish,url,assets
