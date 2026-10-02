@@ -1,0 +1,117 @@
+name: Wear7 all early-init audit
+on:
+  push:
+    paths:
+      - '.github/workflows/wear7-all-earlyinit-audit-20261002.yml'
+permissions:
+  contents: write
+  actions: write
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Audit exact DIAG3 all early-init RC
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p parts work/tools work/parts work/mnt/{system,system_ext,product,vendor}
+          gh release download wear7-diag3-final-20261002 --repo "$GITHUB_REPOSITORY" --pattern 'super_WEAR7_V11_DIAG3_FINAL.img.part*' --dir parts
+          cat parts/super_WEAR7_V11_DIAG3_FINAL.img.part* > work/super.img
+          echo '75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329  work/super.img' | sha256sum -c -
+          ZIP=work/tools/otatools.zip
+          curl -fL --retry 3 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          python3 - "$ZIP" work/tools/extracted <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/','lib64/','lib/')):
+                      p=(out/n).resolve()
+                      if not p.is_relative_to(out): raise SystemExit('unsafe')
+                      z.extract(n,out)
+          PY
+          T="$PWD/work/tools/extracted"
+          chmod +x "$T/bin/"*
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          simg2img work/super.img work/super.raw
+          lpunpack work/super.raw work/parts
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs >/dev/null
+          for p in system system_ext product vendor; do
+            if [ -f "work/parts/$p.img" ]; then
+              sudo mount -o loop,ro "work/parts/$p.img" "work/mnt/$p"
+            fi
+          done
+          python3 - <<'PY'
+          import pathlib,re
+          roots=[pathlib.Path('work/mnt/system'),pathlib.Path('work/mnt/system_ext'),pathlib.Path('work/mnt/product'),pathlib.Path('work/mnt/vendor')]
+          files=[]
+          for root in roots:
+              if root.exists():
+                  files += list(root.rglob('*.rc'))
+          def rel(p):
+              s=str(p)
+              return s.replace('work/mnt/','/',1)
+          print('===== ALL EARLY-INIT BLOCKS =====')
+          starts=[]
+          execs=[]
+          for p in sorted(files):
+              try: lines=p.read_text(errors='replace').splitlines()
+              except: continue
+              i=0
+              while i<len(lines):
+                  line=lines[i]
+                  if re.match(r'^on\s+early-init(?:\s|$)',line):
+                      print(f'--- {rel(p)}:{i+1} ---')
+                      print(line)
+                      j=i+1
+                      while j<len(lines):
+                          x=lines[j]
+                          if x and not x[0].isspace() and not x.startswith('#'):
+                              break
+                          print(x)
+                          m=re.match(r'^\s*start\s+(\S+)',x)
+                          if m: starts.append((m.group(1),rel(p),j+1,x.strip()))
+                          m=re.match(r'^\s*exec_start\s+(\S+)',x)
+                          if m: execs.append((m.group(1),rel(p),j+1,x.strip()))
+                          m=re.match(r'^\s*exec(?:\s+[^-].*?--\s+|\s+--\s+)(\S+)',x)
+                          if m: execs.append((m.group(1),rel(p),j+1,x.strip()))
+                          j+=1
+                      i=j; continue
+                  i+=1
+          print('===== START/EXEC TARGETS =====')
+          for x in starts: print('START',*x,sep='|')
+          for x in execs: print('EXEC',*x,sep='|')
+          wanted={x[0] for x in starts}
+          print('===== SERVICE DEFINITIONS FOR EARLY-INIT STARTS =====')
+          for p in sorted(files):
+              try: lines=p.read_text(errors='replace').splitlines()
+              except: continue
+              i=0
+              while i<len(lines):
+                  m=re.match(r'^service\s+(\S+)\s+(.+)$',lines[i])
+                  if not m: i+=1; continue
+                  name=m.group(1)
+                  if name not in wanted: i+=1; continue
+                  print(f'--- SERVICE {name} @ {rel(p)}:{i+1} ---')
+                  print(lines[i])
+                  j=i+1
+                  while j<len(lines):
+                      x=lines[j]
+                      if x and not x[0].isspace() and not x.startswith('#'): break
+                      print(x)
+                      j+=1
+                  i=j
+          print('===== GLOBAL REBOOT/CRITICAL/SYS.POWERCTL HITS =====')
+          keys=('reboot_on_failure','sys.powerctl','critical','onrestart','shutdown critical')
+          for p in sorted(files):
+              try: lines=p.read_text(errors='replace').splitlines()
+              except: continue
+              for n,x in enumerate(lines,1):
+                  if any(k in x for k in keys):
+                      print(f'{rel(p)}:{n}:{x}')
+          print('RESULT=ALL_EARLYINIT_AUDIT_PASS')
+          PY
