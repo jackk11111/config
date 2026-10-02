@@ -1,0 +1,383 @@
+name: Wear7 DIAG4 build verified in-place patch
+
+on:
+  push:
+    branches: [wear7-diag4-init-bisect-20261002]
+    paths: ['.github/workflows/wear7-diag4-build-inplace-patch.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs >/dev/null
+          mkdir -p "$RUNNER_TEMP/w7/input" "$RUNNER_TEMP/w7/tools" "$RUNNER_TEMP/w7/parts" "$RUNNER_TEMP/w7/mnt" out-diag4
+
+      - name: Download exact DIAG3 final super
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-DIAG3-Final-Super-V2
+          path: ${{ runner.temp }}/w7/input
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '36913721664'
+
+      - name: Fetch pinned Android image tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 2 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo "f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  $ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          wanted=('bin/simg2img','bin/img2simg','bin/lpunpack','bin/lpmake')
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n in wanted or n.startswith(('lib64/','lib/')):
+                      p=(out/n).resolve()
+                      if not p.is_relative_to(out): raise SystemExit('unsafe')
+                      z.extract(n,out)
+          PY
+          rm -f "$ZIP"
+          chmod +x "$W/tools/extracted/bin/"*
+
+      - name: Expand and unpack exact DIAG3 source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          T="$W/tools/extracted"
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          S=$(find "$W/input" -type f -name super_WEAR7_V11_DIAG3_FINAL.img -print -quit)
+          test -n "$S"
+          test "$(stat -c %s "$S")" = 3837889664
+          echo '75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329  '"$S" | sha256sum -c -
+          simg2img "$S" "$W/source.raw"
+          test "$(stat -c %s "$W/source.raw")" = 4294967296
+          echo '725df162529100ddb924caa22a1f72db77189b00620d27a2450da4e9351e913e  '"$W/source.raw" | sha256sum -c -
+          lpunpack "$W/source.raw" "$W/parts"
+          cp "$W/parts/vendor.img" "$W/vendor.orig.img"
+          echo "SOURCE_SPARSE=$S" >> "$GITHUB_ENV"
+          echo 'SOURCE_SPARSE_SHA256=75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329' > out-diag4/MANIFEST.txt
+          echo 'SOURCE_RAW_SHA256=725df162529100ddb924caa22a1f72db77189b00620d27a2450da4e9351e913e' >> out-diag4/MANIFEST.txt
+
+      - name: Build same-size direct marker payloads and patch vendor file data only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          mkdir -p "$W/mnt/vendor"
+          sudo mount -o loop,ro,noload "$W/parts/vendor.img" "$W/mnt/vendor"
+          python3 - "$W/parts/vendor.img" "$W/mnt/vendor" "$W" out-diag4 <<'PY'
+          import pathlib,subprocess,sys,re,hashlib,json
+          vendor=pathlib.Path(sys.argv[1]); root=pathlib.Path(sys.argv[2]); w=pathlib.Path(sys.argv[3]); out=pathlib.Path(sys.argv[4])
+          specs=[
+            ('etc/init/android.hardware.keymaster@4.1-service-qti.rc','start vendor.keymaster-4-1','/metadata/vold/d/04','AFTER_KEYMASTER_START'),
+            ('etc/init/qseecomd.rc','start vendor.qseecomd','/metadata/vold/d/12','AFTER_QSEECOMD_START'),
+            ('etc/init/vendor.qti.hardware.qseecom@1.0-service.rc','start qseecom-service','/metadata/vold/d/17','AFTER_QSEECOM_SERVICE_START'),
+          ]
+          bsout=subprocess.check_output(['tune2fs','-l',str(vendor)],text=True,stderr=subprocess.STDOUT)
+          m=re.search(r'^Block size:\s*(\d+)',bsout,re.M)
+          if not m: raise SystemExit('no fs block size')
+          bs=int(m.group(1))
+          rows=[]
+          def compact_insert(data:bytes,start_line:str,marker_path:str):
+              text=data.decode('utf-8')
+              lines=text.splitlines(keepends=True)
+              needle=start_line.strip()
+              hits=[i for i,x in enumerate(lines) if x.strip()==needle]
+              if len(hits)!=1: raise SystemExit(f'start line count {needle}={len(hits)}')
+              marker=f'    chmod 0777 {marker_path}\n'
+              lines.insert(hits[0]+1,marker)
+              # Remove comment-only and blank lines first: semantics unchanged.
+              lines=[x for x in lines if x.strip() and not x.lstrip().startswith('#')]
+              mod=''.join(lines)
+              # If still too long, compact ONLY leading whitespace on command/property lines.
+              if len(mod.encode())>len(data):
+                  ls=mod.splitlines(keepends=True)
+                  ls=[((' '+x.lstrip()) if x[:1].isspace() else x) for x in ls]
+                  mod=''.join(ls)
+              b=mod.encode()
+              if len(b)>len(data):
+                  raise SystemExit(f'cannot fit marker: new={len(b)} old={len(data)} file start={needle}')
+              # Exact file byte-size preserved; trailing ASCII spaces are parser-inert.
+              b += b' '*(len(data)-len(b))
+              return b
+          for rel,start,mpath,label in specs:
+              p=root/rel
+              old=p.read_bytes()
+              new=compact_insert(old,start,mpath)
+              if len(new)!=len(old): raise SystemExit('size mismatch')
+              # Get physical filesystem blocks of this existing file; no inode/metadata edits.
+              cmd=['debugfs','-R',f'blocks /{rel}',str(vendor)]
+              txt=subprocess.check_output(cmd,text=True,stderr=subprocess.STDOUT)
+              nums=[int(x) for x in re.findall(r'\b\d+\b',txt.split('debugfs')[-1])]
+              # debugfs output may include version numbers on stderr merged; keep plausible fs blocks only.
+              maxblk=vendor.stat().st_size//bs
+              nums=[x for x in nums if 0 < x < maxblk]
+              need=(len(old)+bs-1)//bs
+              if len(nums)<need:
+                  raise SystemExit(f'not enough block mappings {rel}: {nums} need={need} raw={txt!r}')
+              nums=nums[-need:]
+              with vendor.open('r+b',buffering=0) as f:
+                  pos=0
+                  for block in nums:
+                      take=min(bs,len(new)-pos)
+                      if take<=0: break
+                      f.seek(block*bs)
+                      f.write(new[pos:pos+take])
+                      pos+=take
+              rows.append({
+                  'label':label,'file':rel,'marker':mpath,'size':len(old),
+                  'old_sha256':hashlib.sha256(old).hexdigest(),
+                  'new_sha256':hashlib.sha256(new).hexdigest(),
+                  'fs_blocks':nums,
+              })
+          (out/'MARKERS.json').write_text(json.dumps(rows,indent=2)+'\n')
+          (out/'MARKERS.txt').write_text('\n'.join(f"{r['marker']} {r['label']} after {r['file']}" for r in rows)+'\n')
+          print((out/'MARKERS.txt').read_text())
+          PY
+          sudo umount "$W/mnt/vendor"
+          e2fsck -fn "$W/parts/vendor.img" | tee out-diag4/VENDOR_E2FSCK.txt
+
+      - name: Verify patched file contents without filesystem metadata mutation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"
+          mkdir -p "$W/mnt/vendor"
+          sudo mount -o loop,ro,noload "$W/parts/vendor.img" "$W/mnt/vendor"
+          for spec in \
+            'android.hardware.keymaster@4.1-service-qti.rc|chmod 0777 /metadata/vold/d/04' \
+            'qseecomd.rc|chmod 0777 /metadata/vold/d/12' \
+            'vendor.qti.hardware.qseecom@1.0-service.rc|chmod 0777 /metadata/vold/d/17'; do
+            f=${spec%%|*}; needle=${spec#*|}
+            grep -Fxq "    $needle" "$W/mnt/vendor/etc/init/$f" || { echo "missing marker in $f"; exit 1; }
+          done
+          sha256sum "$W/mnt/vendor/etc/init/android.hardware.keymaster@4.1-service-qti.rc" \
+                    "$W/mnt/vendor/etc/init/qseecomd.rc" \
+                    "$W/mnt/vendor/etc/init/vendor.qti.hardware.qseecom@1.0-service.rc" \
+                    > out-diag4/PATCHED_RC_SHA256.txt
+          cat out-diag4/PATCHED_RC_SHA256.txt
+          sudo umount "$W/mnt/vendor"
+
+      - name: Prove lpmake reproduces exact DIAG3 raw layout then build DIAG4 raw
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"; T="$W/tools/extracted"
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          build_super() {
+            local vendor_img="$1" out="$2"
+            lpmake \
+              --metadata-size 65536 --metadata-slots 2 \
+              --super-name super --device super:4294967296 \
+              --group qti_dynamic_partitions:4284481536 \
+              --partition system:readonly:1741303808:qti_dynamic_partitions --image system="$W/parts/system.img" \
+              --partition system_ext:readonly:283598848:qti_dynamic_partitions --image system_ext="$W/parts/system_ext.img" \
+              --partition product:readonly:1613258752:qti_dynamic_partitions --image product="$W/parts/product.img" \
+              --partition vendor:readonly:297361408:qti_dynamic_partitions --image vendor="$vendor_img" \
+              --partition vendor_dlkm:readonly:63889408:qti_dynamic_partitions --image vendor_dlkm="$W/parts/vendor_dlkm.img" \
+              --partition system_dlkm:readonly:348160:qti_dynamic_partitions --image system_dlkm="$W/parts/system_dlkm.img" \
+              --output "$out"
+          }
+          build_super "$W/vendor.orig.img" "$W/rebuilt-source.raw"
+          REBUILT=$(sha256sum "$W/rebuilt-source.raw" | awk '{print $1}')
+          echo "REBUILT_SOURCE_RAW_SHA256=$REBUILT" | tee -a out-diag4/MANIFEST.txt
+          test "$REBUILT" = 725df162529100ddb924caa22a1f72db77189b00620d27a2450da4e9351e913e
+          cmp "$W/source.raw" "$W/rebuilt-source.raw"
+          echo 'SOURCE_LAYOUT_REPRODUCTION=PASS' | tee -a out-diag4/MANIFEST.txt
+          rm -f "$W/rebuilt-source.raw"
+          build_super "$W/parts/vendor.img" "$W/target.raw"
+          TARGET_RAW_SHA=$(sha256sum "$W/target.raw" | awk '{print $1}')
+          echo "TARGET_RAW_SHA256=$TARGET_RAW_SHA" | tee -a out-diag4/MANIFEST.txt
+          echo "TARGET_RAW_SHA=$TARGET_RAW_SHA" >> "$GITHUB_ENV"
+
+      - name: Derive source-sparse in-place byte patch and prove round-trip
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7"; T="$W/tools/extracted"
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          python3 - "$W/source.raw" "$W/target.raw" "$SOURCE_SPARSE" "$W/patched.sparse" out-diag4 <<'PY'
+          import pathlib,sys,struct,hashlib,json,base64,shutil
+          srcraw=pathlib.Path(sys.argv[1]); tgtraw=pathlib.Path(sys.argv[2]); sparse=pathlib.Path(sys.argv[3]); outsp=pathlib.Path(sys.argv[4]); out=pathlib.Path(sys.argv[5])
+          BS=4096
+          changed=[]
+          with srcraw.open('rb',buffering=0) as a,tgtraw.open('rb',buffering=0) as b:
+              bi=0
+              while True:
+                  x=a.read(BS); y=b.read(BS)
+                  if not x and not y: break
+                  if x!=y: changed.append((bi,x,y))
+                  bi+=1
+          if not changed: raise SystemExit('no changed raw blocks')
+          print('CHANGED_RAW_BLOCKS='+str(len(changed)))
+
+          # Map expanded raw block -> sparse payload file offset. All target changes must live in existing RAW chunks.
+          mapping={}
+          with sparse.open('rb') as f:
+              hdr=f.read(28)
+              magic,maj,minv,fhs,chs,bs,total,nchunks,ck=struct.unpack('<IHHHHIIII',hdr)
+              if (magic,bs,fhs,chs)!=(0xED26FF3A,BS,28,12): raise SystemExit('unexpected sparse header')
+              rawblk=0
+              wanted={b for b,_,_ in changed}
+              for _ in range(nchunks):
+                  chpos=f.tell(); ch=f.read(12)
+                  typ,res,count,total_sz=struct.unpack('<HHII',ch)
+                  payload=f.tell()
+                  hits=[b for b in wanted if rawblk<=b<rawblk+count]
+                  if hits:
+                      if typ!=0xCAC1:
+                          raise SystemExit(f'changed raw block(s) {hits} lie in non-RAW sparse chunk type={typ:#x}')
+                      for b in hits:
+                          mapping[b]=payload+(b-rawblk)*BS
+                  if typ==0xCAC1: f.seek(count*BS,1)
+                  elif typ==0xCAC2: f.seek(4,1)
+                  elif typ==0xCAC3: pass
+                  elif typ==0xCAC4: f.seek(4,1)
+                  else: raise SystemExit(f'unknown sparse chunk {typ:#x}')
+                  rawblk+=count
+              if rawblk!=total: raise SystemExit('sparse total block mismatch')
+          if len(mapping)!=len(changed): raise SystemExit('incomplete sparse mapping')
+
+          # Byte-run records instead of whole blocks.
+          rec=[]
+          for b,x,y in changed:
+              i=0
+              while i<BS:
+                  if x[i]==y[i]: i+=1; continue
+                  j=i+1
+                  while j<BS and x[j]!=y[j]: j+=1
+                  old=x[i:j]; new=y[i:j]
+                  rec.append({
+                    'raw_block':b,'sparse_offset':mapping[b]+i,'length':j-i,
+                    'old_b64':base64.b64encode(old).decode(),
+                    'new_b64':base64.b64encode(new).decode(),
+                    'old_sha256':hashlib.sha256(old).hexdigest(),
+                    'new_sha256':hashlib.sha256(new).hexdigest(),
+                  })
+                  i=j
+          shutil.copyfile(sparse,outsp)
+          with outsp.open('r+b',buffering=0) as f:
+              for r in rec:
+                  f.seek(r['sparse_offset']); got=f.read(r['length'])
+                  if hashlib.sha256(got).hexdigest()!=r['old_sha256']: raise SystemExit('source sparse byte mismatch')
+                  f.seek(r['sparse_offset']); f.write(base64.b64decode(r['new_b64']))
+          psha=hashlib.sha256(outsp.read_bytes()).hexdigest()
+          patch={'format':1,'source_sparse_sha256':'75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329','target_sparse_sha256':psha,'target_raw_sha256':hashlib.sha256(tgtraw.read_bytes()).hexdigest(),'changed_raw_blocks':len(changed),'records':rec}
+          (out/'DIAG4_PATCH.json').write_text(json.dumps(patch,indent=2)+'\n')
+          print('PATCH_RECORDS='+str(len(rec)))
+          print('TARGET_SPARSE_SHA256='+psha)
+          PY
+          simg2img "$W/patched.sparse" "$W/patched.raw"
+          echo "$TARGET_RAW_SHA  $W/patched.raw" | sha256sum -c -
+          cmp "$W/patched.raw" "$W/target.raw"
+          TARGET_SPARSE_SHA=$(sha256sum "$W/patched.sparse" | awk '{print $1}')
+          echo "TARGET_SPARSE_SHA256=$TARGET_SPARSE_SHA" | tee -a out-diag4/MANIFEST.txt
+          echo "PATCHED_SPARSE_ROUNDTRIP=PASS" | tee -a out-diag4/MANIFEST.txt
+          rm -f "$W/patched.sparse" "$W/patched.raw"
+
+      - name: Generate transactional Windows in-place patcher
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - out-diag4/DIAG4_PATCH.json out-diag4/APPLY_WEAR7_DIAG4_WINDOWS.ps1 <<'PY'
+          import json,pathlib,sys
+          p=json.loads(pathlib.Path(sys.argv[1]).read_text())
+          rec=json.dumps(p['records'],separators=(',',':'))
+          script=r'''param(
+  [string]$Super = "$env:USERPROFILE\Downloads\TicWatch_Wear7_DIAG3_FINAL\FlashKit\super_WEAR7_V11_DIAG3_FINAL.img"
+)
+$ErrorActionPreference='Stop'
+$Source='SOURCE_SHA'
+$Target='TARGET_SHA'
+$RecordsJson=@'
+RECORDS_JSON
+'@
+function HashFile([string]$p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower() }
+if (!(Test-Path -LiteralPath $Super)) { throw "SUPER_NOT_FOUND=$Super" }
+$h=HashFile $Super
+Write-Host "CURRENT_SHA256=$h"
+if ($h -eq $Target) { Write-Host 'RESULT=DIAG4_ALREADY_PATCHED'; exit 0 }
+if ($h -ne $Source) { throw "SOURCE_SHA_MISMATCH expected=$Source got=$h" }
+$records=$RecordsJson | ConvertFrom-Json
+$fs=[System.IO.File]::Open($Super,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+$rollback=New-Object System.Collections.Generic.List[object]
+try {
+  foreach($r in $records) {
+    $old=[Convert]::FromBase64String([string]$r.old_b64)
+    $new=[Convert]::FromBase64String([string]$r.new_b64)
+    [void]$fs.Seek([Int64]$r.sparse_offset,[System.IO.SeekOrigin]::Begin)
+    $got=New-Object byte[] $old.Length
+    $n=$fs.Read($got,0,$got.Length)
+    if($n -ne $got.Length -or -not [System.Linq.Enumerable]::SequenceEqual([byte[]]$got,[byte[]]$old)) { throw "PATCH_SOURCE_BYTES_MISMATCH offset=$($r.sparse_offset)" }
+    $rollback.Add([pscustomobject]@{Offset=[Int64]$r.sparse_offset;Bytes=$got})
+  }
+  foreach($r in $records) {
+    $new=[Convert]::FromBase64String([string]$r.new_b64)
+    [void]$fs.Seek([Int64]$r.sparse_offset,[System.IO.SeekOrigin]::Begin)
+    $fs.Write($new,0,$new.Length)
+  }
+  $fs.Flush($true)
+} finally { $fs.Dispose() }
+$h2=HashFile $Super
+Write-Host "TARGET_SHA256=$h2"
+if($h2 -ne $Target) {
+  Write-Host 'TARGET_HASH_FAIL_ROLLING_BACK'
+  $fs=[System.IO.File]::Open($Super,[System.IO.FileMode]::Open,[System.IO.FileAccess]::ReadWrite,[System.IO.FileShare]::None)
+  try { foreach($x in $rollback) { [void]$fs.Seek($x.Offset,[System.IO.SeekOrigin]::Begin); $fs.Write($x.Bytes,0,$x.Bytes.Length) }; $fs.Flush($true) } finally { $fs.Dispose() }
+  $hr=HashFile $Super
+  Write-Host "ROLLBACK_SHA256=$hr"
+  if($hr -ne $Source) { throw 'ROLLBACK_HASH_MISMATCH' }
+  throw 'DIAG4_PATCH_FAILED_ROLLED_BACK_OK'
+}
+Write-Host 'RESULT=DIAG4_PATCH_PASS'
+'''
+          script=script.replace('SOURCE_SHA',p['source_sparse_sha256']).replace('TARGET_SHA',p['target_sparse_sha256']).replace('RECORDS_JSON',rec)
+          pathlib.Path(sys.argv[2]).write_text(script)
+          PY
+          echo '===== DIAG4 MANIFEST ====='
+          cat out-diag4/MANIFEST.txt
+          echo '===== MARKERS ====='
+          cat out-diag4/MARKERS.txt
+          echo '===== PATCH SUMMARY ====='
+          python3 - <<'PY'
+          import json
+          p=json.load(open('out-diag4/DIAG4_PATCH.json'))
+          print('CHANGED_RAW_BLOCKS='+str(p['changed_raw_blocks']))
+          print('PATCH_RECORDS='+str(len(p['records'])))
+          print('SOURCE_SPARSE_SHA256='+p['source_sparse_sha256'])
+          print('TARGET_SPARSE_SHA256='+p['target_sparse_sha256'])
+          print('TARGET_RAW_SHA256='+p['target_raw_sha256'])
+          PY
+          echo '===== POWERSHELL_SHA256 ====='
+          sha256sum out-diag4/APPLY_WEAR7_DIAG4_WINDOWS.ps1
+          echo '===== POWERSHELL_BEGIN ====='
+          cat out-diag4/APPLY_WEAR7_DIAG4_WINDOWS.ps1
+          echo '===== POWERSHELL_END ====='
+
+      - name: Upload compact DIAG4 patch package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-DIAG4-InPlace-Patch
+          path: out-diag4/
+          if-no-files-found: error
+          retention-days: 60
+          compression-level: 9
