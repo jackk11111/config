@@ -1,4 +1,4 @@
-name: Wear7 QCV early-init raw block probe
+name: Wear7 QCV SKU setprop one-byte bisect map
 
 on:
   push:
@@ -29,7 +29,7 @@ jobs:
           cat parts/super_WEAR7_V11_DIAG3_FINAL.img.part* > super.img
           echo '75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329  super.img' | sha256sum -c -
 
-      - name: Locate QCV action and build one-block diagnostic patch
+      - name: Map minimal SKU setprop neutralization
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -40,8 +40,7 @@ jobs:
           with p.open('rb') as f:
               mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
               try:
-                  hdr = struct.unpack('<IHHHHIIII', mm[:28])
-                  magic, major, minor, file_hdr_sz, chunk_hdr_sz, blk_sz, total_blks, total_chunks, checksum = hdr
+                  magic, major, minor, file_hdr_sz, chunk_hdr_sz, blk_sz, total_blks, total_chunks, checksum = struct.unpack('<IHHHHIIII', mm[:28])
                   if magic != 0xED26FF3A or blk_sz != 4096:
                       raise SystemExit(f'BAD_SPARSE_HEADER magic={magic:#x} blk={blk_sz}')
 
@@ -49,15 +48,10 @@ jobs:
                   exec_line = b'    exec u:r:vendor_qti_init_shell:s0 -- /vendor/bin/init.qti.qcv.sh\n'
                   post_line = b'    setprop ro.boot.product.vendor.sku ${ro.vendor.qti.soc_name}\n'
                   prefix = b'on early-init\n' + comment + exec_line + post_line
-
                   base = mm.find(prefix)
-                  if base < 0:
-                      raise SystemExit('QCV_PREFIX_NOT_FOUND')
-                  if mm.find(prefix, base + 1) >= 0:
+                  if base < 0 or mm.find(prefix, base + 1) >= 0:
                       raise SystemExit('QCV_PREFIX_NOT_UNIQUE')
-
-                  sparse_pre = base + len(b'on early-init\n')
-                  sparse_post = sparse_pre + len(comment) + len(exec_line)
+                  sparse_post = base + len(b'on early-init\n') + len(comment) + len(exec_line)
 
                   def sparse_to_raw(sp):
                       pos = file_hdr_sz
@@ -69,67 +63,48 @@ jobs:
                               end = data + count * blk_sz
                               if data <= sp < end:
                                   raw_off = raw_block * blk_sz + (sp - data)
-                                  return raw_off, pos, data, raw_block, count
+                                  return raw_off, data, raw_block, count
                           pos += total_sz
                           raw_block += count
-                      raise SystemExit(f'SPARSE_OFFSET_NOT_IN_RAW_CHUNK={sp}')
+                      raise SystemExit('POST_NOT_IN_RAW_CHUNK')
 
-                  raw_pre, chunk_pos_pre, chunk_data_pre, chunk_raw_start_pre, chunk_count_pre = sparse_to_raw(sparse_pre)
-                  raw_post, chunk_pos_post, chunk_data_post, chunk_raw_start_post, chunk_count_post = sparse_to_raw(sparse_post)
-
-                  block_pre, in_pre = divmod(raw_pre, blk_sz)
-                  block_post, in_post = divmod(raw_post, blk_sz)
-                  if block_pre != block_post:
-                      raise SystemExit(f'QCV_LINES_CROSS_RAW_BLOCK pre={block_pre} post={block_post}')
-
-                  block = block_pre
-
-                  # Translate raw block start back to sparse file position.
-                  if not (chunk_raw_start_pre <= block < chunk_raw_start_pre + chunk_count_pre):
-                      raise SystemExit('BLOCK_NOT_IN_PRE_CHUNK')
-                  sparse_block = chunk_data_pre + (block - chunk_raw_start_pre) * blk_sz
+                  raw_post, chunk_data, chunk_raw_start, chunk_count = sparse_to_raw(sparse_post)
+                  block, in_post = divmod(raw_post, blk_sz)
+                  sparse_block = chunk_data + (block - chunk_raw_start) * blk_sz
                   original = bytearray(mm[sparse_block:sparse_block+blk_sz])
-                  if len(original) != blk_sz:
-                      raise SystemExit('SHORT_BLOCK')
-
-                  if original[in_pre:in_pre+len(comment)] != comment:
-                      raise SystemExit('PRE_SOURCE_MISMATCH')
+                  if block != 904056 or in_post != 444:
+                      raise SystemExit(f'UNEXPECTED_LOCATION block={block} in_post={in_post}')
+                  if hashlib.sha256(original).hexdigest() != 'c64bdbdebc7cbeef49b2d7501d28fdd857578cccfd6070dee32eb3bb80e806a9':
+                      raise SystemExit('ORIGINAL_BLOCK_SHA_MISMATCH')
                   if original[in_post:in_post+len(post_line)] != post_line:
                       raise SystemExit('POST_SOURCE_MISMATCH')
 
-                  def padded(new_line, old_line):
-                      if not new_line.endswith(b'\n') or not old_line.endswith(b'\n'):
-                          raise SystemExit('LINE_FORMAT')
-                      if len(new_line) > len(old_line):
-                          raise SystemExit('REPLACEMENT_TOO_LONG')
-                      return new_line[:-1] + b' ' * (len(old_line)-len(new_line)) + b'\n'
-
-                  new_pre = padded(b'    chmod 0777 /metadata/vold/d/04\n', comment)
-                  new_post = padded(b'    chmod 0777 /metadata/vold/d/12\n', post_line)
-
+                  patch_off = in_post + 4
+                  if original[patch_off] != ord('s'):
+                      raise SystemExit(f'OLD_BYTE_MISMATCH={original[patch_off]:02x}')
                   patched = bytearray(original)
-                  patched[in_pre:in_pre+len(comment)] = new_pre
-                  patched[in_post:in_post+len(post_line)] = new_post
+                  patched[patch_off] = ord('#')
 
-                  h0 = hashlib.sha256(original).hexdigest()
-                  h1 = hashlib.sha256(patched).hexdigest()
+                  diffs = [(i,a,b) for i,(a,b) in enumerate(zip(original,patched)) if a != b]
+                  if diffs != [(448,0x73,0x23)]:
+                      raise SystemExit(f'NOT_ONE_BYTE={diffs}')
+                  target_sha = hashlib.sha256(patched).hexdigest()
+                  result_line = bytes(patched[in_post:in_post+len(post_line)])
 
-                  print('===== QCV EARLY-INIT ONE-BLOCK PROBE =====')
-                  print(f'SPARSE_PREFIX_OFFSET={base}')
+                  print('===== QCV SKU SETPROP ONE-BYTE BISECT =====')
                   print(f'RAW_BLOCK={block}')
                   print(f'RAW_BLOCK_OFFSET={block*blk_sz}')
-                  print(f'PRE_OFFSET_IN_BLOCK={in_pre}')
-                  print(f'POST_OFFSET_IN_BLOCK={in_post}')
-                  print(f'ORIGINAL_BLOCK_SHA256={h0}')
-                  print(f'PATCHED_BLOCK_SHA256={h1}')
-                  print(f'OLD_PRE_HEX={comment.hex()}')
-                  print(f'NEW_PRE_HEX={new_pre.hex()}')
-                  print(f'OLD_POST_HEX={post_line.hex()}')
-                  print(f'NEW_POST_HEX={new_post.hex()}')
-                  print('PRE_MARKER=04')
-                  print('POST_MARKER=12')
-                  print('SEMANTICS=04_before_qcv_exec__12_immediately_after_qcv_exec')
-                  print('RESULT=QCV_ONE_BLOCK_PROBE_PASS')
+                  print(f'SETPROP_LINE_OFFSET_IN_BLOCK={in_post}')
+                  print(f'PATCH_OFFSET_IN_BLOCK={patch_off}')
+                  print('OLD_BYTE_HEX=73')
+                  print('NEW_BYTE_HEX=23')
+                  print('ORIGINAL_BLOCK_SHA256='+hashlib.sha256(original).hexdigest())
+                  print('TARGET_BLOCK_SHA256='+target_sha)
+                  print('ORIGINAL_LINE='+post_line.decode().rstrip())
+                  print('PATCHED_LINE='+result_line.decode().rstrip())
+                  print('CHANGED_BYTES=1')
+                  print('SEMANTICS=neutralize_only_ro.boot.product.vendor.sku_setprop_keep_qcv_exec_unchanged')
+                  print('RESULT=QCV_SKU_ONE_BYTE_MAP_PASS')
               finally:
                   mm.close()
           PY
