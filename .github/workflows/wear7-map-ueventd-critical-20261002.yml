@@ -1,0 +1,59 @@
+name: Wear7 map ueventd critical
+on: push
+jobs:
+  map:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Map exact DIAG3 ueventd critical
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p parts work/tools work/parts
+          gh release download wear7-diag3-final-20261002 --repo "$GITHUB_REPOSITORY" --pattern 'super_WEAR7_V11_DIAG3_FINAL.img.part*' --dir parts
+          cat parts/super_WEAR7_V11_DIAG3_FINAL.img.part* > work/super.img
+          echo '75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329  work/super.img' | sha256sum -c -
+          ZIP=work/tools/otatools.zip
+          curl -fL --retry 3 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          python3 - "$ZIP" work/tools/extracted <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/','lib64/','lib/')):
+                      p=(out/n).resolve()
+                      if not p.is_relative_to(out): raise SystemExit('unsafe')
+                      z.extract(n,out)
+          PY
+          T="$PWD/work/tools/extracted"
+          chmod +x "$T/bin/"*
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          simg2img work/super.img work/super.raw
+          lpunpack work/super.raw work/parts
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs >/dev/null
+          python3 - <<'PY'
+          import subprocess,pathlib,hashlib,re
+          sysimg=pathlib.Path('work/parts/system.img'); raw=pathlib.Path('work/super.raw').read_bytes(); simg=sysimg.read_bytes(); bs=4096
+          path='/system/etc/init/hw/init.rc'; dump=pathlib.Path('work/init.rc')
+          subprocess.run(['debugfs','-R',f'dump {path} {dump}',str(sysimg)],check=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+          data=dump.read_bytes()
+          m=re.search(rb'(?m)^service ueventd /system/bin/ueventd\n(?:[ \t].*\n)*?[ \t]+critical\n',data)
+          if not m: raise SystemExit('ueventd stanza missing')
+          stanza=m.group(0); rel=stanza.find(b'critical'); off=m.start()+rel
+          print('STANZA_START='+str(m.start())); print(stanza.decode(errors='replace'))
+          print('CRITICAL_FILE_OFFSET='+str(off))
+          logical=off//bs; within=off%bs
+          out=subprocess.check_output(['debugfs','-R',f'bmap {path} {logical}',str(sysimg)],stderr=subprocess.DEVNULL,text=True)
+          fsblk=int(out.strip().splitlines()[-1]); block=simg[fsblk*bs:(fsblk+1)*bs]
+          hits=[]; pos=0
+          while True:
+              i=raw.find(block,pos)
+              if i<0: break
+              hits.append(i); pos=i+1
+          print('OFFSET_IN_BLOCK='+str(within)); print('FS_BLOCK='+str(fsblk)); print('BLOCK_SHA256='+hashlib.sha256(block).hexdigest()); print('RAW_HITS='+str(hits))
+          if len(hits)!=1 or hits[0]%bs: raise SystemExit('ambiguous')
+          print('RAW_BLOCK='+str(hits[0]//bs)); print('RAW_OFFSET='+str(hits[0])); print('RESULT=UEVENTD_CRITICAL_MAP_PASS')
+          PY
