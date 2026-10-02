@@ -1,0 +1,152 @@
+name: Wear7 PATCH6 QCV early-init bisect map
+
+on:
+  push:
+    branches: [wear7-diag4-init-bisect-20261002]
+    paths: ['.github/workflows/wear7-patch6-qcv-bisect-map-20261002.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  map:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Prepare exact DIAG3
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs >/dev/null
+          mkdir -p parts work/tools work/parts
+          gh release download wear7-diag3-final-20261002 --repo "$GITHUB_REPOSITORY" --pattern 'super_WEAR7_V11_DIAG3_FINAL.img.part*' --dir parts
+          cat parts/super_WEAR7_V11_DIAG3_FINAL.img.part* > work/super.img
+          echo '75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329  work/super.img' | sha256sum -c -
+          ZIP=work/tools/otatools.zip
+          curl -fL --retry 3 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          python3 - "$ZIP" work/tools/extracted <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n in ('bin/simg2img','bin/lpunpack','bin/lpmake') or n.startswith(('lib64/','lib/')):
+                      p=(out/n).resolve()
+                      if not p.is_relative_to(out): raise SystemExit('unsafe')
+                      z.extract(n,out)
+          PY
+          chmod +x work/tools/extracted/bin/*
+          export PATH="$PWD/work/tools/extracted/bin:$PATH" LD_LIBRARY_PATH="$PWD/work/tools/extracted/lib64:$PWD/work/tools/extracted/lib"
+          simg2img work/super.img work/source.raw
+          echo '725df162529100ddb924caa22a1f72db77189b00620d27a2450da4e9351e913e  work/source.raw' | sha256sum -c -
+          lpunpack work/source.raw work/parts
+          cp work/parts/vendor.img work/vendor.orig.img
+
+      - name: Build QCV before-after marker patch and map raw super block
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import pathlib,subprocess,re,hashlib,json,base64
+          BS=4096
+          vendor=pathlib.Path('work/parts/vendor.img')
+          source_raw=pathlib.Path('work/source.raw')
+          rel='/etc/init/init.qti.qcv.rc'
+          dump=pathlib.Path('work/qcv.rc')
+          subprocess.run(['debugfs','-R',f'dump {rel} {dump}',str(vendor)],check=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+          old=dump.read_bytes()
+          print('===== ORIGINAL QCV RC =====')
+          print(old.decode(errors='replace'))
+
+          exec_line=b'    exec u:r:vendor_qti_init_shell:s0 -- /vendor/bin/init.qti.qcv.sh\n'
+          if old.count(exec_line)!=1: raise SystemExit(f'QCV_EXEC_COUNT={old.count(exec_line)}')
+          pos=old.index(exec_line)
+          before=b'    chmod 0777 /metadata/vold/a\n'
+          after =b'    chmod 0777 /metadata/vold/b\n'
+          # Drop only the explanatory comment immediately preceding QCV exec, preserve every executable command.
+          lines=old.splitlines(keepends=True)
+          out=[]; inserted=False
+          for line in lines:
+              if line.strip()==b'# Set ro.boot.product.vendor.sku to soc_name':
+                  continue
+              if line==exec_line:
+                  out.append(before); out.append(line); out.append(after); inserted=True
+              else:
+                  out.append(line)
+          if not inserted: raise SystemExit('QCV_INSERT_FAILED')
+          new=b''.join(out)
+          # Compact indentation only if needed; Android init accepts one leading space for action commands.
+          if len(new)>len(old):
+              ls=new.splitlines(keepends=True)
+              new=b''.join((b' '+x.lstrip() if x[:1] in (b' ',b'\t') else x) for x in ls)
+          if len(new)>len(old): raise SystemExit(f'QCV_PATCH_TOO_LONG old={len(old)} new={len(new)}')
+          new += b' '*(len(old)-len(new))
+          if len(new)!=len(old): raise SystemExit('SIZE_MISMATCH')
+
+          # Prove all original executable commands remain, in order.
+          def cmds(b):
+              return [x.strip() for x in b.splitlines() if x.strip() and not x.lstrip().startswith(b'#') and not x.startswith(b'on ')]
+          oc=cmds(old); nc=[x for x in cmds(new) if not x.startswith(b'chmod 0777 /metadata/vold/')]
+          if oc!=nc:
+              print('OLD_CMDS=',oc); print('NEW_CMDS=',nc); raise SystemExit('SEMANTIC_COMMAND_MISMATCH')
+
+          # Physical block map of this tiny rc file.
+          txt=subprocess.check_output(['debugfs','-R',f'blocks {rel}',str(vendor)],text=True,stderr=subprocess.DEVNULL)
+          maxblk=vendor.stat().st_size//BS
+          blocks=[int(x) for x in re.findall(r'\b\d+\b',txt) if 0<int(x)<maxblk]
+          need=(len(old)+BS-1)//BS
+          if len(blocks)<need: raise SystemExit(f'BLOCK_MAP_SHORT {blocks} need={need}')
+          blocks=blocks[-need:]
+          if need!=1: raise SystemExit(f'QCV_EXPECTED_ONE_BLOCK need={need} blocks={blocks}')
+          fsblk=blocks[0]
+          with vendor.open('rb') as f:
+              f.seek(fsblk*BS); oldblk=f.read(BS)
+          if len(oldblk)!=BS: raise SystemExit('SHORT_VENDOR_BLOCK')
+          patched=bytearray(oldblk)
+          patched[:len(new)]=new
+          newblk=bytes(patched)
+
+          # Find this exact vendor filesystem block uniquely in expanded 4 GiB super.
+          raw=source_raw.read_bytes()
+          hits=[]; at=0
+          while True:
+              i=raw.find(oldblk,at)
+              if i<0: break
+              hits.append(i); at=i+1
+          if len(hits)!=1 or hits[0]%BS: raise SystemExit(f'RAW_HITS={hits}')
+          rawoff=hits[0]; rawblock=rawoff//BS
+
+          # Emit minimal byte runs so Termux can patch a pulled 4K block while SHA-guarding source/current state.
+          runs=[]; i=0
+          while i<BS:
+              if oldblk[i]==newblk[i]: i+=1; continue
+              j=i+1
+              while j<BS and oldblk[j]!=newblk[j]: j+=1
+              runs.append({'offset':i,'old_b64':base64.b64encode(oldblk[i:j]).decode(),'new_b64':base64.b64encode(newblk[i:j]).decode()})
+              i=j
+          desc={
+            'raw_block':rawblock,
+            'raw_offset':rawoff,
+            'source_block_sha256':hashlib.sha256(oldblk).hexdigest(),
+            'patched_block_sha256':hashlib.sha256(newblk).hexdigest(),
+            'qcv_old_size':len(old),'qcv_new_size':len(new),
+            'runs':runs,
+          }
+          pathlib.Path('PATCH6_QCV.json').write_text(json.dumps(desc,indent=2)+'\n')
+          print('===== PATCH6 QCV BISect =====')
+          print('QCV_FILE='+rel)
+          print('QCV_FILE_SIZE='+str(len(old)))
+          print('VENDOR_FS_BLOCK='+str(fsblk))
+          print('RAW_BLOCK='+str(rawblock))
+          print('RAW_OFFSET='+str(rawoff))
+          print('SOURCE_BLOCK_SHA256='+desc['source_block_sha256'])
+          print('PATCHED_BLOCK_SHA256='+desc['patched_block_sha256'])
+          print('PATCH_RUNS='+json.dumps(runs,separators=(',',':')))
+          print('MARKER_A=before_exec_init.qti.qcv.sh')
+          print('MARKER_B=after_exec_init.qti.qcv.sh')
+          print('EXECUTABLE_COMMANDS_PRESERVED=PASS')
+          print('RESULT=PATCH6_QCV_MAP_PASS')
+          PY
