@@ -55,7 +55,6 @@ jobs:
               'bin/fsck.erofs','bin/simg2img','bin/debugfs','bin/debugfs_static'
           }
           names=set(z.namelist())
-          # debugfs may exist only as one of debugfs/debugfs_static.
           required={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/deapexer','bin/fsck.erofs','bin/simg2img'}
           missing=required-names
           if missing: raise SystemExit('missing host tools: '+','.join(sorted(missing)))
@@ -65,9 +64,9 @@ jobs:
               if not p.is_relative_to(out): raise SystemExit('unsafe')
               z.extract(n,out)
           PY
+          chmod +x "$W/tools/x/bin/"*
           test -x "$W/tools/x/bin/deapexer"
           test -x "$W/tools/x/bin/simg2img"
-          chmod +x "$W/tools/x/bin/"*
           echo "HOST=$W/tools/x" >> "$GITHUB_ENV"
 
       - name: Unpack and mount exact DIAG3
