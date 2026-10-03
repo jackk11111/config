@@ -1,0 +1,326 @@
+name: Wear7 system-wide DIAG3 compatibility audit
+
+on:
+  push:
+    paths:
+      - '.github/workflows/wear7-system-wide-audit-20261003.yml'
+  workflow_dispatch:
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free space and prepare
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
+          W="$RUNNER_TEMP/w7sys"
+          mkdir -p "$W/input" "$W/tools" "$W/parts" "$W/mnt" report
+          df -h /
+
+      - name: Download exact DIAG3 source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7sys"
+          gh release download wear7-diag3-final-20261002 \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'super_WEAR7_V11_DIAG3_FINAL.img.part*' \
+            --dir "$W/input"
+          cat "$W"/input/super_WEAR7_V11_DIAG3_FINAL.img.part* > "$W/super.img"
+          echo '75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329  '"$W/super.img" | sha256sum -c -
+          stat -c 'SPARSE_SIZE=%s' "$W/super.img" | tee report/SOURCE.txt
+          sha256sum "$W/super.img" | tee -a report/SOURCE.txt
+
+      - name: Unpack super and mount all logical partitions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7sys"
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 3 -sS -o "$ZIP" \
+            https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          python3 - "$ZIP" "$W/tools/extracted" <<'PY'
+          import pathlib,sys,zipfile
+          out=pathlib.Path(sys.argv[2]).resolve()
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for n in z.namelist():
+                  if n.startswith(('bin/','lib64/','lib/')):
+                      p=(out/n).resolve()
+                      if not p.is_relative_to(out): raise SystemExit('unsafe path')
+                      z.extract(n,out)
+          PY
+          T="$W/tools/extracted"
+          chmod +x "$T/bin/"*
+          export PATH="$T/bin:$PATH" LD_LIBRARY_PATH="$T/lib64:$T/lib"
+          simg2img "$W/super.img" "$W/super.raw"
+          test "$(stat -c %s "$W/super.raw")" = 4294967296
+          lpunpack "$W/super.raw" "$W/parts"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs kmod >/dev/null
+          for p in system system_ext product vendor vendor_dlkm system_dlkm; do
+            if [ -f "$W/parts/$p.img" ]; then
+              mkdir -p "$W/mnt/$p"
+              if sudo mount -o loop,ro,noload "$W/parts/$p.img" "$W/mnt/$p" 2>/dev/null; then
+                echo "$p=MOUNTED" | tee -a report/MOUNTS.txt
+              else
+                echo "$p=MOUNT_FAILED" | tee -a report/MOUNTS.txt
+              fi
+            fi
+          done
+          ls -lh "$W/parts" | tee report/PARTITIONS.txt
+          rm -f "$W/super.raw" "$ZIP"
+
+      - name: System-wide compatibility audit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="$RUNNER_TEMP/w7sys"
+          ROOT="$W/mnt"
+
+          python3 - "$ROOT" report <<'PY'
+          import pathlib,re,sys,json,os,subprocess,collections
+          root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          parts=[p for p in ['system','system_ext','product','vendor','vendor_dlkm','system_dlkm'] if (root/p).is_dir()]
+
+          def files_matching(globs):
+              seen=set(); arr=[]
+              for part in parts:
+                  base=root/part
+                  for g in globs:
+                      for p in base.rglob(g):
+                          if p.is_file() and p not in seen:
+                              seen.add(p); arr.append((part,p))
+              return arr
+
+          def rel(part,p):
+              return f'{part}:/{p.relative_to(root/part)}'
+
+          # 1) Identity / donor assumptions.
+          keys=re.compile(r'(?i)(qingyang|oneplus|oplus|oppo|watch.?3|dace|ticwatch|mobvoi|ro\.vendor\.qti\.soc|ro\.boot\.product\.vendor\.sku|soc_name|soc_model)')
+          rows=[]
+          for part,p in files_matching(['*.prop','build.prop','*.rc','*.xml','*.conf','*.json']):
+              try: txt=p.read_text(errors='replace')
+              except: continue
+              for n,line in enumerate(txt.splitlines(),1):
+                  if keys.search(line): rows.append(f'{rel(part,p)}:{n}: {line}')
+          (out/'IDENTITY_DONOR_ASSUMPTIONS.txt').write_text('\n'.join(rows)+'\n')
+
+          # 2) Fstab/storage assumptions.
+          rows=[]
+          for part in parts:
+              for p in (root/part).rglob('fstab*'):
+                  if not p.is_file(): continue
+                  try: txt=p.read_text(errors='replace')
+                  except: continue
+                  rows.append(f'===== {rel(part,p)} =====\n{txt}')
+          (out/'FSTAB_ALL.txt').write_text('\n'.join(rows)+'\n')
+
+          # 3) ueventd rules + firmware/dev/sysfs assumptions.
+          rows=[]
+          for part,p in files_matching(['ueventd*.rc','*.rc']):
+              try: txt=p.read_text(errors='replace')
+              except: continue
+              if 'ueventd' in p.name or re.search(r'(?i)(firmware|remoteproc|subsys|slate|bt|bluetooth|wlan|wifi|cdsp|adsp|modem|qsee|keymaster|/sys/|/dev/)',txt):
+                  hit=[]
+                  for n,line in enumerate(txt.splitlines(),1):
+                      if ('ueventd' in p.name or re.search(r'(?i)(firmware|remoteproc|subsys|slate|bt|bluetooth|wlan|wifi|cdsp|adsp|modem|qsee|keymaster|/sys/|/dev/)',line)):
+                          hit.append(f'{n}: {line}')
+                  if hit: rows.append(f'===== {rel(part,p)} =====\n'+'\n'.join(hit))
+          (out/'UEVENTD_FIRMWARE_SYSFS_RC.txt').write_text('\n'.join(rows)+'\n')
+
+          # 4) Init dangerous/boot-gating actions system-wide.
+          danger=re.compile(r'(?i)\b(reboot_on_failure|critical|shutdown critical|start |exec(?:_start)? |wait |wait_for_prop|mount |insmod|modprobe|setprop |trigger |class_start|write /sys|write /proc|restorecon|perform_apex_config)')
+          rows=[]
+          for part,p in files_matching(['*.rc']):
+              try: txt=p.read_text(errors='replace')
+              except: continue
+              hit=[f'{n}: {line}' for n,line in enumerate(txt.splitlines(),1) if danger.search(line) and not line.lstrip().startswith('#')]
+              if hit: rows.append(f'===== {rel(part,p)} =====\n'+'\n'.join(hit))
+          (out/'INIT_BOOT_GATES_ALL.txt').write_text('\n'.join(rows)+'\n')
+
+          # 5) Extract complete early-init/init blocks with parse source.
+          blocks=[]
+          for part,p in files_matching(['*.rc']):
+              try: lines=p.read_text(errors='replace').splitlines()
+              except: continue
+              i=0
+              while i<len(lines):
+                  s=lines[i].strip()
+                  if s not in ('on early-init','on init'):
+                      i+=1; continue
+                  trig=s; start=i+1; body=[]; i+=1
+                  while i<len(lines):
+                      raw=lines[i]
+                      if raw and not raw[0].isspace() and (raw.startswith('on ') or raw.startswith('service ') or raw.startswith('import ')):
+                          break
+                      body.append(raw); i+=1
+                  blocks.append({'part':part,'file':str(p.relative_to(root/part)),'line':start,'trigger':trig,'body':body})
+          txt=[]
+          for b in blocks:
+              txt.append(f"===== {b['trigger']} {b['part']}:/{b['file']}:{b['line']} =====")
+              txt += b['body']
+          (out/'EARLY_INIT_AND_INIT_BLOCKS.txt').write_text('\n'.join(txt)+'\n')
+
+          # 6) VINTF manifests/matrices and HAL declarations.
+          rows=[]
+          for part,p in files_matching(['manifest*.xml','compatibility_matrix*.xml','*.xml']):
+              if '/vintf/' not in str(p) and not p.name.startswith(('manifest','compatibility_matrix')): continue
+              try: txt=p.read_text(errors='replace')
+              except: continue
+              rows.append(f'===== {rel(part,p)} =====\n{txt}')
+          (out/'VINTF_ALL.txt').write_text('\n'.join(rows)+'\n')
+
+          # 7) QSEE/keymaster/TEE/keystore gates.
+          pat=re.compile(r'(?i)(qsee|keymaster|keymint|gatekeeper|tee|trustzone|keystore)')
+          rows=[]
+          for part,p in files_matching(['*.rc','*.xml','*.prop','*.conf']):
+              try: txt=p.read_text(errors='replace')
+              except: continue
+              hit=[f'{n}: {line}' for n,line in enumerate(txt.splitlines(),1) if pat.search(line)]
+              if hit: rows.append(f'===== {rel(part,p)} =====\n'+'\n'.join(hit))
+          (out/'TEE_KEYMASTER_QSEE.txt').write_text('\n'.join(rows)+'\n')
+
+          # 8) SELinux context declarations relevant to boot/hardware.
+          pat=re.compile(r'(?i)(ueventd|firmware|remoteproc|qsee|keymaster|keymint|gatekeeper|dlkm|wlan|wifi|bluetooth|slate|cold_boot|apex|vendor_modprobe)')
+          rows=[]
+          for part,p in files_matching(['*contexts*','*.cil','*.te']):
+              try: txt=p.read_text(errors='replace')
+              except: continue
+              hit=[f'{n}: {line}' for n,line in enumerate(txt.splitlines(),1) if pat.search(line)]
+              if hit: rows.append(f'===== {rel(part,p)} =====\n'+'\n'.join(hit))
+          (out/'SELINUX_BOOT_HARDWARE.txt').write_text('\n'.join(rows)+'\n')
+
+          # 9) Firmware tree and broken firmware-ish symlinks.
+          rows=[]
+          broken=[]
+          for part in parts:
+              base=root/part
+              for p in base.rglob('*'):
+                  sp=str(p).lower()
+                  if any(k in sp for k in ('firmware','remoteproc','bluetooth','wlan','wifi')):
+                      try:
+                          if p.is_symlink():
+                              target=os.readlink(p)
+                              rows.append(f'SYMLINK {rel(part,p)} -> {target}')
+                              if not p.exists(): broken.append(f'BROKEN {rel(part,p)} -> {target}')
+                          elif p.is_file() and p.stat().st_size < 64*1024*1024:
+                              rows.append(f'FILE {rel(part,p)} size={p.stat().st_size}')
+                      except OSError: pass
+          (out/'FIRMWARE_TREE.txt').write_text('\n'.join(rows)+'\n')
+          (out/'BROKEN_FIRMWARE_SYMLINKS.txt').write_text('\n'.join(broken)+'\n')
+
+          # 10) Module load lists/configuration.
+          rows=[]
+          for part,p in files_matching(['modules.load*','modules.dep*','modules.alias*','modules.options*','modules.blocklist*']):
+              try: txt=p.read_text(errors='replace')
+              except: continue
+              rows.append(f'===== {rel(part,p)} =====\n{txt}')
+          (out/'MODULE_CONFIG_ALL.txt').write_text('\n'.join(rows)+'\n')
+
+          # 11) Module vermagic and names.
+          mods=[]
+          for part in parts:
+              for p in (root/part).rglob('*.ko'):
+                  try:
+                      vm=subprocess.run(['modinfo','-F','vermagic',str(p)],capture_output=True,text=True,timeout=5).stdout.strip()
+                      name=subprocess.run(['modinfo','-F','name',str(p)],capture_output=True,text=True,timeout=5).stdout.strip()
+                      depends=subprocess.run(['modinfo','-F','depends',str(p)],capture_output=True,text=True,timeout=5).stdout.strip()
+                  except Exception:
+                      vm=name=depends=''
+                  mods.append(f'{rel(part,p)} | name={name} | vermagic={vm} | depends={depends}')
+          (out/'MODULE_VERMAGIC.txt').write_text('\n'.join(mods)+'\n')
+
+          # 12) All literal /sys /proc /dev /vendor/firmware paths referenced by RC/conf.
+          paths=collections.Counter()
+          rx=re.compile(r'(?<![A-Za-z0-9_.-])(/(?:sys|proc|dev|vendor/firmware[^\s\"\']*)[^\s\"\']*)')
+          for part,p in files_matching(['*.rc','*.conf','*.prop','*.sh']):
+              try: txt=p.read_text(errors='replace')
+              except: continue
+              for m in rx.finditer(txt): paths[m.group(1)] += 1
+          (out/'HARDWARE_PATH_LITERALS.txt').write_text('\n'.join(f'{n:4d} {p}' for p,n in paths.most_common())+'\n')
+
+          # Compact metrics + priority flags. These are signals, not conclusions.
+          vermagics=collections.Counter()
+          for line in mods:
+              m=re.search(r'vermagic=([^|]*)',line)
+              if m and m.group(1).strip(): vermagics[m.group(1).strip()] += 1
+          metrics={
+              'partitions':parts,
+              'early_init_blocks':sum(1 for b in blocks if b['trigger']=='on early-init'),
+              'init_blocks':sum(1 for b in blocks if b['trigger']=='on init'),
+              'identity_hits':len((out/'IDENTITY_DONOR_ASSUMPTIONS.txt').read_text().splitlines()),
+              'broken_firmware_symlinks':len(broken),
+              'modules':len(mods),
+              'module_vermagics':dict(vermagics),
+          }
+          (out/'METRICS.json').write_text(json.dumps(metrics,indent=2)+'\n')
+
+          pr=[]
+          pr.append('SYSTEM-WIDE WEAR7 DIAG3 AUDIT — PRIORITY SIGNALS')
+          pr.append('Source sparse SHA256: 75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329')
+          pr.append('')
+          pr.append('1. MODULE/KERNEL ABI')
+          pr.append(f'   modules={len(mods)}')
+          for vm,c in vermagics.most_common(): pr.append(f'   {c}x vermagic={vm}')
+          pr.append('')
+          pr.append('2. FIRMWARE / REMOTEPROC')
+          pr.append(f'   broken firmware-ish symlinks={len(broken)}')
+          pr += [f'   {x}' for x in broken[:30]]
+          pr.append('')
+          pr.append('3. DONOR IDENTITY / SKU ASSUMPTIONS')
+          pr += ['   '+x for x in (out/'IDENTITY_DONOR_ASSUMPTIONS.txt').read_text().splitlines()[:60]]
+          pr.append('')
+          pr.append('4. FSTAB / STORAGE')
+          pr += ['   '+x for x in (out/'FSTAB_ALL.txt').read_text().splitlines()[:80]]
+          pr.append('')
+          pr.append('5. TEE / KEYMASTER / QSEE')
+          pr += ['   '+x for x in (out/'TEE_KEYMASTER_QSEE.txt').read_text().splitlines()[:80]]
+          pr.append('')
+          pr.append('6. EARLY-INIT / INIT GATES')
+          pr += ['   '+x for x in (out/'INIT_BOOT_GATES_ALL.txt').read_text().splitlines()[:120]]
+          pr.append('')
+          pr.append('NOTE: signals only; correlate across reports before patching.')
+          (out/'PRIORITY.txt').write_text('\n'.join(pr)+'\n')
+
+          print((out/'PRIORITY.txt').read_text()[:30000])
+          PY
+
+          echo '===== MODULE LOAD TARGET EXISTENCE =====' | tee report/MODULE_LOAD_TARGET_CHECK.txt
+          python3 - "$ROOT" report/MODULE_LOAD_TARGET_CHECK.txt <<'PY'
+          import pathlib,sys
+          root=pathlib.Path(sys.argv[1]); out=pathlib.Path(sys.argv[2])
+          kos={p.name for part in ['vendor','vendor_dlkm','system','system_dlkm'] if (root/part).exists() for p in (root/part).rglob('*.ko')}
+          rows=[]
+          for part in ['vendor','vendor_dlkm','system','system_dlkm']:
+              base=root/part
+              if not base.exists(): continue
+              for p in base.rglob('modules.load*'):
+                  try: lines=p.read_text(errors='replace').splitlines()
+                  except: continue
+                  for raw in lines:
+                      s=raw.strip()
+                      if not s or s.startswith('#'): continue
+                      name=pathlib.Path(s).name
+                      if not name.endswith('.ko'): name += '.ko'
+                      rows.append(f'{part}:/{p.relative_to(base)} | {s} | '+('FOUND' if name in kos else 'MISSING'))
+          with out.open('a') as f: f.write('\n'.join(rows)+'\n')
+          print('\n'.join(rows[:300]))
+          PY
+
+      - name: Package reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-System-Wide-Audit-20261003
+          path: report/
+          if-no-files-found: error
+          retention-days: 60
+          compression-level: 9
