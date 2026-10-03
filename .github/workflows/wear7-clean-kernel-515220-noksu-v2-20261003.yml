@@ -190,6 +190,21 @@ jobs:
           PY
           grep -Fq 'del_timer_sync(&cgroup->psi.poll_timer);' "$P"
           ! grep -Fq 'timer_shutdown_sync(&cgroup->psi.poll_timer);' "$P"
+          for P in "$K/net/bridge/br_if.c" "$K/drivers/hid/hid-uclogic-core.c"; do
+            python3 - "$P" <<'PY2'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          old='timer_shutdown_sync('
+          new='del_timer_sync('
+          n=s.count(old)
+          if n != 1:
+              raise SystemExit(f'timer API compat anchor invalid in {p}: count={n}')
+          p.write_text(s.replace(old,new,1))
+          PY2
+            grep -Fq 'del_timer_sync(' "$P"
+            ! grep -Fq 'timer_shutdown_sync(' "$P"
+          done
           test ! -e "$K/KernelSU-Next"
           ! grep -RIl --exclude-dir=.git -E 'TWKEXEC|KSU Next|KernelSU|SuSFS' "$K" 2>/dev/null | grep -q .
           echo PSI_TIMER_515_COMPAT=PASS
@@ -234,7 +249,7 @@ jobs:
           python3 - CLEAN_SOURCE_DIFF_FILES.txt <<'PY'
           import sys
           got={x.strip() for x in open(sys.argv[1]) if x.strip()}
-          allowed={'fs/f2fs/data.c','drivers/tty/serial/amba-pl011.c','kernel/sched/psi.c','scripts/genksyms/genksyms.c'}
+          allowed={'fs/f2fs/data.c','drivers/tty/serial/amba-pl011.c','kernel/sched/psi.c','net/bridge/br_if.c','drivers/hid/hid-uclogic-core.c','scripts/genksyms/genksyms.c'}
           extra=sorted(got-allowed); missing=sorted({'scripts/genksyms/genksyms.c'}-got)
           print('SOURCE_DIFF_FILES',sorted(got))
           if extra or missing: raise SystemExit(f'unexpected source diff extra={extra} missing={missing}')
