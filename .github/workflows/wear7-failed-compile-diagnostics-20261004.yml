@@ -1,0 +1,52 @@
+name: Wear7 failed compile diagnostics
+
+on:
+  push:
+    branches: [wear7-clean-rebuild-20261003]
+    paths:
+      - '.github/workflows/wear7-failed-compile-diagnostics-20261004.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  extract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Extract compact diagnostics from failed clean-kernel job
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FAILED_JOB_ID: '111300559139'
+        run: |
+          set -Eeuo pipefail
+          url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/jobs/${FAILED_JOB_ID}/logs"
+          curl -fL --retry 3 \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$url" -o failed-job.log
+          file failed-job.log
+          {
+            echo '=== FIRST COMPILER ERRORS WITH CONTEXT ==='
+            grep -n -m 120 -B 4 -A 12 -E 'fatal error:|error:|undefined reference|No rule to make target|ld\.lld: error:|make(\[[0-9]+\])?: \*\*\*' failed-job.log || true
+            echo
+            echo '=== COMPILE STEP MARKER CONTEXT ==='
+            grep -n -m 20 -B 3 -A 10 -E 'Compile clean kernel|FIRST COMPILER ERRORS|BUILD LOG TAIL' failed-job.log || true
+            echo
+            echo '=== FAILED JOB LOG TAIL ==='
+            tail -n 300 failed-job.log || true
+          } > first-compile-error.txt
+          test -s first-compile-error.txt
+          wc -c failed-job.log first-compile-error.txt
+
+      - name: Upload compact diagnostics
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-Clean-Compile-Diagnostics-Run37156404362
+          path: first-compile-error.txt
+          retention-days: 14
+          compression-level: 9
