@@ -1,0 +1,56 @@
+name: Wear7 apply timer compatibility fix
+
+on:
+  push:
+    branches: [wear7-clean-rebuild-20261003]
+    paths:
+      - '.github/workflows/wear7-apply-timer-compat-fix-20261004.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: wear7-clean-rebuild-20261003
+          fetch-depth: 1
+
+      - name: Patch exact Android 5.15 timer API mismatches
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          F=.github/workflows/wear7-clean-kernel-515220-noksu-v2-20261003.yml
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          anchor="""          grep -Fq 'del_timer_sync(&cgroup->psi.poll_timer);' \"$P\"\n          ! grep -Fq 'timer_shutdown_sync(&cgroup->psi.poll_timer);' \"$P\"\n          test ! -e \"$K/KernelSU-Next\"\n"""
+          repl="""          grep -Fq 'del_timer_sync(&cgroup->psi.poll_timer);' \"$P\"\n          ! grep -Fq 'timer_shutdown_sync(&cgroup->psi.poll_timer);' \"$P\"\n          for P in \"$K/net/bridge/br_if.c\" \"$K/drivers/hid/hid-uclogic-core.c\"; do\n            python3 - \"$P\" <<'PY2'\n          from pathlib import Path\n          import sys\n          p=Path(sys.argv[1]); s=p.read_text()\n          old='timer_shutdown_sync('\n          new='del_timer_sync('\n          n=s.count(old)\n          if n != 1:\n              raise SystemExit(f'timer API compat anchor invalid in {p}: count={n}')\n          p.write_text(s.replace(old,new,1))\n          PY2\n            grep -Fq 'del_timer_sync(' \"$P\"\n            ! grep -Fq 'timer_shutdown_sync(' \"$P\"\n          done\n          test ! -e \"$K/KernelSU-Next\"\n"""
+          if s.count(anchor) != 1:
+              raise SystemExit('compat insertion anchor mismatch')
+          s=s.replace(anchor,repl,1)
+          old="allowed={'fs/f2fs/data.c','drivers/tty/serial/amba-pl011.c','kernel/sched/psi.c','scripts/genksyms/genksyms.c'}"
+          new="allowed={'fs/f2fs/data.c','drivers/tty/serial/amba-pl011.c','kernel/sched/psi.c','net/bridge/br_if.c','drivers/hid/hid-uclogic-core.c','scripts/genksyms/genksyms.c'}"
+          if s.count(old) != 1:
+              raise SystemExit('source allowlist anchor mismatch')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          grep -Fq 'drivers/hid/hid-uclogic-core.c' "$F"
+          grep -Fq 'net/bridge/br_if.c' "$F"
+          git diff --check -- "$F"
+          git diff -- "$F"
+
+      - name: Commit compatibility correction
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'wear7-ci-fixer'
+          git config user.email 'wear7-ci-fixer@users.noreply.github.com'
+          git add .github/workflows/wear7-clean-kernel-515220-noksu-v2-20261003.yml
+          git commit -m 'fix(wear7): adapt remaining timer shutdown calls to 5.15 API'
+          git push origin HEAD:wear7-clean-rebuild-20261003
