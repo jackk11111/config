@@ -44,6 +44,7 @@ jobs:
           rm -f "$LLVM_ARCHIVE"
           echo "AOSP_CLANG_PATH=$GITHUB_WORKSPACE/aosp-clang" >> "$GITHUB_ENV"
           echo "$GITHUB_WORKSPACE/aosp-clang/bin" >> "$GITHUB_PATH"
+          export PATH="$GITHUB_WORKSPACE/aosp-clang/bin:$PATH"
           clang --version | tee llvm-version.txt
           grep -Fq '20.1.0' llvm-version.txt
 
