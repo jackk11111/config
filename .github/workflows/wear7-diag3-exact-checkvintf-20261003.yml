@@ -49,9 +49,9 @@ jobs:
           python3 - "$ZIP" "$W/tools/x" <<'PY'
           import pathlib,sys,zipfile
           z=zipfile.ZipFile(sys.argv[1]); out=pathlib.Path(sys.argv[2]).resolve()
-          wanted={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/fsck.erofs'}
+          wanted={'bin/checkvintf','bin/lpunpack','bin/apexd_host','bin/fsck.erofs','bin/simg2img'}
           keep=[n for n in z.namelist() if n in wanted or n.startswith(('lib64/','lib/'))]
-          if wanted-set(keep): raise SystemExit('missing host tools')
+          if wanted-set(keep): raise SystemExit('missing host tools: '+','.join(sorted(wanted-set(keep))))
           for n in keep:
               p=(out/n).resolve()
               if not p.is_relative_to(out): raise SystemExit('unsafe')
@@ -66,9 +66,9 @@ jobs:
           set -Eeuo pipefail
           W="$RUNNER_TEMP/w7vintf"
           export PATH="$HOST/bin:$PATH" LD_LIBRARY_PATH="$HOST/lib64:$HOST/lib"
-          simg2img "$W/super.img" "$W/super.raw"
+          "$HOST/bin/simg2img" "$W/super.img" "$W/super.raw"
           test "$(stat -c %s "$W/super.raw")" = 4294967296
-          lpunpack "$W/super.raw" "$W/parts"
+          "$HOST/bin/lpunpack" "$W/super.raw" "$W/parts"
           rm -f "$W/super.raw"
           for p in system system_ext product vendor; do
             mkdir -p "$W/mnt/$p"
