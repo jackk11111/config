@@ -1,0 +1,121 @@
+name: Wear7 DLKM early-boot gate audit V2
+
+on:
+  push:
+    branches:
+      - wear7-diag4-init-bisect-20261002
+    paths:
+      - '.github/workflows/wear7-dlkm-boot-gate-audit-v2-20261003.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y android-sdk-libsparse-utils android-sdk-liblp-utils e2fsprogs kmod binutils
+
+      - name: Download exact DIAG3 super
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          mkdir -p audit_dlkm
+          cd audit_dlkm
+          gh release download wear7-diag3-final-20261002 -p 'super_WEAR7_V11_DIAG3_FINAL.img.part*' -R "$GITHUB_REPOSITORY"
+          cat $(ls super_WEAR7_V11_DIAG3_FINAL.img.part* | sort -V) > super_sparse.img
+          echo "EXPECTED sparse sha256: 75c8d716e0f243cfe309d9fca29aba0253f524bb70d93959dcd5d4fba0dc3329"
+          sha256sum super_sparse.img
+          simg2img super_sparse.img super_WEAR7_V11_DIAG3_FINAL.raw.img
+          echo "EXPECTED raw sha256: 725df162529100ddb924caa22a1f72db77189b00620d27a2450da4e9351e913e"
+          sha256sum super_WEAR7_V11_DIAG3_FINAL.raw.img
+          mkdir lp
+          lpunpack super_WEAR7_V11_DIAG3_FINAL.raw.img lp
+          ls -lh lp
+
+      - name: Mount vendor and DLKM images read-only
+        run: |
+          set -euxo pipefail
+          cd audit_dlkm
+          mkdir -p m_vendor m_vendor_dlkm m_system_dlkm
+          sudo mount -o loop,ro lp/vendor_a.img m_vendor
+          if [ -f lp/vendor_dlkm_a.img ]; then
+            sudo mount -o loop,ro lp/vendor_dlkm_a.img m_vendor_dlkm
+          fi
+          if [ -f lp/system_dlkm_a.img ]; then
+            sudo mount -o loop,ro lp/system_dlkm_a.img m_system_dlkm
+          fi
+          mount | grep audit_dlkm || true
+
+      - name: Audit loader selection and module ABI
+        shell: bash
+        run: |
+          set -o pipefail
+          cd audit_dlkm
+          {
+            echo "=== CURRENT DEVICE KERNEL BASE ==="
+            echo "5.15.220"
+
+            echo "=== PROP REFERENCES TO DLKM / MODPROBE ==="
+            grep -RnaE 'ro\.vendor\.qti\.load_dlkm\.service|dlkm|modprobe' m_vendor/* 2>/dev/null | head -n 300 || true
+
+            echo "=== INIT QTI KERNEL RC ==="
+            find m_vendor -type f -name 'init.qti.kernel.rc' -print -exec sed -n '1,320p' {} \; 2>/dev/null || true
+
+            echo "=== POSSIBLE LOADER SCRIPTS ==="
+            for f in m_vendor/bin/load_dlkm m_vendor/bin/system_dlkm_modprobe.sh m_vendor/bin/vendor_modprobe.sh; do
+              if [ -f "$f" ]; then
+                echo "----- $f -----"
+                file "$f" || true
+                sed -n '1,320p' "$f" 2>/dev/null || strings "$f" | head -n 320 || true
+              else
+                echo "MISSING $f"
+              fi
+            done
+
+            echo "=== VENDOR_DLKM MODULE CONTROL FILES ==="
+            find m_vendor_dlkm -maxdepth 4 -type f \
+              \( -name 'modules.load*' -o -name 'modules.dep*' -o -name 'modules.alias*' -o -name 'modules.order*' \) \
+              -print -exec sh -c 'echo "----- $1 -----"; sed -n "1,400p" "$1"' sh {} \; 2>/dev/null || true
+
+            echo "=== SYSTEM_DLKM MODULE CONTROL FILES ==="
+            find m_system_dlkm -maxdepth 4 -type f \
+              \( -name 'modules.load*' -o -name 'modules.dep*' -o -name 'modules.alias*' -o -name 'modules.order*' \) \
+              -print -exec sh -c 'echo "----- $1 -----"; sed -n "1,400p" "$1"' sh {} \; 2>/dev/null || true
+
+            echo "=== VERMAGIC vendor_dlkm UNIQUE SUMMARY ==="
+            find m_vendor_dlkm -type f -name '*.ko' -print0 \
+              | xargs -0 -r -n1 modinfo -F vermagic 2>/dev/null \
+              | sort | uniq -c | sort -nr || true
+
+            echo "=== VERMAGIC system_dlkm UNIQUE SUMMARY ==="
+            find m_system_dlkm -type f -name '*.ko' -print0 \
+              | xargs -0 -r -n1 modinfo -F vermagic 2>/dev/null \
+              | sort | uniq -c | sort -nr || true
+
+            echo "=== FIRST 160 MODULES WITH VERMAGIC vendor_dlkm ==="
+            find m_vendor_dlkm -type f -name '*.ko' | sort | head -n 160 | while read -r ko; do
+              printf '%s :: ' "$ko"
+              modinfo -F vermagic "$ko" 2>/dev/null || true
+            done
+
+            echo "=== KERNEL RELEASE STRINGS IN DLKM ==="
+            grep -RaoE '5\.15\.[0-9]+[^[:space:]]*' m_vendor_dlkm m_system_dlkm 2>/dev/null \
+              | sort | uniq -c | sort -nr | head -n 300 || true
+          } 2>&1 | tee dlkm_audit_report.txt
+
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wear7-dlkm-audit-v2
+          path: audit_dlkm/dlkm_audit_report.txt
+          if-no-files-found: error
+          retention-days: 30
