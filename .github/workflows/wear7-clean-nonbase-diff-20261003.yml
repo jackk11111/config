@@ -90,7 +90,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          python3 - "$W" "$GITHUB_WORKSPACE/report" <<'PY'
+          sudo python3 - "$W" "$GITHUB_WORKSPACE/report" <<'PY'
           import pathlib,subprocess,sys,hashlib
           W=pathlib.Path(sys.argv[1]); R=pathlib.Path(sys.argv[2])
           cases=[
@@ -117,6 +117,7 @@ jobs:
                 cp=subprocess.run(['diff','-u','--label',label,'--label','DIAG3',str(src),str(d)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
                 out.write_bytes(cp.stdout)
           PY
+          sudo chown -R "$(id -u):$(id -g)" report
           cat report/TEXT_DIFF_SHA256.tsv
           for f in report/diffs/*.diff; do echo "===== $f ====="; sed -n '1,220p' "$f"; done
       - name: Dump custom text and hash custom binaries
