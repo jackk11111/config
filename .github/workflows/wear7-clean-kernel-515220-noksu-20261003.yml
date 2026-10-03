@@ -1,0 +1,219 @@
+name: Wear7 clean kernel 5.15.220 no-KSU
+
+on:
+  push:
+    branches: [wear7-clean-rebuild-20261003]
+    paths:
+      - '.github/workflows/wear7-clean-kernel-515220-noksu-20261003.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: wear7-clean-kernel-515220-noksu
+  cancel-in-progress: true
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  LLVM_VERSION: '20.1.0'
+  LLVM_ARCHIVE: 'LLVM-20.1.0-Linux-X64.tar.xz'
+  CHECKPOINT_RUN_ID: '34757911119'
+  CHECKPOINT_NAME: 'TicWatch-5.15.220-precompile-checkpoint'
+  KERNEL_TOOLING_COMMIT: 'b8e04cbb8962990296fbefb8bbffb4155ab3d118'
+  EXPECTED_UTS_PREFIX: '5.15.220-Xinran_StarBai-Test'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies and LLVM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet || true
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential flex bison bc python3 python-is-python3 libssl-dev libelf-dev dwarves make cmake zip unzip curl wget gawk gcc-multilib g++-multilib ccache rsync file zstd binutils-aarch64-linux-gnu binutils-arm-linux-gnueabihf >/dev/null
+          wget -q "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_ARCHIVE}"
+          tar -xJf "$LLVM_ARCHIVE"
+          mv "LLVM-${LLVM_VERSION}-Linux-X64" "$GITHUB_WORKSPACE/aosp-clang"
+          rm -f "$LLVM_ARCHIVE"
+          echo "AOSP_CLANG_PATH=$GITHUB_WORKSPACE/aosp-clang" >> "$GITHUB_ENV"
+          echo "$GITHUB_WORKSPACE/aosp-clang/bin" >> "$GITHUB_PATH"
+          clang --version | tee llvm-version.txt
+          grep -Fq '20.1.0' llvm-version.txt
+
+      - name: Restore verified precompile checkpoint
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir checkpoint
+          gh run download "$CHECKPOINT_RUN_ID" --repo "$GITHUB_REPOSITORY" --name "$CHECKPOINT_NAME" --dir checkpoint
+          cp checkpoint/precompile-checkpoint.tar.zst .
+          cp checkpoint/precompile-checkpoint.sha256 .
+          sha256sum -c precompile-checkpoint.sha256
+          tar --zstd -xf precompile-checkpoint.tar.zst
+          test -d .ticwatch-preflight/common/.git
+          test -s .ticwatch-preflight/common/out/.config
+          test -s previous/audit/Module.symvers
+          cp .ticwatch-preflight/common/out/.config BASE_KSU_CONFIG.txt
+          grep -Fqx 'CONFIG_MODVERSIONS=y' BASE_KSU_CONFIG.txt
+          grep -Fqx 'CONFIG_KSU=y' BASE_KSU_CONFIG.txt
+
+      - name: Fetch immutable TicWatch KMI tooling
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p pinned
+          BASE="https://raw.githubusercontent.com/jackk11111/config/$KERNEL_TOOLING_COMMIT"
+          curl -fLsS "$BASE/.github/data/ticwatch-stock379-kmi-crc-overrides-337.tsv" -o pinned/kmi.tsv
+          curl -fLsS "$BASE/.github/scripts/ticwatch-5.15.220-compile-compat.sh" -o pinned/compile-compat.sh
+          curl -fLsS "$BASE/.github/scripts/ticwatch-kexec-zinitix-quirk.sh" -o pinned/zinitix-quirk.sh
+          chmod +x pinned/*.sh
+          test "$(grep -vc '^#' pinned/kmi.tsv)" -eq 337
+          sha256sum pinned/* | tee PINNED_TOOLING_SHA256.txt
+
+      - name: Verify KMI map against known-good previous Module.symvers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - pinned/kmi.tsv previous/audit/Module.symvers <<'PY'
+          import sys
+          mp,sp=sys.argv[1:]
+          exp={}
+          for l in open(mp):
+              if l.strip() and not l.startswith('#'):
+                  s,c=l.split()[:2]; exp[s]=c.lower()
+          old={f[1]:f[0].lower() for l in open(sp) if len((f:=l.split()))>=2}
+          bad=[(s,c,old.get(s)) for s,c in exp.items() if old.get(s)!=c]
+          print('KMI_MAP_SYMBOLS',len(exp),'BAD',len(bad))
+          if bad: print(bad[:30]); raise SystemExit(2)
+          print('KMI_MAP_VS_KNOWN_GOOD=PASS')
+          PY
+
+      - name: Apply known-good TicWatch compile/device fixes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash pinned/compile-compat.sh .ticwatch-preflight/common
+          bash pinned/zinitix-quirk.sh .ticwatch-preflight/common
+
+      - name: Install targeted genksyms KMI CRC preservation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          F="$K/scripts/genksyms/genksyms.c"
+          python3 - "$F" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          anchor='void export_symbol(const char *name)\n{\n\tstruct symbol *sym;\n'
+          crc='\t\tcrc = expand_and_crc_sym(sym, 0xffffffff) ^ 0xffffffff;\n'
+          if s.count(anchor)!=1 or s.count(crc)!=1: raise SystemExit('genksyms anchor mismatch')
+          helper='''static unsigned long ticwatch_kmi_crc_override(const char *name, unsigned long crc)\n{\n    const char *path = getenv("TICWATCH_KMI_CRC_MAP");\n    FILE *f; char line[512]; char sym[256]; unsigned long expected;\n    if (!path || !*path) return crc;\n    f=fopen(path,"r"); if(!f){perror(path);exit(2);}\n    while(fgets(line,sizeof(line),f)){\n        if(line[0]=='#'||line[0]=='\\n') continue;\n        if(sscanf(line,"%255s %lx",sym,&expected)==2 && strcmp(sym,name)==0){fclose(f);return expected;}\n    }\n    fclose(f); return crc;\n}\n\n'''
+          s=s.replace(anchor,helper+anchor,1)
+          s=s.replace(crc,crc+'\t\tcrc = ticwatch_kmi_crc_override(name, crc);\n',1)
+          p.write_text(s)
+          PY
+          grep -Fq ticwatch_kmi_crc_override "$F"
+          rm -f "$K/out/scripts/genksyms/genksyms" "$K/out/scripts/genksyms/"*.o 2>/dev/null || true
+
+      - name: Disable KSU and SuSFS for clean boot kernel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K=.ticwatch-preflight/common
+          test -x "$K/scripts/config"
+          "$K/scripts/config" --file "$K/out/.config" -d KSU
+          export ARCH=arm64
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH" LLVM=1 LLVM_IAS=1
+          make -C "$K" -s O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 olddefconfig
+          cp "$K/out/.config" CLEAN_NOKSU_CONFIG.txt
+          grep -Fqx '# CONFIG_KSU is not set' CLEAN_NOKSU_CONFIG.txt
+          ! grep -Eq '^CONFIG_KSU(_|=)' CLEAN_NOKSU_CONFIG.txt
+          grep -Fqx 'CONFIG_MODVERSIONS=y' CLEAN_NOKSU_CONFIG.txt
+          grep -Fqx 'CONFIG_SECCOMP_FILTER=y' CLEAN_NOKSU_CONFIG.txt
+
+      - name: Compile clean no-KSU kernel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$GITHUB_WORKSPACE/.ticwatch-preflight/common"
+          cd "$K"
+          export ARCH=arm64 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabihf-
+          export PATH="$AOSP_CLANG_PATH/bin:$PATH" LLVM=1 LLVM_IAS=1
+          export KCFLAGS='-Wno-error -Wno-deprecated-declarations'
+          export KBUILD_BUILD_VERSION=0 KBUILD_BUILD_USER='Wear7Clean' KBUILD_BUILD_HOST='Dace'
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
+          export TICWATCH_KMI_CRC_MAP="$GITHUB_WORKSPACE/pinned/kmi.tsv"
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 2>&1 | tee "$GITHUB_WORKSPACE/kernel-build.log"
+          test -s out/arch/arm64/boot/Image
+          test -s out/vmlinux
+          test -s out/Module.symvers
+          cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"
+          cp out/System.map "$GITHUB_WORKSPACE/System.map"
+          cp out/Module.symvers "$GITHUB_WORKSPACE/Module.symvers"
+          cp out/.config "$GITHUB_WORKSPACE/final.config"
+          make -s O=out ARCH=arm64 kernelrelease | tee "$GITHUB_WORKSPACE/kernelrelease.txt"
+          case "$(cat "$GITHUB_WORKSPACE/kernelrelease.txt")" in ${EXPECTED_UTS_PREFIX}*) ;; *) exit 3;; esac
+          nm out/vmlinux > "$GITHUB_WORKSPACE/vmlinux.nm"
+          if grep -Ei '(^|[[:space:]])(ksu_|susfs_|ksud)' "$GITHUB_WORKSPACE/vmlinux.nm" | head -n 1; then
+            echo FAIL=KSU_SYMBOL_REMAINS
+            exit 4
+          fi
+
+      - name: KMI hard gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - pinned/kmi.tsv Module.symvers <<'PY' | tee KMI_AUDIT.txt
+          import sys
+          exp={}
+          for l in open(sys.argv[1]):
+              if l.strip() and not l.startswith('#'):
+                  s,c=l.split()[:2]; exp[s]=c.lower()
+          new={f[1]:f[0].lower() for l in open(sys.argv[2]) if len((f:=l.split()))>=2}
+          missing=[s for s in exp if s not in new]
+          bad=[(s,exp[s],new.get(s)) for s in exp if new.get(s)!=exp[s]]
+          print('EXPECTED',len(exp),'MISSING',len(missing),'MISMATCH',len(bad))
+          if missing or bad:
+              print('MISSING_LIST',missing[:50]); print('BAD_LIST',bad[:50]); raise SystemExit(2)
+          print('STOCK379_KMI_TARGETED_GATE=PASS_337_OF_337')
+          PY
+          grep -Fq 'STOCK379_KMI_TARGETED_GATE=PASS_337_OF_337' KMI_AUDIT.txt
+          sha256sum Image final.config Module.symvers System.map kernelrelease.txt | tee CLEAN_KERNEL_SHA256.txt
+
+      - name: Write clean kernel report
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p artifact/audit
+          cp Image artifact/
+          cp final.config Module.symvers System.map kernelrelease.txt KMI_AUDIT.txt CLEAN_KERNEL_SHA256.txt PINNED_TOOLING_SHA256.txt llvm-version.txt kernel-build.log artifact/audit/
+          cat > artifact/CLEAN_KERNEL_REPORT.txt <<EOF
+          DEVICE=TicWatch Pro 5 Enduro dace
+          PURPOSE=WEAR7_CLEAN_FIRST_BOOT_KERNEL
+          KERNEL_RELEASE=$(cat kernelrelease.txt)
+          CONFIG_KSU=DISABLED
+          CONFIG_SUSFS=DISABLED_WITH_KSU
+          CONFIG_MODVERSIONS=YES
+          STOCK379_KMI_TARGETED_GATE=PASS_337_OF_337
+          SOURCE_CHECKPOINT_RUN=$CHECKPOINT_RUN_ID
+          KMI_TOOLING_COMMIT=$KERNEL_TOOLING_COMMIT
+          FLASH_PERFORMED=NO
+          IMAGE_ONLY_NOT_BOOT_IMAGE=YES
+          EOF
+          (cd artifact && sha256sum Image CLEAN_KERNEL_REPORT.txt audit/final.config audit/Module.symvers > SHA256SUMS.txt && sha256sum -c SHA256SUMS.txt)
+
+      - name: Upload clean kernel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TicWatch-Wear7-Clean-Kernel-5.15.220-NoKSU
+          path: artifact/
+          retention-days: 90
+          compression-level: 6
