@@ -250,7 +250,17 @@ jobs:
           export PATH="$AOSP_CLANG_PATH/bin:$PATH" LLVM=1 LLVM_IAS=1 KCFLAGS='-Wno-error -Wno-deprecated-declarations'
           export KBUILD_BUILD_VERSION=0 KBUILD_BUILD_USER='Wear7Clean' KBUILD_BUILD_HOST='Dace' SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
           export TICWATCH_KMI_CRC_MAP="$GITHUB_WORKSPACE/pinned/kmi.tsv"
-          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 2>&1 | tee "$GITHUB_WORKSPACE/kernel-build.log"
+          set +e
+          make -j"$(nproc)" O=out ARCH=arm64 CC=clang LLVM=1 LLVM_IAS=1 > "$GITHUB_WORKSPACE/kernel-build.log" 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo '=== FIRST COMPILER ERRORS ==='
+            grep -n -m 80 -E 'fatal error:|error:|undefined reference|No rule to make target|ld\.lld: error:|make(\[[0-9]+\])?: \*\*\*' "$GITHUB_WORKSPACE/kernel-build.log" || true
+            echo '=== BUILD LOG TAIL ==='
+            tail -n 160 "$GITHUB_WORKSPACE/kernel-build.log" || true
+            exit "$rc"
+          fi
           test -s out/arch/arm64/boot/Image; test -s out/vmlinux; test -s out/System.map; test -s out/Module.symvers
           cp out/arch/arm64/boot/Image "$GITHUB_WORKSPACE/Image"; cp out/System.map "$GITHUB_WORKSPACE/System.map"; cp out/Module.symvers "$GITHUB_WORKSPACE/Module.symvers"; cp out/.config "$GITHUB_WORKSPACE/final.config"
           make -s O=out ARCH=arm64 kernelrelease | tee "$GITHUB_WORKSPACE/kernelrelease.txt"
