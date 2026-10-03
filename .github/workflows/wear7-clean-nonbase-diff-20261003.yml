@@ -29,9 +29,26 @@ jobs:
           set -Eeuo pipefail
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/share/boost || true
           sudo apt-get update -qq
-          sudo apt-get install -y -qq curl unzip e2fsprogs erofs-utils file binutils android-sdk-libsparse-utils >/dev/null
-          W="$RUNNER_TEMP/w7diff"; mkdir -p "$W/src" "$W/pixel" "$W/tic" "$W/diag" "$W/mnt" report/diffs report/custom
+          sudo apt-get install -y -qq curl unzip e2fsprogs erofs-utils file binutils >/dev/null
+          W="$RUNNER_TEMP/w7diff"; mkdir -p "$W/src" "$W/pixel" "$W/tic" "$W/diag" "$W/mnt" "$W/tools" report/diffs report/custom
+          ZIP="$W/tools/otatools.zip"
+          curl -fL --retry 3 -sS -o "$ZIP" https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip
+          echo 'f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  '"$ZIP" | sha256sum -c -
+          python3 - "$ZIP" "$W/tools/x" <<'PY'
+          import pathlib,sys,zipfile
+          z=zipfile.ZipFile(sys.argv[1]); out=pathlib.Path(sys.argv[2]).resolve()
+          wanted={'bin/lpunpack','bin/simg2img'}
+          missing=wanted-set(z.namelist())
+          if missing: raise SystemExit('missing tools: '+','.join(sorted(missing)))
+          for n in z.namelist():
+              if n in wanted or n.startswith(('lib64/','lib/')):
+                  p=(out/n).resolve()
+                  if not p.is_relative_to(out): raise SystemExit('unsafe')
+                  z.extract(n,out)
+          PY
+          chmod +x "$W/tools/x/bin/"*
           echo "W=$W" >> "$GITHUB_ENV"
+          echo "HOST=$W/tools/x" >> "$GITHUB_ENV"
       - name: Download exact sources
         shell: bash
         env:
@@ -50,15 +67,18 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
+          export LD_LIBRARY_PATH="$HOST/lib64:$HOST/lib"
           F="$W/src/$PIXEL_FILE"; nested=$(unzip -Z1 "$F" | grep -E '(^|/)image-[^/]+\.zip$' | head -n1); test -n "$nested"
           unzip -p "$F" "$nested" > "$W/pixel-inner.zip"
           for p in system system_ext; do
             unzip -p "$W/pixel-inner.zip" "$p.img" > "$W/pixel/$p.in"
             magic=$(od -An -tx4 -N4 "$W/pixel/$p.in" | tr -d ' \n')
-            if [ "$magic" = ed26ff3a ]; then simg2img "$W/pixel/$p.in" "$W/pixel/$p.img"; else mv "$W/pixel/$p.in" "$W/pixel/$p.img"; fi
+            if [ "$magic" = ed26ff3a ]; then "$HOST/bin/simg2img" "$W/pixel/$p.in" "$W/pixel/$p.img"; else mv "$W/pixel/$p.in" "$W/pixel/$p.img"; fi
           done
           for p in system system_ext vendor; do python3 wear7/scripts/reconstruct_block_ota.py "$W/src/ticwatch379.zip" "$p" "$W/tic/$p.img"; done
-          simg2img "$W/src/diag3.img" "$W/diag/super.raw"; lpunpack "$W/diag/super.raw" "$W/diag"; rm "$W/diag/super.raw"
+          "$HOST/bin/simg2img" "$W/src/diag3.img" "$W/diag/super.raw"
+          "$HOST/bin/lpunpack" "$W/diag/super.raw" "$W/diag"
+          rm "$W/diag/super.raw"
       - name: Mount sources
         shell: bash
         run: |
@@ -71,7 +91,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           python3 - "$W" "$GITHUB_WORKSPACE/report" <<'PY'
-          import pathlib,subprocess,sys,os,hashlib
+          import pathlib,subprocess,sys,hashlib
           W=pathlib.Path(sys.argv[1]); R=pathlib.Path(sys.argv[2])
           cases=[
             ('system','system/build.prop'),
