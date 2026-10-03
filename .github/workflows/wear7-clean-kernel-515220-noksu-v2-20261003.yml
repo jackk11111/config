@@ -172,8 +172,27 @@ jobs:
           set -Eeuo pipefail
           K=.ticwatch-clean/common
           bash pinned/compile-compat.sh "$K"
+          P="$K/kernel/sched/psi.c"
+          python3 - "$P" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); s=p.read_text()
+          old='timer_shutdown_sync(&cgroup->psi.poll_timer);'
+          new='del_timer_sync(&cgroup->psi.poll_timer);'
+          old_n=s.count(old); new_n=s.count(new)
+          if old_n == 1 and new_n == 0:
+              s=s.replace(old,new,1)
+          elif old_n == 0 and new_n == 1:
+              pass
+          else:
+              raise SystemExit(f'PSI timer compat anchor invalid: shutdown={old_n} del_sync={new_n}')
+          p.write_text(s)
+          PY
+          grep -Fq 'del_timer_sync(&cgroup->psi.poll_timer);' "$P"
+          ! grep -Fq 'timer_shutdown_sync(&cgroup->psi.poll_timer);' "$P"
           test ! -e "$K/KernelSU-Next"
           ! grep -RIl --exclude-dir=.git -E 'TWKEXEC|KSU Next|KernelSU|SuSFS' "$K" 2>/dev/null | grep -q .
+          echo PSI_TIMER_515_COMPAT=PASS
           echo GENERIC_COMPILE_COMPAT_ONLY=PASS
 
       - name: Seed known-good config and strip KSU
@@ -215,7 +234,7 @@ jobs:
           python3 - CLEAN_SOURCE_DIFF_FILES.txt <<'PY'
           import sys
           got={x.strip() for x in open(sys.argv[1]) if x.strip()}
-          allowed={'fs/f2fs/data.c','drivers/tty/serial/amba-pl011.c','scripts/genksyms/genksyms.c'}
+          allowed={'fs/f2fs/data.c','drivers/tty/serial/amba-pl011.c','kernel/sched/psi.c','scripts/genksyms/genksyms.c'}
           extra=sorted(got-allowed); missing=sorted({'scripts/genksyms/genksyms.c'}-got)
           print('SOURCE_DIFF_FILES',sorted(got))
           if extra or missing: raise SystemExit(f'unexpected source diff extra={extra} missing={missing}')
