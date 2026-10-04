@@ -45,11 +45,11 @@ jobs:
           test "$(git cat-file -t 0402bd118a891fd5802214dd2c64f1855aed4f73)" = commit
           mkdir -p "$RUNNER_TEMP/kernel-artifact"
 
-          git clone --filter=blob:none --no-checkout https://android.googlesource.com/kernel/prebuilts/build-tools "$RUNNER_TEMP/kernel-build-tools"
-          git -C "$RUNNER_TEMP/kernel-build-tools" fetch --depth=1 origin "$KERNEL_BUILD_TOOLS_SHA"
-          git -C "$RUNNER_TEMP/kernel-build-tools" checkout --detach FETCH_HEAD
-          test "$(git -C "$RUNNER_TEMP/kernel-build-tools" rev-parse HEAD)" = "$KERNEL_BUILD_TOOLS_SHA"
-          B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
+          git clone --filter=blob:none --no-checkout https://android.googlesource.com/kernel/prebuilts/build-tools "$RUNNER_TEMP/recoverysafe-build-tools"
+          git -C "$RUNNER_TEMP/recoverysafe-build-tools" fetch --depth=1 origin "$KERNEL_BUILD_TOOLS_SHA"
+          git -C "$RUNNER_TEMP/recoverysafe-build-tools" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/recoverysafe-build-tools" rev-parse HEAD)" = "$KERNEL_BUILD_TOOLS_SHA"
+          B="$RUNNER_TEMP/recoverysafe-build-tools/linux-x86/bin"
           for c in avbtool lpmake; do test -x "$B/$c"; done
           echo "$B" >> "$GITHUB_PATH"
 
@@ -154,7 +154,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          export PATH="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin:$RUNNER_TEMP/clean-v1-otatools/extracted/bin:$PATH"
+          export PATH="$RUNNER_TEMP/recoverysafe-build-tools/linux-x86/bin:$RUNNER_TEMP/clean-v1-otatools/extracted/bin:$PATH"
           export LD_LIBRARY_PATH="$RUNNER_TEMP/clean-v1-otatools/extracted/lib64:$RUNNER_TEMP/clean-v1-otatools/extracted/lib"
 
           CAND="$GITHUB_WORKSPACE/wear7-final-candidate"
@@ -230,7 +230,7 @@ jobs:
               f.flush()
           report.write_text(
               f"BLOCK_SIZE={bs}\nPHYSICAL_BLOCK={block}\nBLOCK_OFFSET={off}\n"
-              f"PATCH_BYTES={len(old)}\nPATCH_MODE=EXACT_SAME_LENGTH_DATA_BLOCK\n"
+              f"PATCH_BYTES={len(old)}\nPATCH_MODE=EXACT_SAME_LENGTH_DATA_BLOCK_ONLY\n"
           )
           PY
 
