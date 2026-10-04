@@ -230,7 +230,7 @@ jobs:
               f.flush()
           report.write_text(
               f"BLOCK_SIZE={bs}\nPHYSICAL_BLOCK={block}\nBLOCK_OFFSET={off}\n"
-              f"PATCH_BYTES={len(old)}\nPATCH_MODE=EXACT_SAME_LENGTH_DATA_BLOCK_ONLY\n"
+              f"PATCH_BYTES={len(old)}\nPATCH_MODE=EXACT_SAME_LENGTH_DATA_BLOCK\n"
           )
           PY
 
