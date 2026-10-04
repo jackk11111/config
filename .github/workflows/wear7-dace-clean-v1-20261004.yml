@@ -1,0 +1,171 @@
+name: Wear7 Dace CLEAN V1 source rebuild
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/wear7-dace-clean-v1-20261004.yml'
+      - 'wear7/current/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: wear7-dace-clean-v1-20261004
+  cancel-in-progress: true
+
+jobs:
+  build-clean-v1:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+
+      - name: Prepare clean rebuild driver
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-yaml python3-pyelftools e2fsprogs android-sdk-libsparse-utils erofs-utils unzip curl zip attr libcap2-bin file binutils secilc qemu-user-static apksigner openssl >/dev/null
+          git fetch --no-tags --depth=1 origin 0402bd118a891fd5802214dd2c64f1855aed4f73
+          test "$(git cat-file -t 0402bd118a891fd5802214dd2c64f1855aed4f73)" = commit
+          mkdir -p "$RUNNER_TEMP/kernel-artifact"
+
+      - name: Download qualified clean kernel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: TicWatch-Wear7-Clean-Kernel-5.15.220-NoKSU-V2
+          path: ${{ runner.temp }}/kernel-artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '37183075933'
+
+      - name: Hard-gate clean kernel before ROM assembly
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          K="$RUNNER_TEMP/kernel-artifact"
+          test -s "$K/Image"
+          test -s "$K/CLEAN_KERNEL_REPORT.txt"
+          echo 'c37800338faa30d6600bd9e422c57d839148e6029a03daa351fe338b68b533a7  '"$K/Image" | sha256sum -c -
+          grep -qx 'KERNEL_RELEASE=5.15.220-Xinran_StarBai-Test+' "$K/CLEAN_KERNEL_REPORT.txt"
+          grep -qx 'CONFIG_KSU=ABSENT' "$K/CLEAN_KERNEL_REPORT.txt"
+          grep -qx 'KERNELSU_SOURCE=ABSENT' "$K/CLEAN_KERNEL_REPORT.txt"
+          grep -qx 'SUSFS_SOURCE=ABSENT' "$K/CLEAN_KERNEL_REPORT.txt"
+          grep -qx 'KEXEC_DIAGNOSTIC_PATCHES=ABSENT' "$K/CLEAN_KERNEL_REPORT.txt"
+          grep -qx 'CONFIG_MODVERSIONS=YES' "$K/CLEAN_KERNEL_REPORT.txt"
+          grep -qx 'STOCK379_KMI_TARGETED_GATE=PASS_337_OF_337' "$K/CLEAN_KERNEL_REPORT.txt"
+          grep -qx 'EXPECTED 337 MISSING 0 MISMATCH 0' "$K/audit/KMI_AUDIT.txt"
+
+      - name: Fix stock vendor host-init allowlist path
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('wear7/current/run_clean_v1.py')
+          s = p.read_text()
+          old = '/vendor/etc/init/'
+          hits = s.count(old)
+          if hits != 3:
+              raise SystemExit(f'expected exactly 3 stock-vendor allowlist paths, found {hits}')
+          p.write_text(s.replace(old, '/etc/init/'))
+          print('HOST_INIT_ALLOWLIST_PATH_FIX=PASS hits=3')
+          PY
+
+      - name: Fix clean-tree build.prop permission audit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('wear7/current/run_clean_v1.py')
+          s = p.read_text()
+          old = 'text = build_prop.read_text(errors="replace")'
+          new = 'text = subprocess.run(["sudo", "cat", str(build_prop)], check=True, stdout=subprocess.PIPE, text=True).stdout'
+          hits = s.count(old)
+          if hits != 1:
+              raise SystemExit(f'expected exactly 1 build.prop read, found {hits}')
+          p.write_text(s.replace(old, new))
+          print('CLEAN_TREE_BUILD_PROP_PERMISSION_FIX=PASS hits=1')
+          PY
+
+      - name: Fix FastPair static target search root and pipefail
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('wear7/current/run_clean_v1.py')
+          s = p.read_text()
+          marker = '    return script\n\n\ndef rewrite_final_metadata():'
+          if s.count(marker) != 1:
+              raise SystemExit(f'expected exactly 1 patch_script return marker, found {s.count(marker)}')
+          replacement = "\n".join([
+              '    if name == "Mount final filesystem payloads and run exact static gates":',
+              "        old = 'sudo find \"$PROD\" -type f'",
+              '        hits = script.count(old)',
+              '        if hits != 1:',
+              '            raise RuntimeError(f"expected exactly 1 FastPair target search in product, found {hits}")',
+              "        script = script.replace(old, 'sudo find \"$SYS\" -type f')",
+              "        old_pipe = \"| grep -q 'google_fast_pair_service_model_id'\"",
+              '        pipe_hits = script.count(old_pipe)',
+              '        if pipe_hits != 1:',
+              '            raise RuntimeError(f"expected exactly 1 FastPair grep pipeline, found {pipe_hits}")',
+              "        script = script.replace(old_pipe, \"| grep 'google_fast_pair_service_model_id' >/dev/null\")",
+              '    return script',
+              '',
+              '',
+              'def rewrite_final_metadata():',
+          ])
+          p.write_text(s.replace(marker, replacement))
+          print('FASTPAIR_STATIC_GATE_FIX=PASS root=system pipefail=safe')
+          PY
+
+      - name: Build and audit WEAR7_DACE_CLEAN_V1
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 wear7/current/run_clean_v1.py
+
+      - name: Upload CLEAN V1 reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-Dace-Clean-V1-Reports
+          path: wear7-final-report/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 9
+
+      - name: Upload CLEAN V1 bootchain
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-Dace-Clean-V1-Bootchain
+          path: |
+            wear7-final-candidate/boot.img
+            wear7-final-candidate/init_boot.img
+            wear7-final-candidate/vendor_boot.img
+            wear7-final-candidate/dtbo.img
+            wear7-final-candidate/vbmeta.img
+            wear7-final-candidate/vbmeta_system.img
+            wear7-final-candidate/CANDIDATE_MANIFEST.txt
+            wear7-final-candidate/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+
+      - name: Upload CLEAN V1 super
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-Dace-Clean-V1-Super
+          path: wear7-final-candidate/super.img
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
