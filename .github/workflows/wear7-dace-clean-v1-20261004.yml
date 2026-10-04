@@ -1,4 +1,4 @@
-name: Wear7 Dace CLEAN V1 source rebuild
+name: Wear7 Dace CLEAN V1 recovery-safe source rebuild
 
 on:
   push:
@@ -16,6 +16,16 @@ concurrency:
   group: wear7-dace-clean-v1-20261004
   cancel-in-progress: true
 
+env:
+  STOCK_VENDOR_SHA256: 150238505037c881b079b7c9de1adc231f2c4a94b64f8dd3a7694ebc7408371e
+  RECOVERYSAFE_VENDOR_SHA256: dd12c88fba896b1ef5db4d6653ae21cca77f8cc25622101f12064685ad957f9e
+  INSTALL_RECOVERY_SHA256: f2d1e28f639f8b615068f35c88ac2b3456bef349c53e9150185bf9ed6c437eaf
+  VENDOR_PARTITION_SIZE: '297361408'
+  SUPER_DEVICE_SIZE: '4294967296'
+  DYNAMIC_GROUP_SIZE: '4284481536'
+  AVB_SALT: 29ee420fe79a48929c62ab7091d79c9575998f66d7f5e856987e7bbe578d5459
+  KERNEL_BUILD_TOOLS_SHA: 010d8a83d84ced4beef7779453766350db8c08cd
+
 jobs:
   build-clean-v1:
     runs-on: ubuntu-24.04
@@ -30,10 +40,18 @@ jobs:
         run: |
           set -Eeuo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq python3-yaml python3-pyelftools e2fsprogs android-sdk-libsparse-utils erofs-utils unzip curl zip attr libcap2-bin file binutils secilc qemu-user-static apksigner openssl >/dev/null
+          sudo apt-get install -y -qq python3-yaml python3-pyelftools e2fsprogs android-sdk-libsparse-utils erofs-utils unzip curl zip attr libcap2-bin file binutils secilc qemu-user-static apksigner openssl git >/dev/null
           git fetch --no-tags --depth=1 origin 0402bd118a891fd5802214dd2c64f1855aed4f73
           test "$(git cat-file -t 0402bd118a891fd5802214dd2c64f1855aed4f73)" = commit
           mkdir -p "$RUNNER_TEMP/kernel-artifact"
+
+          git clone --filter=blob:none --no-checkout https://android.googlesource.com/kernel/prebuilts/build-tools "$RUNNER_TEMP/kernel-build-tools"
+          git -C "$RUNNER_TEMP/kernel-build-tools" fetch --depth=1 origin "$KERNEL_BUILD_TOOLS_SHA"
+          git -C "$RUNNER_TEMP/kernel-build-tools" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/kernel-build-tools" rev-parse HEAD)" = "$KERNEL_BUILD_TOOLS_SHA"
+          B="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin"
+          for c in avbtool lpmake; do test -x "$B/$c"; done
+          echo "$B" >> "$GITHUB_PATH"
 
       - name: Download qualified clean kernel
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
@@ -132,11 +150,251 @@ jobs:
           set -Eeuo pipefail
           python3 wear7/current/run_clean_v1.py
 
+      - name: Apply qualified recovery-preservation patch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PATH="$RUNNER_TEMP/kernel-build-tools/linux-x86/bin:$RUNNER_TEMP/clean-v1-otatools/extracted/bin:$PATH"
+          export LD_LIBRARY_PATH="$RUNNER_TEMP/clean-v1-otatools/extracted/lib64:$RUNNER_TEMP/clean-v1-otatools/extracted/lib"
+
+          CAND="$GITHUB_WORKSPACE/wear7-final-candidate"
+          REPORT="$GITHUB_WORKSPACE/wear7-final-report"
+          PARTS="$RUNNER_TEMP/recoverysafe-parts"
+          SHIPPED="$RUNNER_TEMP/recoverysafe-shipped"
+          RAW="$RUNNER_TEMP/recoverysafe-source-super.raw"
+          FINAL_RAW="$RUNNER_TEMP/recoverysafe-final-super.raw"
+          RC='/etc/init/vendor_flash_recovery.rc'
+
+          rm -rf "$PARTS" "$SHIPPED"
+          mkdir -p "$PARTS" "$SHIPPED"
+
+          sha256sum "$CAND/super.img" > "$REPORT/RECOVERYSAFE_SOURCE_SUPER_SHA256.txt"
+          grep -qx 'CANDIDATE=WEAR7_DACE_CLEAN_V1' "$CAND/CANDIDATE_MANIFEST.txt"
+          grep -qx 'KERNELSU=ABSENT' "$CAND/CANDIDATE_MANIFEST.txt"
+          grep -qx 'SUSFS=ABSENT' "$CAND/CANDIDATE_MANIFEST.txt"
+          simg2img "$CAND/super.img" "$RAW"
+          test "$(stat -c %s "$RAW")" = "$SUPER_DEVICE_SIZE"
+          lpunpack "$RAW" "$PARTS"
+          rm -f "$RAW"
+
+          for p in system system_ext product vendor vendor_dlkm system_dlkm; do
+            test -s "$PARTS/$p.img"
+          done
+          echo "$STOCK_VENDOR_SHA256  $PARTS/vendor.img" | sha256sum -c -
+          sha256sum "$PARTS/"*.img > "$REPORT/RECOVERYSAFE_SOURCE_LOGICAL_SHA256.txt"
+
+          V="$PARTS/vendor.img"
+          avbtool info_image --image "$V" > "$REPORT/VENDOR_AVB_BEFORE_RECOVERYSAFE.txt"
+          test "$(stat -c %s "$V")" = "$VENDOR_PARTITION_SIZE"
+          avbtool erase_footer --image "$V"
+          MAX=$(avbtool add_hashtree_footer --partition_size "$VENDOR_PARTITION_SIZE" --calc_max_image_size)
+          test "$(stat -c %s "$V")" -le "$MAX"
+
+          debugfs -R "dump -p $RC $RUNNER_TEMP/rc.before" "$V" >/dev/null 2>&1
+          printf '%s\n' \
+            'service vendor_flash_recovery /vendor/bin/install-recovery.sh' \
+            '    class main' \
+            '    oneshot' > "$RUNNER_TEMP/rc.expected"
+          cmp "$RUNNER_TEMP/rc.before" "$RUNNER_TEMP/rc.expected"
+
+          BS=$(dumpe2fs -h "$V" 2>/dev/null | awk -F: '/Block size:/{gsub(/ /,"",$2); print $2; exit}')
+          test -n "$BS"
+          mapfile -t BLOCKS < <(debugfs -R "blocks $RC" "$V" 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$')
+          test "${#BLOCKS[@]}" = 1
+          BLOCK="${BLOCKS[0]}"
+          INODE=$(debugfs -R "stat $RC" "$V" 2>/dev/null | awk '/^Inode:/{print $2; exit}')
+          test -n "$INODE"
+          ICHECK=$(debugfs -R "icheck $BLOCK" "$V" 2>/dev/null | awk -v b="$BLOCK" '$1==b {print $2}')
+          test "$ICHECK" = "$INODE"
+
+          python3 - "$V" "$BS" "$BLOCK" "$RUNNER_TEMP/rc.before" "$REPORT/VENDOR_BLOCK_PATCH.txt" <<'PY'
+          import pathlib, sys
+          img = pathlib.Path(sys.argv[1])
+          bs = int(sys.argv[2])
+          block = int(sys.argv[3])
+          before = pathlib.Path(sys.argv[4]).read_bytes()
+          report = pathlib.Path(sys.argv[5])
+          old = b"    class main\n    oneshot\n"
+          new = b"    disabled  \n    oneshot\n"
+          assert len(old) == len(new)
+          assert before.count(old) == 1
+          off = block * bs
+          with img.open("r+b") as f:
+              f.seek(off)
+              data = f.read(bs)
+              assert data.count(before) == 1
+              data2 = data.replace(before, before.replace(old, new))
+              assert len(data2) == len(data)
+              f.seek(off)
+              f.write(data2)
+              f.flush()
+          report.write_text(
+              f"BLOCK_SIZE={bs}\nPHYSICAL_BLOCK={block}\nBLOCK_OFFSET={off}\n"
+              f"PATCH_BYTES={len(old)}\nPATCH_MODE=EXACT_SAME_LENGTH_DATA_BLOCK\n"
+          )
+          PY
+
+          debugfs -R "dump -p $RC $RUNNER_TEMP/rc.after" "$V" >/dev/null 2>&1
+          printf '%s\n' \
+            'service vendor_flash_recovery /vendor/bin/install-recovery.sh' \
+            '    disabled  ' \
+            '    oneshot' > "$RUNNER_TEMP/rc.after.expected"
+          cmp "$RUNNER_TEMP/rc.after" "$RUNNER_TEMP/rc.after.expected"
+
+          debugfs -R "dump -p /bin/install-recovery.sh $RUNNER_TEMP/install-recovery.sh" "$V" >/dev/null 2>&1
+          echo "$INSTALL_RECOVERY_SHA256  $RUNNER_TEMP/install-recovery.sh" | sha256sum -c -
+          grep -q -- '--flash /vendor/etc/recovery.img' "$RUNNER_TEMP/install-recovery.sh"
+          grep -q '/dev/block/bootdevice/by-name/recovery' "$RUNNER_TEMP/install-recovery.sh"
+
+          r=0
+          e2fsck -fn "$V" > "$REPORT/VENDOR_FSCK_AFTER_RECOVERYSAFE_PATCH.txt" 2>&1 || r=$?
+          test "$r" -lt 8
+
+          avbtool add_hashtree_footer \
+            --image "$V" \
+            --partition_name vendor \
+            --partition_size "$VENDOR_PARTITION_SIZE" \
+            --algorithm NONE \
+            --salt "$AVB_SALT"
+          test "$(stat -c %s "$V")" = "$VENDOR_PARTITION_SIZE"
+          avbtool info_image --image "$V" > "$REPORT/VENDOR_AVB_AFTER_RECOVERYSAFE.txt"
+          echo "$RECOVERYSAFE_VENDOR_SHA256  $V" | sha256sum -c -
+
+          avbtool make_vbmeta_image \
+            --output "$CAND/vbmeta.img.new" \
+            --padding_size 8192 \
+            --algorithm NONE \
+            --flags 3 \
+            --rollback_index 0 \
+            --include_descriptors_from_image "$CAND/boot.img" \
+            --include_descriptors_from_image "$CAND/init_boot.img" \
+            --include_descriptors_from_image "$CAND/vendor_boot.img" \
+            --include_descriptors_from_image "$CAND/dtbo.img" \
+            --include_descriptors_from_image "$PARTS/system_dlkm.img" \
+            --include_descriptors_from_image "$PARTS/vendor.img" \
+            --include_descriptors_from_image "$PARTS/vendor_dlkm.img"
+          avbtool info_image --image "$CAND/vbmeta.img.new" > "$REPORT/VBMETA_ROOT_RECOVERYSAFE.txt"
+          grep -q 'Flags:                    3' "$REPORT/VBMETA_ROOT_RECOVERYSAFE.txt"
+          grep -q 'Partition Name:        vendor' "$REPORT/VBMETA_ROOT_RECOVERYSAFE.txt"
+          mv "$CAND/vbmeta.img.new" "$CAND/vbmeta.img"
+
+          SYS=$(stat -c %s "$PARTS/system.img")
+          SX=$(stat -c %s "$PARTS/system_ext.img")
+          PROD=$(stat -c %s "$PARTS/product.img")
+          VEN=$(stat -c %s "$PARTS/vendor.img")
+          VDLKM=$(stat -c %s "$PARTS/vendor_dlkm.img")
+          SDLKM=$(stat -c %s "$PARTS/system_dlkm.img")
+          TOTAL=$((SYS+SX+PROD+VEN+VDLKM+SDLKM))
+          test "$TOTAL" -le "$DYNAMIC_GROUP_SIZE"
+
+          lpmake \
+            --metadata-size 65536 \
+            --super-name super \
+            --metadata-slots 2 \
+            --device "super:$SUPER_DEVICE_SIZE" \
+            --group "qti_dynamic_partitions:$DYNAMIC_GROUP_SIZE" \
+            --partition "system:readonly:$SYS:qti_dynamic_partitions" --image "system=$PARTS/system.img" \
+            --partition "system_ext:readonly:$SX:qti_dynamic_partitions" --image "system_ext=$PARTS/system_ext.img" \
+            --partition "product:readonly:$PROD:qti_dynamic_partitions" --image "product=$PARTS/product.img" \
+            --partition "vendor:readonly:$VEN:qti_dynamic_partitions" --image "vendor=$PARTS/vendor.img" \
+            --partition "vendor_dlkm:readonly:$VDLKM:qti_dynamic_partitions" --image "vendor_dlkm=$PARTS/vendor_dlkm.img" \
+            --partition "system_dlkm:readonly:$SDLKM:qti_dynamic_partitions" --image "system_dlkm=$PARTS/system_dlkm.img" \
+            --sparse \
+            --output "$CAND/super.img.new"
+          test -s "$CAND/super.img.new"
+          mv "$CAND/super.img.new" "$CAND/super.img"
+          sha256sum "$CAND/super.img" > "$REPORT/RECOVERYSAFE_FINAL_SUPER_SHA256.txt"
+
+          simg2img "$CAND/super.img" "$FINAL_RAW"
+          test "$(stat -c %s "$FINAL_RAW")" = "$SUPER_DEVICE_SIZE"
+          lpunpack "$FINAL_RAW" "$SHIPPED"
+          rm -f "$FINAL_RAW"
+          for p in system system_ext product vendor vendor_dlkm system_dlkm; do
+            test -s "$SHIPPED/$p.img"
+          done
+          for p in system system_ext product vendor_dlkm system_dlkm; do
+            cmp "$PARTS/$p.img" "$SHIPPED/$p.img"
+          done
+          echo "$RECOVERYSAFE_VENDOR_SHA256  $SHIPPED/vendor.img" | sha256sum -c -
+          sha256sum "$SHIPPED/"*.img > "$REPORT/RECOVERYSAFE_FINAL_LOGICAL_SHA256.txt"
+
+          cp "$RUNNER_TEMP/rc.before" "$REPORT/vendor_flash_recovery.before.rc"
+          cp "$RUNNER_TEMP/rc.after" "$REPORT/vendor_flash_recovery.after.rc"
+          cp "$RUNNER_TEMP/install-recovery.sh" "$REPORT/install-recovery.sh"
+          cat > "$REPORT/RECOVERY_PRESERVATION_VERDICT.txt" <<'EOF'
+          RECOVERY_OVERWRITE_RISK_ORIGINAL=CONFIRMED
+          ORIGINAL_SERVICE=vendor_flash_recovery class main oneshot
+          ORIGINAL_WRITER=/vendor/bin/install-recovery.sh
+          ORIGINAL_TARGET=/dev/block/bootdevice/by-name/recovery
+          ORIGINAL_PAYLOAD=/vendor/etc/recovery.img
+          FIX=vendor_flash_recovery service disabled; oneshot retained
+          FIX_SCOPE=EXACT_SAME_LENGTH_RC_DATA_BLOCK_ONLY
+          INSTALL_RECOVERY_SCRIPT_BYTES=UNCHANGED
+          RECOVERY_PRESERVATION_STATIC_GATE=PASS
+          EOF
+
+          python3 - "$CAND/CANDIDATE_MANIFEST.txt" <<'PY'
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          lines = p.read_text().splitlines()
+          drop = (
+              'CANDIDATE=',
+              'RECOVERY_BASELINE=',
+              'RECOVERY_OVERWRITE_',
+              'RECOVERY_PRESERVATION_',
+              'RECOVERY_IMAGE_SHA256=',
+              'RECOVERY_AUTODATA_SHA256=',
+          )
+          lines = [x for x in lines if not x.startswith(drop)]
+          lines += [
+              'CANDIDATE=WEAR7_DACE_CLEAN_V1_RECOVERYSAFE',
+              'RECOVERY_OVERWRITE_RISK_ORIGINAL=CONFIRMED',
+              'RECOVERY_OVERWRITE_FIX=vendor_flash_recovery_DISABLED',
+              'RECOVERY_OVERWRITE_FIX_SCOPE=EXACT_SAME_LENGTH_RC_DATA_BLOCK_ONLY',
+              'RECOVERY_PRESERVATION_STATIC_GATE=PASS',
+              'RECOVERY_RUNTIME_QUALIFIED=YES',
+              'RECOVERY_IMAGE_SHA256=dec15f4b66b16a68a9eb40b5f6f17b92a8429a5e1d73f6eba81c3a524a7993ff',
+              'RECOVERY_AUTODATA_SHA256=8d6d4f92bce999fbe2bfed0ce5b5bbeb60d08cc8dbd1df4dbdf15b4d623af0c3',
+          ]
+          seen = set()
+          out = []
+          for x in lines:
+              if x not in seen:
+                  out.append(x)
+                  seen.add(x)
+          p.write_text('\n'.join(out) + '\n')
+          PY
+
+          (
+            cd "$CAND"
+            rm -f SHA256SUMS.txt
+            sha256sum boot.img init_boot.img vendor_boot.img dtbo.img vbmeta.img vbmeta_system.img super.img CANDIDATE_MANIFEST.txt > SHA256SUMS.txt
+          )
+
+          echo 'PATCHED_VENDOR_SHA256='"$RECOVERYSAFE_VENDOR_SHA256" > "$REPORT/RECOVERY_SAFE_VENDOR_SHA256.txt"
+          cat > "$REPORT/FINAL_RECOVERYSAFE_VERDICT.txt" <<'EOF'
+          WEAR7_DACE_CLEAN_V1_RECOVERYSAFE_OFFLINE=PASS
+          RECOVERY_OVERWRITE_RISK=CONFIRMED_AND_NEUTRALIZED
+          RECOVERY_PRESERVATION_STATIC_GATE=PASS
+          CHANGE_SCOPE=EXACT_SAME_LENGTH_RC_DATA_BLOCK_ONLY
+          KERNEL_CLEAN_5_15_220=PASS
+          KMI_STOCK379_337_OF_337=PASS
+          KERNELSU=ABSENT
+          SUSFS=ABSENT
+          RECOVERY_RUNTIME_QUALIFIED=YES
+          HARDWARE_RUNTIME=UNTESTED
+          FLASH_PERFORMED=NO
+          EOF
+
+          echo RECOVERY_PRESERVATION_STATIC_GATE=PASS
+          echo WEAR7_DACE_CLEAN_V1_RECOVERYSAFE_OFFLINE=PASS
+
       - name: Upload CLEAN V1 reports
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: Wear7-Dace-Clean-V1-Reports
+          name: Wear7-Dace-Clean-V1-RecoverySafe-Reports
           path: wear7-final-report/
           if-no-files-found: error
           retention-days: 90
@@ -146,7 +404,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: Wear7-Dace-Clean-V1-Bootchain
+          name: Wear7-Dace-Clean-V1-RecoverySafe-Bootchain
           path: |
             wear7-final-candidate/boot.img
             wear7-final-candidate/init_boot.img
@@ -164,7 +422,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: Wear7-Dace-Clean-V1-Super
+          name: Wear7-Dace-Clean-V1-RecoverySafe-Super
           path: wear7-final-candidate/super.img
           if-no-files-found: error
           retention-days: 90
