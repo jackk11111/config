@@ -157,8 +157,11 @@ jobs:
           export PATH="$RUNNER_TEMP/recoverysafe-build-tools/linux-x86/bin:$RUNNER_TEMP/clean-v1-otatools/extracted/bin:$PATH"
           export LD_LIBRARY_PATH="$RUNNER_TEMP/clean-v1-otatools/extracted/lib64:$RUNNER_TEMP/clean-v1-otatools/extracted/lib"
           AVBTOOL="$RUNNER_TEMP/clean-v1-otatools/extracted/bin/avbtool"
+          LPMAKE="$RUNNER_TEMP/clean-v1-otatools/extracted/bin/lpmake"
           test -x "$AVBTOOL"
+          test -x "$LPMAKE"
           avbtool() { "$AVBTOOL" "$@"; }
+          lpmake() { "$LPMAKE" "$@"; }
 
           CAND="$GITHUB_WORKSPACE/wear7-final-candidate"
           REPORT="$GITHUB_WORKSPACE/wear7-final-report"
