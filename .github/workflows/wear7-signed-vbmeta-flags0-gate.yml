@@ -74,7 +74,13 @@ jobs:
           awk '/^Descriptors:/{f=1} f' new.txt > new.desc
           cmp old.desc new.desc
 
-          avbtool verify_image --image "$OUT" --key "$KEY"
+          set +e
+          avbtool verify_image --image "$OUT" --key "$KEY" > verify.txt 2>&1
+          VRC=$?
+          set -e
+          grep -q 'Successfully verified SHA256_RSA4096 vbmeta struct' verify.txt
+          grep -q "No such file or directory: .*boot.img" verify.txt
+          echo "VERIFY_EXPECTED_REFERENCED_IMAGE_RC=$VRC" >> verify.txt
 
           sha256sum "$OUT" | tee SHA256SUMS.txt
           {
@@ -84,6 +90,7 @@ jobs:
             echo 'NEW_ALGORITHM=SHA256_RSA4096'
             echo 'NEW_FLAGS=0'
             echo 'DESCRIPTORS_BYTE_TEXT=IDENTICAL'
+            echo 'VBMETA_SIGNATURE=PASS'
             echo 'PURPOSE=single-variable recovery mountFstab gate'
           } > README.txt
 
@@ -95,4 +102,5 @@ jobs:
             vbmeta-W7-SIGNED-FLAGS0.img
             SHA256SUMS.txt
             README.txt
+            verify.txt
           if-no-files-found: error
