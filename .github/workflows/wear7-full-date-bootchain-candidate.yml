@@ -54,7 +54,7 @@ jobs:
       - name: Build coherent full-date boot and root vbmeta
         shell: bash
         run: |
-          set -Eeuxo pipefail
+          set -Eeuo pipefail
           B="$RUNNER_TEMP/run16"
           H="$RUNNER_TEMP/hotfix/vbmeta-W7-STOCK-HW-BINDINGS.img"
           O="$GITHUB_WORKSPACE/wear7-full-date-bootchain"
@@ -84,7 +84,7 @@ jobs:
             --prop 'com.android.build.boot.security_patch:2024-11-01' \
             --prop 'com.android.build.boot.fingerprint:Mobvoi/dace/dace:13/TMDB.240925.002/379:user/release-keys'
 
-          "$AVBTOOL" info_image --image "$O/boot-W7-FULLDATE.img" | tee "$O/BOOT_FULLDATE_INFO.txt"
+          "$AVBTOOL" info_image --image "$O/boot-W7-FULLDATE.img" > "$O/BOOT_FULLDATE_INFO.txt"
           grep -Fq "Prop: com.android.build.boot.os_version -> '13'" "$O/BOOT_FULLDATE_INFO.txt"
           grep -Fq "Prop: com.android.build.boot.security_patch -> '2024-11-01'" "$O/BOOT_FULLDATE_INFO.txt"
           grep -Fq 'Image Size:            42647552 bytes' "$O/BOOT_FULLDATE_INFO.txt"
@@ -99,14 +99,17 @@ jobs:
             --padding_size 8192 \
             --include_descriptors_from_image "$H"
 
-          "$AVBTOOL" info_image --image "$O/vbmeta-W7-FULLDATE.img" | tee "$O/VBMETA_FULLDATE_INFO.txt"
+          "$AVBTOOL" info_image --image "$O/vbmeta-W7-FULLDATE.img" > "$O/VBMETA_FULLDATE_INFO.txt"
           grep -Fq 'Algorithm:                SHA256_RSA4096' "$O/VBMETA_FULLDATE_INFO.txt"
           grep -Fq 'Flags:                    0' "$O/VBMETA_FULLDATE_INFO.txt"
           grep -Fq "Prop: com.android.build.boot.os_version -> '13'" "$O/VBMETA_FULLDATE_INFO.txt"
           grep -Fq "Prop: com.android.build.boot.security_patch -> '2024-11-01'" "$O/VBMETA_FULLDATE_INFO.txt"
           grep -Fq 'Digest:                419ff5eb7f0d198329e95f38f2777ca32d66dab95183297ffb61e3c3d1e0941d' "$O/VBMETA_FULLDATE_INFO.txt"
 
-          "$AVBTOOL" verify_image --image "$O/boot-W7-FULLDATE.img" --key "$KEY" | tee "$O/BOOT_VERIFY.txt"
+          cp "$O/boot-W7-FULLDATE.img" "$O/boot.img"
+          (cd "$O" && "$AVBTOOL" verify_image --image boot.img --key "$KEY") > "$O/BOOT_VERIFY.txt" 2>&1
+          grep -q 'Successfully verified footer and SHA256_RSA4096 vbmeta struct' "$O/BOOT_VERIFY.txt"
+          rm -f "$O/boot.img"
 
           sha256sum "$O/boot-W7-FULLDATE.img" "$O/vbmeta-W7-FULLDATE.img" > "$O/SHA256SUMS.txt"
           cat > "$O/README.txt" <<'EOF'
@@ -126,11 +129,10 @@ jobs:
           cat "$O/SHA256SUMS.txt"
 
       - name: Upload coherent two-image candidate
-        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: Wear7-Run16-FULLDATE-Coherent-Bootchain
           path: wear7-full-date-bootchain/
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 90
           compression-level: 6
