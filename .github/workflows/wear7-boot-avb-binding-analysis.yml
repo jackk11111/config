@@ -1,0 +1,109 @@
+name: Wear7 boot AVB binding analysis
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  RUN16_RUN_ID: 37287348856
+  RUN16_BOOTCHAIN_ARTIFACT: Wear7-Dace-Clean-V1-RecoverySafe-Bootchain
+  TIC_URL: https://android.googleapis.com/packages/data/ota-api/package/2269bd24a774cae37adc720d3d97bd1b76846e2b.zip
+  TIC_SHA256: ffa61d822a5c667c230ce2ba9426ce4eb282adcaa0891279ef002f65ca15a08d
+  AVBTOOL_URL: https://raw.githubusercontent.com/LineageOS/android_external_avb/lineage-22.2/avbtool.py
+
+jobs:
+  analyze:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Download exact Run16 bootchain
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/run16 report
+          gh run download "$RUN16_RUN_ID" -n "$RUN16_BOOTCHAIN_ARTIFACT" -D /tmp/run16
+          sha256sum /tmp/run16/boot.img /tmp/run16/init_boot.img /tmp/run16/vendor_boot.img /tmp/run16/dtbo.img /tmp/run16/vbmeta.img /tmp/run16/vbmeta_system.img > report/RUN16_SHA256.txt
+      - name: Fetch stock379 OTA and inspect boot payload
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 3 --retry-delay 2 -o /tmp/tic.zip "$TIC_URL"
+          echo "$TIC_SHA256  /tmp/tic.zip" | sha256sum -c -
+          unzip -l /tmp/tic.zip > report/STOCK_OTA_LIST.txt
+          python3 - <<'PY'
+          import zipfile, pathlib
+          z=zipfile.ZipFile('/tmp/tic.zip')
+          names=z.namelist()
+          for n in names:
+              if n.endswith('/boot.img') or n=='boot.img':
+                  pathlib.Path('/tmp/stock-boot.img').write_bytes(z.read(n)); print('DIRECT_BOOT', n); break
+          PY
+          if [ ! -s /tmp/stock-boot.img ]; then
+            echo DIRECT_STOCK_BOOT=ABSENT > report/STOCK_BOOT_SOURCE.txt
+          else
+            echo DIRECT_STOCK_BOOT=PRESENT > report/STOCK_BOOT_SOURCE.txt
+          fi
+      - name: Install avbtool and inspect Run16 boot/root vbmeta
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 3 --retry-delay 2 -o /tmp/avbtool "$AVBTOOL_URL"
+          chmod +x /tmp/avbtool
+          /tmp/avbtool info_image --image /tmp/run16/boot.img > report/RUN16_BOOT_AVB.txt
+          /tmp/avbtool info_image --image /tmp/run16/vbmeta.img > report/RUN16_ROOT_VBMETA.txt
+          /tmp/avbtool info_image --image /tmp/run16/vbmeta_system.img > report/RUN16_SYSTEM_VBMETA.txt
+          python3 - <<'PY'
+          import struct, pathlib
+          for name in ('boot.img','init_boot.img','vendor_boot.img'):
+              p=pathlib.Path('/tmp/run16')/name
+              b=p.read_bytes()[:4096]
+              if b[:8]==b'ANDROID!':
+                  osver=struct.unpack_from('<I',b,16)[0]
+                  a=(osver>>25)&0x7f; m=(osver>>18)&0x7f; d=(osver>>11)&0x7f
+                  y=((osver>>4)&0x7f)+2000; mon=osver&0xf
+                  print(name, 'raw_os_version=0x%08x'%osver, f'os={a}.{m}.{d}', f'patch={y:04d}-{mon:02d}')
+              else:
+                  print(name,'magic',b[:8])
+          PY
+          strings -a /tmp/run16/boot.img | grep -E 'com\.android\.build\.(boot|vendor)\.(os_version|security_patch|fingerprint)' | sort -u > report/RUN16_BOOT_BINDING_STRINGS.txt || true
+      - name: Produce verdict
+        run: |
+          set -euxo pipefail
+          {
+            echo '=== RUN16 BOOT AVB ==='
+            cat report/RUN16_BOOT_AVB.txt
+            echo
+            echo '=== RUN16 ROOT VBMETA ==='
+            cat report/RUN16_ROOT_VBMETA.txt
+            echo
+            echo '=== BINDING STRINGS IN BOOT ==='
+            cat report/RUN16_BOOT_BINDING_STRINGS.txt
+          } > report/VERDICT_INPUT.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          boot=Path('report/RUN16_BOOT_AVB.txt').read_text()
+          root=Path('report/RUN16_ROOT_VBMETA.txt').read_text()
+          props=['com.android.build.boot.os_version','com.android.build.boot.security_patch']
+          miss_boot=[p for p in props if p not in boot]
+          miss_root=[p for p in props if p not in root]
+          out=[]
+          out.append('RUN16_BOOT_BINDING_PROPS=' + ('PASS' if not miss_boot else 'MISSING:' + ','.join(miss_boot)))
+          out.append('RUN16_ROOT_BINDING_PROPS=' + ('PASS' if not miss_root else 'MISSING:' + ','.join(miss_root)))
+          if miss_boot:
+              out.append('NEXT=REBUILD_ONLY_BOOT_AVB_FOOTER_WITH_FULLDATE_PROPERTIES;KEEP_BOOT_PAYLOAD_BYTES_EXACT')
+          elif miss_root:
+              out.append('NEXT=ROOT_VBMETA_ONLY')
+          else:
+              out.append('NEXT=NO_BINDING_GAP_FOUND')
+          Path('report/VERDICT.txt').write_text('\n'.join(out)+'\n')
+          print(Path('report/VERDICT.txt').read_text(), end='')
+          PY
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Wear7-Boot-AVB-Binding-Analysis
+          path: report/
+          if-no-files-found: error
+          retention-days: 30
