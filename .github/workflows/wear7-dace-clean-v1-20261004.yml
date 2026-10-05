@@ -255,6 +255,7 @@ jobs:
             --partition_name vendor \
             --partition_size "$VENDOR_PARTITION_SIZE" \
             --algorithm NONE \
+            --hash_algorithm sha256 \
             --salt "$AVB_SALT"
           test "$(stat -c %s "$V")" = "$VENDOR_PARTITION_SIZE"
           avbtool info_image --image "$V" > "$REPORT/VENDOR_AVB_AFTER_RECOVERYSAFE.txt"
