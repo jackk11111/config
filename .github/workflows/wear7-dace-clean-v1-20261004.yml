@@ -156,6 +156,9 @@ jobs:
           set -Eeuo pipefail
           export PATH="$RUNNER_TEMP/recoverysafe-build-tools/linux-x86/bin:$RUNNER_TEMP/clean-v1-otatools/extracted/bin:$PATH"
           export LD_LIBRARY_PATH="$RUNNER_TEMP/clean-v1-otatools/extracted/lib64:$RUNNER_TEMP/clean-v1-otatools/extracted/lib"
+          AVBTOOL="$RUNNER_TEMP/clean-v1-otatools/extracted/bin/avbtool"
+          test -x "$AVBTOOL"
+          avbtool() { "$AVBTOOL" "$@"; }
 
           CAND="$GITHUB_WORKSPACE/wear7-final-candidate"
           REPORT="$GITHUB_WORKSPACE/wear7-final-report"
@@ -255,7 +258,7 @@ jobs:
             --partition_name vendor \
             --partition_size "$VENDOR_PARTITION_SIZE" \
             --algorithm NONE \
-            --hash_algorithm sha256 \
+            --hash_algorithm sha1 \
             --salt "$AVB_SALT"
           test "$(stat -c %s "$V")" = "$VENDOR_PARTITION_SIZE"
           avbtool info_image --image "$V" > "$REPORT/VENDOR_AVB_AFTER_RECOVERYSAFE.txt"
