@@ -1,0 +1,132 @@
+name: Wear7 vbmeta version-binding hotfix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/wear7-vbmeta-versionbinding-hotfix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-vbmeta-hotfix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+
+      - name: Download exact runtime-tested run16 bootchain
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Wear7-Dace-Clean-V1-RecoverySafe-Bootchain
+          path: ${{ runner.temp }}/bootchain
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: '37287348856'
+
+      - name: Pin avbtool 1.4.0 from qualified Clean V1 otatools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          Z="$RUNNER_TEMP/otatools.zip"
+          D="$RUNNER_TEMP/otatools"
+          curl -fL --retry 3 --retry-delay 2 \
+            -o "$Z" \
+            'https://ci.android.com/builds/submitted/16102939/aosp_cf_x86_64_only_phone-userdebug/latest/raw/otatools.zip'
+          echo 'f1da1fb14ad810835679abd5f8a30c0e4f4c5b6210d355b7e1995bc51d739d84  '"$Z" | sha256sum -c -
+          mkdir -p "$D"
+          unzip -q "$Z" 'bin/avbtool' -d "$D"
+          chmod +x "$D/bin/avbtool"
+          "$D/bin/avbtool" version | tee "$RUNNER_TEMP/avbtool-version.txt"
+          grep -q 'avbtool 1.4.0' "$RUNNER_TEMP/avbtool-version.txt"
+          echo "AVBTOOL=$D/bin/avbtool" >> "$GITHUB_ENV"
+
+      - name: Gate exact flashed run16 root vbmeta and prove missing hardware bindings
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          B="$RUNNER_TEMP/bootchain"
+          test -s "$B/vbmeta.img"
+          test "$(stat -c %s "$B/vbmeta.img")" = 8192
+          echo '78425d40e2c81474e63834a34be8e59f38d5dc8f05e55c8219c5dd3e68e1ae19  '"$B/vbmeta.img" | sha256sum -c -
+          "$AVBTOOL" info_image --image "$B/vbmeta.img" > "$RUNNER_TEMP/vbmeta.before.txt"
+          grep -q 'Flags:                    3' "$RUNNER_TEMP/vbmeta.before.txt"
+          ! grep -q 'Prop: com.android.build.boot.os_version' "$RUNNER_TEMP/vbmeta.before.txt"
+          ! grep -q 'Prop: com.android.build.boot.security_patch' "$RUNNER_TEMP/vbmeta.before.txt"
+          ! grep -q 'Prop: com.android.build.vendor.os_version' "$RUNNER_TEMP/vbmeta.before.txt"
+          ! grep -q 'Prop: com.android.build.vendor.security_patch' "$RUNNER_TEMP/vbmeta.before.txt"
+          echo 'RUN16_MISSING_VERSION_BINDINGS=CONFIRMED'
+
+      - name: Build minimal root-vbmeta hotfix only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          B="$RUNNER_TEMP/bootchain"
+          O="$GITHUB_WORKSPACE/vbmeta-hotfix"
+          mkdir -p "$O"
+
+          "$AVBTOOL" make_vbmeta_image \
+            --output "$O/vbmeta-W7-STOCK-HW-BINDINGS.img" \
+            --padding_size 8192 \
+            --algorithm NONE \
+            --flags 3 \
+            --rollback_index 0 \
+            --include_descriptors_from_image "$B/vbmeta.img" \
+            --prop 'com.android.build.boot.os_version:13' \
+            --prop 'com.android.build.boot.fingerprint:Mobvoi/dace/dace:13/TMDB.240925.002/379:user/release-keys' \
+            --prop 'com.android.build.boot.security_patch:2024-11-01' \
+            --prop 'com.android.build.vendor.os_version:13' \
+            --prop 'com.android.build.vendor.fingerprint:Mobvoi/dace/dace:13/TMDB.240925.002/379:user/release-keys' \
+            --prop 'com.android.build.vendor.security_patch:2024-11-01'
+
+          cp "$B/vbmeta.img" "$O/vbmeta-RUN16-ORIGINAL.img"
+          "$AVBTOOL" info_image --image "$O/vbmeta-W7-STOCK-HW-BINDINGS.img" > "$O/VBMETA_HOTFIX_INFO.txt"
+          cp "$RUNNER_TEMP/vbmeta.before.txt" "$O/VBMETA_RUN16_INFO.txt"
+
+          test "$(stat -c %s "$O/vbmeta-W7-STOCK-HW-BINDINGS.img")" = 8192
+          grep -q 'Flags:                    3' "$O/VBMETA_HOTFIX_INFO.txt"
+          grep -Fqx "    Prop: com.android.build.boot.os_version -> '13'" "$O/VBMETA_HOTFIX_INFO.txt"
+          grep -Fqx "    Prop: com.android.build.boot.security_patch -> '2024-11-01'" "$O/VBMETA_HOTFIX_INFO.txt"
+          grep -Fqx "    Prop: com.android.build.vendor.os_version -> '13'" "$O/VBMETA_HOTFIX_INFO.txt"
+          grep -Fqx "    Prop: com.android.build.vendor.security_patch -> '2024-11-01'" "$O/VBMETA_HOTFIX_INFO.txt"
+
+          python3 - "$RUNNER_TEMP/vbmeta.before.txt" "$O/VBMETA_HOTFIX_INFO.txt" <<'PY'
+          import pathlib, sys
+          before = pathlib.Path(sys.argv[1]).read_text().split('Descriptors:\n', 1)[1].splitlines()
+          after = pathlib.Path(sys.argv[2]).read_text().split('Descriptors:\n', 1)[1].splitlines()
+          missing = [line for line in before if line and line not in after]
+          if missing:
+              raise SystemExit('original descriptor lines missing after hotfix: ' + repr(missing[:20]))
+          print('ORIGINAL_RUN16_DESCRIPTORS_PRESERVED=PASS')
+          PY
+
+          {
+            echo 'SOURCE_RUN_ID=37287348856'
+            echo 'SOURCE_COMMIT=e138cb634259f43f49a6ddd49f601c523d23851d'
+            echo 'SOURCE_VBMETA_SHA256=78425d40e2c81474e63834a34be8e59f38d5dc8f05e55c8219c5dd3e68e1ae19'
+            echo 'CHANGE_SCOPE=ROOT_VBMETA_PROPERTIES_ONLY'
+            echo 'HYPOTHESIS=restore stock hardware version-binding properties required by QTI Keymaster metadata-key validation'
+            echo 'BOOT_OS_VERSION=13'
+            echo 'BOOT_SECURITY_PATCH=2024-11-01'
+            echo 'VENDOR_OS_VERSION=13'
+            echo 'VENDOR_SECURITY_PATCH=2024-11-01'
+            echo 'AVB_FLAGS=3'
+            echo 'OUTPUT_SIZE=8192'
+            sha256sum "$O/vbmeta-W7-STOCK-HW-BINDINGS.img"
+          } > "$O/HOTFIX_REPORT.txt"
+
+          sha256sum "$O"/* > "$O/SHA256SUMS.txt"
+          cat "$O/HOTFIX_REPORT.txt"
+
+      - name: Upload minimal vbmeta hotfix
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wear7-Run16-VBMeta-Stock-HW-Bindings-Hotfix
+          path: vbmeta-hotfix/
+          if-no-files-found: error
+          retention-days: 90
