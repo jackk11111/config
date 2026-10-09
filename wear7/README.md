@@ -17,4 +17,4 @@ L'evidenza di una KMI compatibile e i successi delle build CI non dimostrano un 
 Solo quando emergano nuove prove verificabili su driver/HAL, sorgenti OEM, initUser0/FBE e pairing/companion. Ripartire dal primo gate fallito, confrontare i log gia' raccolti, usare una modifica alla volta; non interferire con il kernel operativo.
 
 ## Pulizia GitHub del 9 ottobre 2026
-Rimosse entrambe le release diagnostiche DIAG3/DIAG5, gli 11 branch sperimentali Wear 7 e 119 vecchie esecuzioni CI. Il branch main conserva solo note tecniche; gli artefatti falliti non sono pacchetti di ripristino. Rimangono appositamente i branch kernel 5.15.220 e i sorgenti ReSukiSU. I backup e gli handoff originali possono essere reinviati dal telefono se in futuro servissero.
+Rimosse entrambe le release diagnostiche DIAG3/DIAG5, gli 11 branch sperimentali Wear 7 e 138 vecchie esecuzioni CI. Il branch main conserva solo note tecniche; gli artefatti falliti non sono pacchetti di ripristino. Rimangono appositamente i branch kernel 5.15.220 e i sorgenti ReSukiSU. I backup e gli handoff originali possono essere reinviati dal telefono se in futuro servissero.
