@@ -1,0 +1,58 @@
+name: TicWatch cleanup once
+on:
+  push:
+    paths:
+      - .github/workflows/ticwatch-cleanup-once.yml
+  workflow_dispatch:
+permissions:
+  actions: write
+  contents: write
+jobs:
+  purge-obsolete-wear7:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Remove obsolete Wear 7 runs, releases, tags and branches
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner,repo} = context.repo;
+            const counts = {runs:0,releases:0,tags:0,branches:0,errors:[]};
+            const safe = async (label,fn) => {
+              try { await fn(); counts[label]++; }
+              catch(e) { counts.errors.push(label+": "+e.message); }
+            };
+            // The valid kernel and the current Wear 4 baseline live on
+            // main and ticwatch-max-lts-220*; they are never targeted.
+            const runs = await github.paginate(github.rest.actions.listWorkflowRunsForRepo,
+              {owner,repo,per_page:100});
+            for (const run of runs) {
+              if (run.head_branch?.startsWith('wear7-') ||
+                  (['failure','cancelled','timed_out'].includes(run.conclusion) &&
+                   run.head_branch !== 'main' &&
+                   !run.head_branch?.startsWith('ticwatch-max-lts-220'))) {
+                await safe('runs',()=>github.rest.actions.deleteWorkflowRun(
+                  {owner,repo,run_id:run.id}));
+              }
+            }
+            const releases = await github.paginate(github.rest.repos.listReleases,
+              {owner,repo,per_page:100});
+            for (const release of releases) {
+              if (!release.tag_name?.startsWith('wear7-')) continue;
+              await safe('releases',()=>github.rest.repos.deleteRelease(
+                {owner,repo,release_id:release.id}));
+              await safe('tags',()=>github.rest.git.deleteRef(
+                {owner,repo,ref:'tags/'+release.tag_name}));
+            }
+            const branches = await github.paginate(github.rest.repos.listBranches,
+              {owner,repo,per_page:100});
+            for (const branch of branches) {
+              if (branch.name.startsWith('wear7-')) {
+                await safe('branches',()=>github.rest.git.deleteRef(
+                  {owner,repo,ref:'heads/'+branch.name}));
+              }
+            }
+            core.summary.addHeading('TicWatch cleanup').addCodeBlock(
+              JSON.stringify(counts,null,2),'json').write();
+            core.info('CLEANUP_RESULT='+JSON.stringify(counts));
+            if(counts.errors.length) core.setFailed(counts.errors.join('\n'));
