@@ -1,25 +1,10 @@
-# Kernel — clean 5.15.220 baseline
+# Kernel TicWatch dace — stato di riferimento
 
-Canonical kernel baseline for Wear 7 integration:
+**Configurazione runtime funzionante:** kernel Linux 5.15.220 + KernelSU Next 3.4.0 + SuSFS 2.3.0 su Wear OS 4 / Android 13. L'immagine esatta flashata e i relativi backup sono conservati dall'utente sul telefono; NON inferire la sua identita' dal solo nome di un workflow GitHub.
 
-- kernel: `5.15.220-Xinran_StarBai-Test+`
-- KernelSU: absent
-- SuSFS: absent
-- diagnostic KEXEC patches: absent
-- KMI gate: `337/337`
-- qualified workflow run: `37183075933`
-- artifact: `TicWatch-Wear7-Clean-Kernel-5.15.220-NoKSU-V2`
-- Image SHA-256: `c37800338faa30d6600bd9e422c57d839148e6029a03daa351fe338b68b533a7`
+**Sorgenti da conservare:** [jackk11111/ReSukiSU](https://github.com/jackk11111/ReSukiSU) (codice di KernelSU e manager) e le branch storiche `ticwatch-max-lts-220`, `ticwatch-max-lts-220-incremental` in questo repository. Queste branch contengono materiali di costruzione della serie 5.15.220, ma non sono una certificazione automatica dell'attuale boot.img.
 
-Build workflow: `.github/workflows/wear7-clean-kernel-515220-noksu-v2-20261003.yml`.
+## Baseline sperimentale distinta dal kernel attivo
+Il kernel **clean/no-KSU** compilato per Wear 7 non e' il kernel operativo dell'orologio. I due frammenti `kernel/baseline/clean-5.15.220.config.gz.b64.part00` e `part01` sono conservati SOLO per documentare la configurazione clean usata nella precedente indagine. La prova KMI 337/337 riguarda quell'esperimento, non dimostra un avvio riuscito di Wear 7.
 
-## Baseline config snapshot
-
-The clean kernel config provenance is stored under `kernel/baseline/` as two transport parts:
-
-- `clean-5.15.220.config.gz.b64.part00`
-- `clean-5.15.220.config.gz.b64.part01`
-
-Concatenate `part00` + `part01` to reconstruct the original base64-encoded gzip payload. The split is storage/transport only; the payload content is unchanged.
-
-KernelSU Next 3.4.0 and SuSFS must be reintegrated only after the clean Wear 7 baseline is demonstrated bootable on-device.
+Non riportare nell'immagine funzionante modifiche KEXEC, diagnostiche ARM64 o esperimenti Wear 7. Non avviare una nuova compilazione a meno che un gate realmente fallito non la richieda.

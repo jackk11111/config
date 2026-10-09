@@ -1,11 +1,14 @@
-# Wear 7 — current CLEAN V1
+# Wear 7 sul TicWatch dace — ricerca sospesa (9 ottobre 2026)
 
-Canonical source tree: `wear7/current/`.
+**Non funzionante / non qualificato sul dispositivo.** Sono stati prodotti kernel e bootchain, super.img, varianti di init e patch Vold/Keystore2, ma il porting non ha superato l'intera catena di avvio e configurazione utente sul TicWatch. Nella fase finale le indagini riguardavano la fase `initUser0` / FBE e le dipendenze tra Android 13 e il framework piu' recente. Compilazione CI riuscita != avvio, hardware, cifratura dati o pairing verificati.
 
-The latest verified source rebuild is GitHub Actions run `37204998782` (`Wear7 Dace CLEAN V1 source rebuild`), completed successfully on 2026-10-04. It produced the canonical bootchain, super and reports artifacts.
+**Stato congelato:** nessuna nuova build automatica nel `main`; non ripetere V11, DIAG, run e ricostruzioni firmware solo per cercare una modifica casuale. I vecchi sorgenti sperimentali e workflow non sono baseline operative.
 
-The generated clean super used by the later recovery-preservation audit has SHA-256 `8cb3cb13a0913980a5c53e8ae5f2e1591841f8bf9676afa81dc3a47b66d9d197`.
+**Condizione per riaprire il progetto:** informazioni nuove e verificabili (driver/HAL compatibili, sorgenti OEM, soluzione qualificata per initUser0/FBE, strategia di pairing con companion Mobvoi). Prima identificare il primo gate non passato e discriminare le cause sui log gia' disponibili. Il pairing proprietario Mobvoi non era stato dimostrato su Wear 7.
 
-`wear7/current/lib/`, `wear7/current/tools/` and `wear7/current/data/` contain only the dependencies still required by CLEAN V1. They replace the former mixed `v6`, `v7`, `v11`, diagnostic, installer, probe, `scripts` and `manifests` trees.
+Riferimenti storici minimi:
+- Branch vecchie Wear 7 ancora visibili nel repository: servono SOLO come testimonianza di esperimenti, non come istruzioni di flash.
+- Release DIAG3/DIAG5: immagini diagnostiche storiche, non OTA finale ne' pacchetto di installazione garantito.
+- Baseline attualmente da NON alterare: Wear OS 4 con kernel 5.15.220 + KernelSU Next + SuSFS e recovery autonoma.
 
-A successful CI build is not a substitute for final on-device boot, hardware and pairing validation.
+Se nuove informazioni riapriranno il progetto, richiedere all'utente i backup e gli handoff conservati sul telefono, e NON inferire dettagli mancanti dai nomi dei file.
