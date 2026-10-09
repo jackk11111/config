@@ -1,0 +1,26 @@
+name: TicWatch cleanup history once
+on:
+  push:
+    paths:
+      - .github/workflows/ticwatch-cleanup-history-once.yml
+permissions:
+  actions: write
+  contents: read
+jobs:
+  remove-old-runs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner,repo}=context.repo;
+            const runs=await github.paginate(github.rest.actions.listWorkflowRunsForRepo,{owner,repo,per_page:100});
+            let deleted=0, errors=[];
+            for (const run of runs) {
+              if(run.id===context.runId || run.head_branch?.startsWith('ticwatch-max-lts-220')) continue;
+              try {await github.rest.actions.deleteWorkflowRun({owner,repo,run_id:run.id});deleted++}
+              catch(e){errors.push(run.id+': '+e.message)}
+            }
+            core.info('CLEAN_HISTORY_RESULT='+JSON.stringify({deleted,errors}));
+            if(errors.length) core.setFailed(errors.join('\n'));
