@@ -1,0 +1,52 @@
+name: EvoX A17 annibale - PixelOS OTA range gate 11 (free)
+on:
+  push:
+    paths:
+      - '.github/workflows/evox-android17-pixelos-range-gate11.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  pixelos-probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Probe Android 17 reference OTA with HTTP range only
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from urllib.request import Request,urlopen
+          from urllib.error import HTTPError,URLError
+          from urllib.parse import urlsplit
+          urls=[
+           'https://downloads.sourceforge.net/project/annibale-builds/pixelos/20261002/PixelOS_annibale-17.0-20261002-0547.zip',
+           'https://sourceforge.net/projects/annibale-builds/files/pixelos/20261002/PixelOS_annibale-17.0-20261002-0547.zip/download',
+          ]
+          for n,url in enumerate(urls,1):
+              print('SOURCEFORGE_ROUTE='+str(n))
+              for method in ('HEAD','RANGE'):
+                  req=Request(url,method='HEAD' if method=='HEAD' else 'GET',
+                              headers={'User-Agent':'Mozilla/5.0 (compatible; EvoX-annibale-public-OTA-probe)',
+                                       **({} if method=='HEAD' else {'Range':'bytes=0-1023'})})
+                  try:
+                      with urlopen(req,timeout=40) as r:
+                          print(method+'_STATUS='+str(r.status))
+                          print(method+'_HOST='+str(urlsplit(r.url).hostname))
+                          print(method+'_TYPE='+str(r.headers.get('Content-Type')))
+                          print(method+'_ACCEPT_RANGES='+str(r.headers.get('Accept-Ranges')))
+                          print(method+'_CONTENT_RANGE='+str(r.headers.get('Content-Range')))
+                          print(method+'_CONTENT_LENGTH='+str(r.headers.get('Content-Length')))
+                          if method=='RANGE':
+                              piece=r.read(1024)
+                              print('RANGE_FIRST4_HEX='+piece[:4].hex())
+                              if r.status==206 and piece[:2]==b'PK':
+                                  print('RESULT=PASS_PIXEL_OTA_REMOTE_RANGE')
+                                  raise SystemExit(0)
+                  except (HTTPError,URLError,TimeoutError) as e:
+                      print(method+'_ERROR='+type(e).__name__+' code='+str(getattr(e,'code','n/a')))
+          raise SystemExit('RESULT=BLOCKED_PIXEL_OTA_RANGE_ACCESS')
+          PY
+      - name: Resource usage
+        if: always()
+        run: df -h "$RUNNER_TEMP"
