@@ -12,6 +12,7 @@ on:
           - manifest
           - device
           - vendor-metadata
+          - vendor-tree
 
 permissions:
   contents: read
@@ -78,6 +79,28 @@ jobs:
           got="$(git ls-remote https://gitlab.com/ramshell688/proprietary_vendor_xiaomi_annibale.git refs/heads/lineage-24.0 | awk '{print $1}')"
           test "$got" = "f34647e4a03e376251b8ff32e650ceb9d9c13885"
           echo 'PASS: public vendor lineage-24.0 ref matches pinned SHA' >> "$GITHUB_STEP_SUMMARY"
+
+
+      - name: Checkout actual GitLab vendor tree without blob payloads
+        if: ${{ inputs.phase == 'vendor-tree' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VENDOR="$RUNNER_TEMP/vendor-annibale-a17"
+          git -c protocol.version=2 clone --depth=1 --single-branch \
+            --branch lineage-24.0 --filter=blob:none --no-checkout \
+            https://gitlab.com/ramshell688/proprietary_vendor_xiaomi_annibale.git \
+            "$VENDOR"
+          test "$(git -C "$VENDOR" rev-parse HEAD)" = "f34647e4a03e376251b8ff32e650ceb9d9c13885"
+          curl --fail --location --silent --show-error --retry 2 \
+            --max-time 90 \
+            "https://raw.githubusercontent.com/xiaomi-annibale/android_device_xiaomi_annibale/f72856e059954c73eb43c7ce529008ba9d3c36ca/proprietary-files.txt" \
+            -o "$RUNNER_TEMP/annibale-proprietary-files.txt"
+          python3 "$GITHUB_WORKSPACE/scripts/audit_vendor_git.py" \
+            --vendor-git "$VENDOR" \
+            --proprietary-files "$RUNNER_TEMP/annibale-proprietary-files.txt"
+          echo 'PASS: actual pinned GitLab Git tree and 11 ArcSoft pointers readable; precisely 5 known binaries require offline overlay' >> "$GITHUB_STEP_SUMMARY"
+          git -C "$VENDOR" count-objects -v
 
       - name: Resource usage
         if: always()
