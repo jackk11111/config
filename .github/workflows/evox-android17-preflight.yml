@@ -14,6 +14,7 @@ on:
           - vendor-metadata
           - vendor-tree
           - vendor-checkout
+          - vendor-lfs
 
 permissions:
   contents: read
@@ -135,6 +136,36 @@ jobs:
           echo 'PASS: actual vendor checkout materialized; 5 ArcSoft absent by original source, 11 LFS pointers require future payload fetch' >> "$GITHUB_STEP_SUMMARY"
           du -sh "$VENDOR"
           df -h "$RUNNER_TEMP"
+
+
+      - name: Fetch actual original ArcSoft Git LFS bytes and verify all 11 SHA256
+        if: ${{ inputs.phase == 'vendor-lfs' }}
+        shell: bash
+        timeout-minutes: 35
+        run: |
+          set -euo pipefail
+          command -v git
+          git lfs version
+          VENDOR="$RUNNER_TEMP/vendor-annibale-a17"
+          test ! -e "$VENDOR"
+          git -c protocol.version=2 clone --depth=1 --single-branch \
+            --branch lineage-24.0 --filter=blob:none --no-checkout \
+            https://gitlab.com/ramshell688/proprietary_vendor_xiaomi_annibale.git \
+            "$VENDOR"
+          test "$(git -C "$VENDOR" rev-parse HEAD)" = "f34647e4a03e376251b8ff32e650ceb9d9c13885"
+          export GIT_LFS_SKIP_SMUDGE=1
+          timeout 25m git -C "$VENDOR" -c filter.lfs.required=false checkout --force --detach \
+            f34647e4a03e376251b8ff32e650ceb9d9c13885
+          git -C "$VENDOR" lfs install --local
+          df -h "$VENDOR"
+          # Only the 11 existing ArcSoft LFS objects, never unrelated blobs.
+          timeout 15m git -C "$VENDOR" lfs fetch \
+            --include="proprietary/odm/lib64/libarcsoft*,proprietary/odm/etc/camera/libarcsoft*" \
+            origin HEAD
+          git -C "$VENDOR" lfs checkout
+          python3 "$GITHUB_WORKSPACE/scripts/audit_vendor_lfs.py" --vendor "$VENDOR"
+          echo 'PASS: all 11 original ArcSoft GitLab LFS payload bytes match their committed size and SHA256; 5 missing previously reconstructed separately' >> "$GITHUB_STEP_SUMMARY"
+          df -h "$VENDOR"
 
       - name: Resource usage
         if: always()
