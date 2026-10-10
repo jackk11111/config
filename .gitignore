@@ -1,9 +1,0 @@
-# Python generated files
-__pycache__/
-*.py[cod]
-
-# Local/build outputs
-wear7-final-report/
-wear7-final-candidate/
-*.log
-*.tmp

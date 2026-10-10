@@ -1,19 +1,26 @@
-# TicWatch Pro 5 / Enduro (dace) — riferimenti stabili
+# Evolution X Android 17 — POCO F8 Pro / Redmi K90 (annibale)
 
-## Stato corrente (9 ottobre 2026)
-- Sistema utilizzato sull'orologio: **Wear OS 4 / Android 13**. Il porting Wear 7 NON e' stato qualificato per l'uso quotidiano e non va presentato come funzionante.
-- Kernel attualmente operativo: **Linux 5.15.220**, con **KernelSU Next 3.4.0** e **SuSFS 2.3.0** integrati. Questa e' la configurazione confermata sul dispositivo, distinta dal kernel *clean/no-KSU* usato nei precedenti esperimenti Wear 7.
-- Recovery Wi-Fi/ADB e decrypt: e' stata qualificata una variante autonoma dopo test zero-state il 1 ottobre 2026. La presenza di immagini e di ulteriori esperimenti su GitHub non modifica automaticamente tale baseline.
-- Funzioni gia' ottenute sul dispositivo: root e spoof persistente, connessioni ADB wireless, watchface personalizzata, Google Wallet, chiamate WhatsApp, YouTube adattato. La migrazione Gemini 1.39 e' un progetto separato, da valutare rispetto ai test realmente conclusi.
+This public repository is repurposed from an older TicWatch project; its previous
+history remains reachable through older Git commits. The GitHub repo name was not
+renamed because the available connection cannot change repository settings.
 
-## Dove sono i materiali affidabili
-- **File di installazione e backup attuali**: copie mantenute sul telefono dell'utente; verificare nome, SHA-256 e provenienza prima di flashare.
-- **Codice KernelSU Next**: repository [ReSukiSU](https://github.com/jackk11111/ReSukiSU), da NON ridurre a un elenco di esempi: i sorgenti sono necessari.
-- **Lavori storici sul kernel 5.15.220**: branch `ticwatch-max-lts-220` e `ticwatch-max-lts-220-incremental` di questo repository; non presumere che ogni loro build corrisponda esattamente all'immagine flashata.
-- **Baseline kernel clean usata per i test Wear 7**: note sotto `kernel/`; non e' il kernel con KSU che sta funzionando oggi.
-- **Recovery**: `recovery/README.md`.
-- **Wear 7 (stato, failure signature, prerequisiti futuri)**: `wear7/README.md`.
+## Purpose
+Free, **manual** GitHub Actions preflight only. No full Android sync, no ROM build,
+no phone flashing, no Git LFS binary payloads pushed to GitHub.
 
-Questo `main` e' intenzionalmente un indice tecnico leggero, NON un sistema di build attivo. Le build e i workflow provvisori Wear 7 sono stati rimossi dal tree corrente per evitare l'uso accidentale di immagini non qualificate.
+## Pinned baseline (2026-10-10)
+- EvoX cnb manifest SHA: `8e41c899421748f2738a60e5757a0be2c3e353bb`
+- Annibale device / kernel / main proprietary vendor / hardware Xiaomi are pinned
+  in `manifest/annibale.xml`.
+- The five missing proprietary ArcSoft libraries were reconstructed and audited
+  locally; the binary files **are intentionally NOT stored in this repository**.
+- The standalone MiuiCamera Android 16 vendor is NOT part of CORE.
 
-Regola di prosecuzione: ripartire da baseline, esiti gia' dimostrati e primo gate non passato; non ricostruire catene di test fallite senza nuova evidenza.
+## Run
+Actions → **EvoX Android 17 - annibale preflight (free)** → Run workflow:
+1. `manifest` (resolve manifests, check collisions and SHA)
+2. If 1 passes, `device` (sync only device/kernel/hardware Xiaomi)
+3. `vendor-metadata` only for public GitLab branch SHA, not the vendor binary checkout.
+
+This configuration requires a public repository for free standard GitHub runners.
+A passing CI preflight does not demonstrate a successful ROM build or runtime stability.

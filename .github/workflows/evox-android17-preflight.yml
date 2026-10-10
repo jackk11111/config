@@ -1,0 +1,87 @@
+name: EvoX Android 17 - annibale preflight (free)
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        type: choice
+        description: "Targeted check; no full Android sync, build, or flash"
+        required: true
+        default: manifest
+        options:
+          - manifest
+          - device
+          - vendor-metadata
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GIT_LFS_SKIP_SMUDGE: "1"
+      MANIFEST_SHA: 8e41c899421748f2738a60e5757a0be2c3e353bb
+      EVOX_ROOT: ${{ runner.temp }}/evox-a17
+      PHASE: ${{ inputs.phase }}
+    steps:
+      - name: Checkout CI only
+        uses: actions/checkout@v4
+
+      - name: Install repo and validate pinned local manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check_sources.py manifest manifest/annibale.xml
+          git config --global user.name "EvoX Preflight CI"
+          git config --global user.email "evox-ci@users.noreply.github.com"
+          mkdir -p "$HOME/bin"
+          curl --fail --location --silent --show-error --retry 2 \
+            https://storage.googleapis.com/git-repo-downloads/repo \
+            -o "$HOME/bin/repo"
+          chmod 755 "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/repo" version
+
+      - name: Resolve EvoX cnb manifest (NO full sync)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVOX_ROOT"
+          cd "$EVOX_ROOT"
+          repo init -u https://github.com/Evolution-X/manifest -b cnb --git-lfs
+          git -C .repo/manifests checkout --detach "$MANIFEST_SHA"
+          test "$(git -C .repo/manifests rev-parse HEAD)" = "$MANIFEST_SHA"
+          mkdir -p .repo/local_manifests
+          cp "$GITHUB_WORKSPACE/manifest/annibale.xml" .repo/local_manifests/annibale.xml
+          repo manifest -o "$RUNNER_TEMP/resolved.xml"
+          python3 "$GITHUB_WORKSPACE/scripts/check_sources.py" resolved "$RUNNER_TEMP/resolved.xml"
+          echo 'PASS: EvoX manifest resolved with annibale local projects' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sync only three small device-related repositories
+        if: ${{ inputs.phase == 'device' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$EVOX_ROOT"
+          repo sync -c -j2 --no-manifest-update --no-tags --fail-fast \
+            device/xiaomi/annibale device/xiaomi/annibale-kernel hardware/xiaomi
+          python3 "$GITHUB_WORKSPACE/scripts/check_sources.py" device "$EVOX_ROOT"
+          echo 'PASS: three device repositories and kernel load list checked' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate GitLab vendor ref without large download
+        if: ${{ inputs.phase == 'vendor-metadata' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          got="$(git ls-remote https://gitlab.com/ramshell688/proprietary_vendor_xiaomi_annibale.git refs/heads/lineage-24.0 | awk '{print $1}')"
+          test "$got" = "f34647e4a03e376251b8ff32e650ceb9d9c13885"
+          echo 'PASS: public vendor lineage-24.0 ref matches pinned SHA' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Resource usage
+        if: always()
+        shell: bash
+        run: |
+          df -h
+          echo "No Android compilation, no proprietary binary uploads, no flash."

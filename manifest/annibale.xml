@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Evolution X Android 17 / POCO F8 Pro annibale.
+     Pin verified 2026-10-10; static source checks only; NO build. -->
+<manifest>
+  <remote name="annibale-gitlab" fetch="https://gitlab.com/" />
+  <project name="xiaomi-annibale/android_device_xiaomi_annibale"
+           path="device/xiaomi/annibale" remote="github"
+           revision="f72856e059954c73eb43c7ce529008ba9d3c36ca"
+           upstream="refs/heads/lineage-24.0" />
+  <project name="xiaomi-annibale/android_device_xiaomi_annibale-kernel"
+           path="device/xiaomi/annibale-kernel" remote="github"
+           revision="1de1a259b485155670b1fba04b7445ff37a1ec52"
+           upstream="refs/heads/lineage-24.0" />
+  <project name="ramshell688/proprietary_vendor_xiaomi_annibale"
+           path="vendor/xiaomi/annibale" remote="annibale-gitlab"
+           revision="f34647e4a03e376251b8ff32e650ceb9d9c13885"
+           upstream="refs/heads/lineage-24.0" />
+  <project name="LineageOS/android_hardware_xiaomi"
+           path="hardware/xiaomi" remote="github"
+           revision="7dd87795288bf6713795f112056b1bf549355c81"
+           upstream="refs/heads/lineage-24.0" />
+</manifest>
