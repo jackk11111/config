@@ -1,0 +1,133 @@
+name: EvoX A17 annibale - GMS integration gate 9 (free)
+
+on:
+  push:
+    paths:
+      - '.github/workflows/evox-android17-gms-preflight.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gms-gate9:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GMS_SHA: 3e0987a856ee8bdd21b9ff1983a8e182873a64ad
+      EVOX_VENDOR_SHA: 3d76beee5a9c4c49d68faab48aa51e3d7bce458a
+      EVOX_MANIFEST_SHA: 8e41c899421748f2738a60e5757a0be2c3e353bb
+      DEVICE_SHA: f72856e059954c73eb43c7ce529008ba9d3c36ca
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - name: Check pinned product GApps Aperture inheritance
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, urllib.request
+          def gh(repo,sha,path):
+              url=f'https://raw.githubusercontent.com/{repo}/{sha}/{path}'
+              return urllib.request.urlopen(url,timeout=35).read().decode('utf-8')
+          device=os.environ['DEVICE_SHA']; vendor=os.environ['EVOX_VENDOR_SHA']; manifest=os.environ['EVOX_MANIFEST_SHA']
+          ap=gh('xiaomi-annibale/android_device_xiaomi_annibale',device,'AndroidProducts.mk')
+          product=gh('xiaomi-annibale/android_device_xiaomi_annibale',device,'lineage_annibale.mk')
+          board=gh('xiaomi-annibale/android_device_xiaomi_annibale',device,'BoardConfig.mk')
+          devmk=gh('xiaomi-annibale/android_device_xiaomi_annibale',device,'device.mk')
+          full=gh('Evolution-X/vendor_evolution',vendor,'config/common_full_phone.mk')
+          mobile=gh('Evolution-X/vendor_evolution',vendor,'config/common_mobile_full.mk')
+          snippet=gh('Evolution-X/manifest',manifest,'snippets/evolution.xml')
+          lineage=gh('Evolution-X/manifest',manifest,'snippets/lineage.xml')
+          tests={
+            'product_selected':'$(LOCAL_DIR)/lineage_annibale.mk' in ap,
+            'device_primary_product':'device/xiaomi/annibale/device.mk' in product,
+            'lineage_full_inheritance':'vendor/lineage/config/common_full_phone.mk' in product,
+            'evox_vendor_primary':'vendor/xiaomi/annibale/annibale-vendor.mk' in devmk,
+            'evox_vendor_board':'include vendor/xiaomi/annibale/BoardConfigVendor.mk' in board,
+            'gms_default_true':'WITH_GMS ?= true' in full,
+            'gms_full_default':'vendor/gms/gms_full.mk' in full,
+            'gms_options_mini':'TARGET_USES_MINI_GAPPS' in full,
+            'gms_options_pico':'TARGET_USES_PICO_GAPPS' in full,
+            'aperture_product':'Aperture' in mobile,
+            'aperture_manifest':'path="packages/apps/Aperture"' in lineage,
+            'gms_manifest':'path="vendor/gms"' in snippet,
+            'evox_vendor_manifest':'path="vendor/lineage"' in snippet,
+            'miuicamera_optional':'inherit-product-if-exists, device/xiaomi/annibale-miuicamera/device.mk' in product,
+          }
+          for name, ok in tests.items():
+              print(('PASS' if ok else 'FAIL')+': '+name)
+          if not all(tests.values()): raise SystemExit('RESULT=FAIL_STATIC_PRODUCT_CHAIN')
+          print('RESULT=PASS_STATIC_PRODUCT_CHAIN_WITH_FULL_GAPPS_DEFAULT')
+          print('NOT_CHECKED=actual make evaluation, Soong, full sync, runtime')
+          PY
+      - name: Query FULL GApps Git LFS batch server without payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/evox-gms-gate9"
+          git -c protocol.version=2 clone --filter=blob:none --no-checkout --depth=1 \
+            --single-branch --branch cnb https://github.com/Evolution-X/vendor_gms.git "$ROOT"
+          test "$(git -C "$ROOT" rev-parse HEAD)" = "$GMS_SHA" || {
+            echo 'RESULT=BLOCKED_GMS_SOURCE_DRIFT'; exit 2;
+          }
+          python3 - "$ROOT" <<'PY'
+          import os,sys,re,json,subprocess,urllib.request,urllib.error
+          from pathlib import Path
+          root=Path(sys.argv[1])
+          def show(path):
+              return subprocess.check_output(['git','-C',str(root),'show','HEAD:'+path],timeout=90)
+          files=['gms_full.mk','product/blobs/product_blobs.mk','system/blobs/system_blobs.mk','system_ext/blobs/system-ext_blobs.mk']
+          for file in files:
+              data=show(file)
+              if not data: raise SystemExit('RESULT=FAIL_EMPTY_GMS_SOURCE:'+file)
+              print('PASS_GMS_SOURCE='+file+' bytes='+str(len(data)))
+          full=show('gms_full.mk').decode()
+          if 'Photos' not in full or 'Phonesky' not in full or 'vendor/gms/product/blobs/product_blobs.mk' not in full:
+              raise SystemExit('RESULT=FAIL_GMS_FULL_CONTENT')
+          config=show('.lfsconfig').decode()
+          match=re.search(r'(?m)^\s*url\s*=\s*["\x27]?([^"\x27\r\n]+)',config)
+          if not match: raise SystemExit('RESULT=FAIL_LFS_ENDPOINT_UNDEFINED')
+          endpoint=match.group(1).strip()
+          if endpoint!='https://git.evolution-x.org/Evolution-X-LFS/blobs.git/info/lfs':
+              raise SystemExit('RESULT=FAIL_UNEXPECTED_LFS_ENDPOINT')
+          paths=['product/packages/apps/Photos/Photos.apk',
+                 'product/packages/privileged_apps/Velvet/Velvet.apk',
+                 'product/packages/privileged_apps/Phonesky/Phonesky.apk',
+                 'apex/com.google.android.gmssystem.prodvic.apex']
+          objects=[]
+          for path in paths:
+              pointer=show(path)
+              m=re.fullmatch(rb'version https://git-lfs.github.com/spec/v1\r?\noid sha256:([a-f0-9]{64})\r?\nsize ([0-9]+)\r?\n?',pointer)
+              if not m: raise SystemExit('RESULT=FAIL_GMS_LFS_POINTER:'+path)
+              objects.append({'oid':m.group(1).decode(),'size':int(m.group(2))})
+              print('PASS_LFS_POINTER='+path+' bytes='+m.group(2).decode())
+          payload=json.dumps({'operation':'download','transfers':['basic'],'objects':objects}).encode()
+          req=urllib.request.Request(endpoint+'/objects/batch', data=payload,method='POST',headers={
+               'Content-Type':'application/vnd.git-lfs+json','Accept':'application/vnd.git-lfs+json',
+               'User-Agent':'git-lfs/3.0 EvoX-annibale-preflight'})
+          try:
+              with urllib.request.urlopen(req,timeout=45) as r:
+                  status=r.status; response=json.loads(r.read(1048576))
+          except urllib.error.HTTPError as e:
+              print('LFS_BATCH_HTTP_STATUS='+str(e.code))
+              raise SystemExit('RESULT=BLOCKED_GMS_LFS_SERVER_HTTP')
+          except (urllib.error.URLError,TimeoutError) as e:
+              print('LFS_BATCH_NETWORK_ERROR='+type(e).__name__)
+              raise SystemExit('RESULT=BLOCKED_GMS_LFS_SERVER_NETWORK')
+          if status!=200: raise SystemExit('RESULT=BLOCKED_GMS_LFS_SERVER_STATUS')
+          got={x.get('oid'):x for x in response.get('objects',[])}
+          for obj in objects:
+              x=got.get(obj['oid'])
+              if not x or x.get('size')!=obj['size'] or x.get('error') or not x.get('actions',{}).get('download',{}).get('href'):
+                  raise SystemExit('RESULT=BLOCKED_GMS_LFS_OBJECT_METADATA')
+          print('LFS_BATCH_HTTP_STATUS=200')
+          print('CHECKED_LFS_METADATA='+str(len(objects)))
+          print('RESULT=PASS_GMS_LFS_BATCH_METADATA_ONLY')
+          print('NOT_CHECKED=LFS payload bytes and hashes, remaining GMS LFS files, full sync, build')
+          PY
+      - name: Record resource usage
+        if: always()
+        shell: bash
+        run: |
+          df -h "$RUNNER_TEMP"
+          echo 'NO ROM BUILD. NO FULL SYNC. NO LFS PAYLOAD DOWNLOAD. NO PHONE FLASH.'
