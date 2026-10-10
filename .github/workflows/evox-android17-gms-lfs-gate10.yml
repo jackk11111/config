@@ -1,0 +1,99 @@
+name: EvoX A17 annibale - FULL GApps LFS gate 10 (free)
+on:
+  push:
+    paths:
+      - '.github/workflows/evox-android17-gms-lfs-gate10.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  gms-lfs-bytes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GMS_SHA: 3e0987a856ee8bdd21b9ff1983a8e182873a64ad
+      GIT_LFS_SKIP_SMUDGE: '1'
+    steps:
+      - name: Verify all tracked GMS LFS bytes, stream and discard
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/evox-gms-a17"
+          git -c protocol.version=2 clone --filter=blob:none --depth=1 --no-checkout \
+            --single-branch --branch cnb https://github.com/Evolution-X/vendor_gms.git "$ROOT"
+          test "$(git -C "$ROOT" rev-parse HEAD)" = "$GMS_SHA" || { echo 'BLOCKED_GMS_SOURCE_DRIFT'; exit 2; }
+          python3 - "$ROOT" <<'PY'
+          import sys,re,fnmatch,json,subprocess,urllib.request,urllib.error,hashlib
+          from pathlib import Path
+          root=Path(sys.argv[1])
+          def git(*args): return subprocess.check_output(['git','-C',str(root),*args],timeout=90)
+          def show(path): return git('show','HEAD:'+path)
+          attrs=show('.gitattributes').decode().splitlines()
+          patterns=[line.split()[0] for line in attrs if 'filter=lfs' in line]
+          all_files=git('ls-tree','-r','--name-only','HEAD').decode().splitlines()
+          names=sorted({p for p in all_files for pattern in patterns if fnmatch.fnmatchcase(p,pattern)})
+          if not 8<=len(names)<=20: raise SystemExit('RESULT=FAIL_UNEXPECTED_GMS_LFS_FILE_COUNT count='+str(len(names)))
+          ptr=re.compile(rb'version https://git-lfs.github.com/spec/v1\r?\noid sha256:([a-f0-9]{64})\r?\nsize ([0-9]+)\r?\n?\Z')
+          entries=[]
+          for name in names:
+              m=ptr.fullmatch(show(name))
+              if not m: raise SystemExit('RESULT=FAIL_LFS_POINTER:'+name)
+              entries.append((name,m.group(1).decode(),int(m.group(2))))
+          total=sum(t[2] for t in entries)
+          print('EXPECTED_GMS_LFS_FILES='+str(len(entries)))
+          print('EXPECTED_GMS_LFS_BYTES='+str(total))
+          if total>4*1024**3: raise SystemExit('RESULT=STOP_DOWNLOAD_SIZE_OVER_4GIB')
+          config=show('.lfsconfig').decode()
+          match=re.search(r'(?m)^\s*url\s*=\s*"([^"]+)"',config)
+          if not match or match.group(1)!='https://git.evolution-x.org/Evolution-X-LFS/blobs.git/info/lfs':
+              raise SystemExit('RESULT=FAIL_GMS_LFS_SERVER_CONFIG')
+          endpoint=match.group(1)
+          batch=json.dumps({'operation':'download','transfers':['basic'],
+                            'objects':[{'oid':oid,'size':size} for _,oid,size in entries]}).encode()
+          req=urllib.request.Request(endpoint+'/objects/batch',data=batch,method='POST',headers={
+               'Content-Type':'application/vnd.git-lfs+json','Accept':'application/vnd.git-lfs+json',
+               'User-Agent':'git-lfs/3.0 EvoX-annibale-integrity'})
+          try:
+              with urllib.request.urlopen(req,timeout=60) as r: meta=json.loads(r.read(1024*1024))
+          except (urllib.error.HTTPError,urllib.error.URLError,TimeoutError) as e:
+              print('FIRST_FAILURE=LFS_BATCH '+type(e).__name__)
+              raise SystemExit('RESULT=BLOCKED_GMS_LFS_METADATA')
+          mapped={x.get('oid'):x for x in meta.get('objects',[])}
+          for _,oid,size in entries:
+              o=mapped.get(oid)
+              if not o or o.get('error') or o.get('size')!=size or not o.get('actions',{}).get('download',{}).get('href'):
+                  raise SystemExit('RESULT=BLOCKED_GMS_LFS_OBJECT:'+oid)
+          verified=0
+          for name,oid,size in sorted(entries,key=lambda e:e[2]):
+              action=mapped[oid]['actions']['download']
+              href=action['href']
+              if not href.startswith('https://'): raise SystemExit('RESULT=FAIL_INSECURE_GMS_LFS_URL')
+              headers=action.get('header') or {}
+              request=urllib.request.Request(href,headers=headers)
+              h=hashlib.sha256(); count=0
+              try:
+                  with urllib.request.urlopen(request,timeout=180) as r:
+                      while True:
+                          chunk=r.read(4*1024*1024)
+                          if not chunk: break
+                          count+=len(chunk); h.update(chunk)
+                          if count>size: raise ValueError('content larger than expected')
+              except (urllib.error.HTTPError,urllib.error.URLError,TimeoutError,ValueError) as e:
+                  print('FIRST_FAILURE='+name+' '+type(e).__name__)
+                  raise SystemExit('RESULT=FAIL_GMS_LFS_DOWNLOAD')
+              if count!=size or h.hexdigest()!=oid:
+                  print('FIRST_FAILURE='+name+' SIZE_OR_SHA256_MISMATCH')
+                  raise SystemExit('RESULT=FAIL_GMS_LFS_INTEGRITY')
+              verified+=count
+              print('PASS '+name+' bytes='+str(count)+' sha256='+oid)
+          print('CHECKED_GMS_LFS_FILES='+str(len(entries)))
+          print('VERIFIED_GMS_LFS_BYTES='+str(verified))
+          print('RESULT=PASS_ALL_GMS_LFS_BYTES_PINNED_SHA')
+          print('NOT_CHECKED=non-LFS Google blobs, full repo sync, product make evaluation, Soong, runtime')
+          PY
+      - name: Resource use / no artifacts
+        if: always()
+        shell: bash
+        run: |
+          df -h "$RUNNER_TEMP"
+          echo 'No full ROM source sync, build, proprietary upload or flashing.'
