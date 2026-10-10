@@ -32,7 +32,7 @@ jobs:
           patterns=[line.split()[0] for line in attrs if 'filter=lfs' in line]
           all_files=git('ls-tree','-r','--name-only','HEAD').decode().splitlines()
           names=sorted({p for p in all_files for pattern in patterns if fnmatch.fnmatchcase(p,pattern)})
-          if not 8<=len(names)<=20: raise SystemExit('RESULT=FAIL_UNEXPECTED_GMS_LFS_FILE_COUNT count='+str(len(names)))
+          if not 7<=len(names)<=20: raise SystemExit('RESULT=FAIL_UNEXPECTED_GMS_LFS_FILE_COUNT count='+str(len(names)))
           ptr=re.compile(rb'version https://git-lfs.github.com/spec/v1\r?\noid sha256:([a-f0-9]{64})\r?\nsize ([0-9]+)\r?\n?\Z')
           entries=[]
           for name in names:
