@@ -16,8 +16,12 @@ if mode in ("manifest", "resolved"):
     xml = ET.parse(path).getroot()
     assert xml.tag == "manifest", "Invalid root element"
     projects = xml.findall("project")
-    paths = [p.get("path") for p in projects]
-    assert len(paths) == len(set(paths)), "Duplicate project paths"
+    # repo manifest -o omits "path" when it equals "name" (repo manifest_xml.py).
+    # Treat that omission as the documented default, NOT a duplicate None.
+    paths = [p.get("path") or p.get("name") for p in projects]
+    assert all(paths), "Project with neither path nor name"
+    duplicates = sorted({p for p in paths if paths.count(p) > 1})
+    assert not duplicates, f"Duplicate effective project paths: {duplicates[:20]}"
     for key, sha in PINS.items():
         hits = [p for p in projects if p.get("path") == key]
         assert len(hits) == 1, f"Missing project: {key}"
