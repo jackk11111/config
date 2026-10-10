@@ -13,6 +13,7 @@ on:
           - device
           - vendor-metadata
           - vendor-tree
+          - vendor-checkout
 
 permissions:
   contents: read
@@ -101,6 +102,39 @@ jobs:
             --proprietary-files "$RUNNER_TEMP/annibale-proprietary-files.txt"
           echo 'PASS: actual pinned GitLab Git tree and 11 ArcSoft pointers readable; precisely 5 known binaries require offline overlay' >> "$GITHUB_STEP_SUMMARY"
           git -C "$VENDOR" count-objects -v
+
+
+      - name: Materialize pinned vendor Git checkout without Git LFS payloads
+        if: ${{ inputs.phase == 'vendor-checkout' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VENDOR="$RUNNER_TEMP/vendor-annibale-a17"
+          test ! -e "$VENDOR"
+          echo "Free space before checkout:"
+          df -h "$RUNNER_TEMP"
+          # GitLab supports the partial clone previously verified in vendor-tree.
+          # Checking out will fetch ordinary Git objects; skip Git LFS smudge.
+          export GIT_LFS_SKIP_SMUDGE=1
+          git -c protocol.version=2 clone --depth=1 --single-branch \
+            --branch lineage-24.0 --filter=blob:none --no-checkout \
+            https://gitlab.com/ramshell688/proprietary_vendor_xiaomi_annibale.git \
+            "$VENDOR"
+          test "$(git -C "$VENDOR" rev-parse HEAD)" = "f34647e4a03e376251b8ff32e650ceb9d9c13885"
+          FREE_KIB=$(df -Pk "$RUNNER_TEMP" | awk 'END{print $4}')
+          test "$FREE_KIB" -ge 4194304 || {
+            echo "BLOCKED: less than 4 GiB free before vendor checkout"; exit 2; }
+          timeout 25m git -C "$VENDOR" -c filter.lfs.required=false checkout --force --detach \
+            f34647e4a03e376251b8ff32e650ceb9d9c13885
+          curl --fail --location --silent --show-error --retry 2 --max-time 90 \
+            "https://raw.githubusercontent.com/xiaomi-annibale/android_device_xiaomi_annibale/f72856e059954c73eb43c7ce529008ba9d3c36ca/proprietary-files.txt" \
+            -o "$RUNNER_TEMP/annibale-proprietary-files.txt"
+          python3 "$GITHUB_WORKSPACE/scripts/audit_vendor_checkout.py" \
+            --vendor "$VENDOR" \
+            --proprietary-files "$RUNNER_TEMP/annibale-proprietary-files.txt"
+          echo 'PASS: actual vendor checkout materialized; 5 ArcSoft absent by original source, 11 LFS pointers require future payload fetch' >> "$GITHUB_STEP_SUMMARY"
+          du -sh "$VENDOR"
+          df -h "$RUNNER_TEMP"
 
       - name: Resource usage
         if: always()
