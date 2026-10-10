@@ -1,0 +1,67 @@
+name: EvoX A17 annibale - FULL GApps Git checkout gate 12 (free)
+on:
+  push:
+    paths:
+      - '.github/workflows/evox-android17-gms-checkout-gate12.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  gms-checkout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GIT_LFS_SKIP_SMUDGE: '1'
+      GMS_SHA: 3e0987a856ee8bdd21b9ff1983a8e182873a64ad
+    steps:
+      - name: Materialize actual pinned GApps Git blobs without LFS re-download
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/evox-gms-checkout"
+          echo 'DISK_BEFORE_CHECKOUT'
+          df -h "$RUNNER_TEMP"
+          FREE_KIB="$(df -Pk "$RUNNER_TEMP" | awk 'END{print $4}')"
+          if test "$FREE_KIB" -lt 10485760; then
+            echo 'RESULT=BLOCKED_DISK_BELOW_10_GIB'
+            exit 2
+          fi
+          git -c protocol.version=2 clone --filter=blob:none --depth=1 --no-checkout \
+            --single-branch --branch cnb https://github.com/Evolution-X/vendor_gms.git "$ROOT"
+          test "$(git -C "$ROOT" rev-parse HEAD)" = "$GMS_SHA" || { echo 'RESULT=FAIL_GMS_REV_DRIFT'; exit 2; }
+          timeout 20m git -C "$ROOT" -c filter.lfs.required=false checkout --force --detach "$GMS_SHA"
+          python3 - "$ROOT" <<'PY'
+          from pathlib import Path
+          import sys,subprocess,re,fnmatch,os
+          root=Path(sys.argv[1])
+          def git(*args):return subprocess.check_output(['git','-C',str(root),*args],timeout=75)
+          actual=git('rev-parse','HEAD').decode().strip()
+          allpaths=[x.decode() for x in git('ls-files','-z').split(b'\0') if x]
+          if len(allpaths)<100:raise SystemExit('RESULT=FAIL_SPARSE_GMS_CHECKOUT')
+          missing=[p for p in allpaths if not os.path.lexists(root/p)]
+          if missing:raise SystemExit('RESULT=FAIL_MISSING_GMS_TRACKED '+repr(missing[:8]))
+          attrs=(root/'.gitattributes').read_text().splitlines()
+          patterns=[l.split()[0] for l in attrs if 'filter=lfs' in l]
+          lfs=sorted({p for p in allpaths for pattern in patterns if fnmatch.fnmatchcase(p,pattern)})
+          ptr=re.compile(rb'version https://git-lfs.github.com/spec/v1\r?\noid sha256:[a-f0-9]{64}\r?\nsize [0-9]+\r?\n?\Z')
+          if len(lfs)!=7:raise SystemExit('RESULT=FAIL_GMS_POINTER_COUNT '+str(len(lfs)))
+          for path in lfs:
+              if not ptr.fullmatch((root/path).read_bytes()):
+                  raise SystemExit('RESULT=FAIL_GMS_LFS_POINTER '+path)
+          for p in ['gms_full.mk','product/blobs/product_blobs.mk','system/blobs/system_blobs.mk','system_ext/blobs/system-ext_blobs.mk']:
+              if not (root/p).is_file() or (root/p).stat().st_size==0:
+                  raise SystemExit('RESULT=FAIL_GMS_REQUIRED_MAKEFILE '+p)
+          sizes=sum((root/p).lstat().st_size for p in allpaths)
+          print('GMS_SHA='+actual)
+          print('GMS_TRACKED_CHECKOUT_PATHS='+str(len(allpaths)))
+          print('GMS_LFS_POINTERS='+str(len(lfs)))
+          print('GMS_MATERIALIZED_GIT_FILE_SIZE_BYTES='+str(sizes))
+          print('RESULT=PASS_GMS_ACTUAL_GIT_CHECKOUT_WITH_LFS_POINTERS')
+          print('LFS_PAYLOADS=already verified in separate gate 10; not fetched in this run')
+          print('NOT_CHECKED=Soong, full repo sync, firmware runtime')
+          PY
+          du -sh "$ROOT"
+          df -h "$RUNNER_TEMP"
+      - name: Resource usage
+        if: always()
+        run: df -h "$RUNNER_TEMP"
