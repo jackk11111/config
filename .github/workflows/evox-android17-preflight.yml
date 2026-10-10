@@ -23,7 +23,7 @@ jobs:
     env:
       GIT_LFS_SKIP_SMUDGE: "1"
       MANIFEST_SHA: 8e41c899421748f2738a60e5757a0be2c3e353bb
-      EVOX_ROOT: ${{ runner.temp }}/evox-a17
+      EVOX_ROOT: ${{ github.workspace }}/.evox-a17
       PHASE: ${{ inputs.phase }}
     steps:
       - name: Checkout CI only
